@@ -5,7 +5,7 @@
  */
 
 import * as path from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 
 const SEMAPHORE_SCRIPT = path.resolve(__dirname, "../bin/pi-semaphore");
@@ -167,6 +167,18 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
   let contextAlertLockName: string | null = null;
   let contextAlertReleased = false;
 
+  async function releaseContextAlertIfThresholdReached(ctx: ExtensionContext): Promise<void> {
+    if (!contextAlertLockName || contextAlertReleased || !contextAlertThreshold) {
+      return;
+    }
+
+    const usage = ctx.getContextUsage();
+    if (usage?.percent !== null && usage?.percent !== undefined && usage.percent >= contextAlertThreshold) {
+      await runSemaphore(pi, ["release", contextAlertLockName]);
+      contextAlertReleased = true;
+    }
+  }
+
   // Abort controller for the currently-running semaphore_wait tool.
   // Set when the tool starts, cleared when it finishes.
   // The input event handler aborts this so a user message interrupts the wait.
@@ -219,15 +231,13 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
     }
   });
 
+  pi.on("turn_end", async (_event, ctx) => {
+    await releaseContextAlertIfThresholdReached(ctx);
+  });
+
   pi.on("agent_end", async (event, ctx) => {
     // Check context alert before releasing the main lock
-    if (contextAlertLockName && !contextAlertReleased && contextAlertThreshold) {
-      const usage = ctx.getContextUsage();
-      if (usage?.percent !== null && usage?.percent !== undefined && usage.percent >= contextAlertThreshold) {
-        await runSemaphore(pi, ["release", contextAlertLockName]);
-        contextAlertReleased = true;
-      }
-    }
+    await releaseContextAlertIfThresholdReached(ctx);
 
     // If the agent ended with a retryable error and we haven't exhausted retries,
     // hold the lock so semaphore_wait callers don't see a spurious release.
