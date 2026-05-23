@@ -1,0 +1,38 @@
+{
+  "name": "pi-ant",
+  "version": "1.0.0",
+  "description": "Ant's local pi extension package",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "personal"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "bin": {
+    "pi-semaphore": "./bin/pi-semaphore",
+    "pi-tmux": "./bin/pi-tmux",
+    "pi-claude-agent": "./bin/pi-claude-agent"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/semaphore-locks.ts",
+      "./extensions/tmux.ts",
+      "./extensions/supervisor.ts",
+      "./extensions/handoff.ts",
+      "./extensions/read-complete.ts",
+      "./extensions/save-conversation.ts",
+      "./extensions/lints.ts",
+      "./extensions/exec-lints.ts",
+      "./extensions/tweaks.ts",
+      "./extensions/tryout.ts",
+      "./extensions/ask.ts",
+      "./extensions/reflect.ts"
+    ]
+  }
+}
