@@ -7,7 +7,7 @@ SEMAPHORE_SCRIPT="${SCRIPT_DIR}/pi-semaphore"
 
 lock_name="${PI_LOCK_NAME:-$(basename "${PWD:-.}")}" 
 model="${PI_CLAUDE_MODEL:-opus}"
-claude_args_raw="${PI_CLAUDE_ARGS:-}"
+claude_argc="${PI_CLAUDE_ARGC:-0}"
 pi_cli_path="${PI_CLI_PATH:-}"
 
 tmp_dir="$(mktemp -d /tmp/pi-claude-agent.XXXXXX)"
@@ -50,15 +50,17 @@ fi
 
 parse_claude_args() {
   EXTRA_CLAUDE_ARGS=()
-  if [[ -z "$claude_args_raw" ]]; then
-    return
+
+  if ! [[ "$claude_argc" =~ ^[0-9]+$ ]]; then
+    echo "error: PI_CLAUDE_ARGC must be a non-negative integer" >&2
+    exit 1
   fi
 
-  # shellcheck disable=SC2034,SC2206,SC2294
-  local parsed_args=()
-  # shellcheck disable=SC2206
-  eval "parsed_args=( ${claude_args_raw} )"
-  EXTRA_CLAUDE_ARGS=("${parsed_args[@]}")
+  local i var_name
+  for ((i = 0; i < claude_argc; i++)); do
+    var_name="PI_CLAUDE_ARG_${i}"
+    EXTRA_CLAUDE_ARGS+=("${!var_name:-}")
+  done
 }
 
 set_idle() {

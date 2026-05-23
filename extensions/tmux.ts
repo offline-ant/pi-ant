@@ -11,9 +11,18 @@ import { Type, type Static } from "typebox";
 const TMUX_SCRIPT = path.resolve(__dirname, "../bin/pi-tmux");
 
 /** Per-pane state for new-only capture */
-const captureState = new Map<string, number>(); // name -> totalLines at last capture
+const captureState = new Map<string, number>(); // target:paneId -> totalLines at last capture
 
 const DEFAULT_MAX_NEW = 500;
+
+function clearCaptureStateForTarget(target: string): void {
+  captureState.delete(target);
+  for (const key of [...captureState.keys()]) {
+    if (key.startsWith(`${target}:`)) {
+      captureState.delete(key);
+    }
+  }
+}
 
 function isTmuxAvailable(): boolean {
   return !!process.env.TMUX;
@@ -153,7 +162,9 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params, signal) {
       const explicitLines = params.lines;
       const maxLines = explicitLines ?? DEFAULT_MAX_NEW;
-      const stateKey = params.name;
+      const paneIdResult = await runTmux(pi, ["pane-id", params.name], signal);
+      const paneId = paneIdResult.code === 0 ? paneIdResult.stdout.trim() : undefined;
+      const stateKey = paneId ? `${params.name}:${paneId}` : params.name;
 
       let text: string;
       let resultCode: number;
@@ -330,7 +341,7 @@ export default function (pi: ExtensionAPI) {
     description: "Kill a tmux pane by lock name or pane id.",
     parameters: tmuxKillParams,
     async execute(_toolCallId, params, signal) {
-      captureState.delete(params.name);
+      clearCaptureStateForTarget(params.name);
       const args = ["kill", params.name];
       const result = await runTmux(pi, args, signal);
       const text = outputText(result.stdout, result.stderr);
