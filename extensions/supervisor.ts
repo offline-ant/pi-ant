@@ -21,7 +21,7 @@ export default function (pi: ExtensionAPI) {
 
       const message = `${supervisorMessage} Your jobs as supervisor:
 1. Observe the main agent and prevent it from going dormant.
-2. Ensure it stays below 78% context use. If it exceeds it ask it to write a handoff.md and spawn a new agent to continue its work.
+2. Ensure it stays below 89% context use. If it exceeds it ask it to write a handoff.md and spawn a new agent to continue its work.
 3. **Ensure architectural quality** — if the main agent is rushing to a quick fix instead of building a well-structured solution, nudge it to slow down, investigate alternatives, and get the design right. Dependencies are not automatically correct — vendoring, replacing, or changing APIs is on the table if it's the right call. That's the whole point of this supervised workflow.
 4. **Ensure the main agent commits** — when the task is complete, make sure the main agent commits its work before stopping.
 

@@ -32,7 +32,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 const GIT_RESTORE_RE = /\bgit\s+restore\b/i;
 const GIT_CHECKOUT_RE = /\bgit\s+checkout\b/i;
 const GIT_STASH_RE = /\bgit\s+stash\b/i;
-const GREP_CMD_RE = /^\s*grep\b/;
+const GREP_CMD_RE = /(?:^|[;&|]|\bthen\b|\bdo\b)\s*grep\b/;
 const CARGO_FMT_RE = /\bcargo\s+fmt\b/;
 const RUSTFMT_RE = /\brustfmt\b/;
 
