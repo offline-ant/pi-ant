@@ -32,7 +32,8 @@
       "./extensions/tweaks.ts",
       "./extensions/tryout.ts",
       "./extensions/ask.ts",
-      "./extensions/reflect.ts"
+      "./extensions/reflect.ts",
+      "./extensions/hppr-notifications.ts"
     ]
   }
 }
