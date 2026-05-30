@@ -37,4 +37,4 @@ Enable prompt-finished desktop notifications with:
 /hppr-notifications on
 ```
 
-Use `/hppr-notifications` for an interactive on/off toggle, or `/hppr-notifications status` for a short availability hint. The extension only uses an existing `hppr-notification` command. Install/configure the `hppr-notification` package separately and run `hppr-notification listen` in the desktop session for visible popups. `hppr-notification status` reports listener and auth/config state.
+Use `/hppr-notifications` for an interactive on/off toggle, or `/hppr-notifications status` for a short availability hint. The extension uses the existing `uprompt` command. Install/configure `uprompt` separately and run `uprompt listen` in the desktop session for visible popups. `uprompt status` reports listener and identity/config state.
