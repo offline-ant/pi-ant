@@ -1,5 +1,5 @@
 /**
- * HPPR notifications — best-effort desktop notification when a prompt finishes.
+ * HPPR notifications — best-effort uprompt notification when a prompt finishes.
  */
 
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
@@ -23,38 +23,29 @@ interface HpprNotificationsState {
 	enabled: boolean;
 }
 
-export interface HpprNotificationCommand {
-	command: "sh";
+export interface UpromptNotificationCommand {
+	command: "uprompt";
 	args: string[];
 	timeoutMs: number;
 }
 
-export function createHpprNotificationCommand(
+export function createUpromptNotificationCommand(
 	title = NOTIFICATION_TITLE,
 	body = NOTIFICATION_BODY,
-): HpprNotificationCommand {
+): UpromptNotificationCommand {
 	return {
-		command: "sh",
-		args: [
-			"-c",
-			[
-				"command -v hppr-notification >/dev/null 2>&1 || exit 0",
-				'exec hppr-notification send --title "$1" "$2"',
-			].join("\n"),
-			"hppr-notifications",
-			title,
-			body,
-		],
+		command: "uprompt",
+		args: ["notify", "--title", title, body],
 		timeoutMs: NOTIFICATION_TIMEOUT_MS,
 	};
 }
 
-export function sendHpprDesktopNotification(
+export function sendUpromptNotification(
 	title = NOTIFICATION_TITLE,
 	body = NOTIFICATION_BODY,
 	spawnProcess: SpawnProcess = spawn,
 ): void {
-	const notification = createHpprNotificationCommand(title, body);
+	const notification = createUpromptNotificationCommand(title, body);
 	let child: ChildProcess;
 
 	try {
@@ -97,9 +88,9 @@ function normalizeToggleValue(value: string): ToggleValue | undefined {
 	return undefined;
 }
 
-async function hpprNotificationAvailable(pi: ExtensionAPI): Promise<boolean> {
+async function upromptAvailable(pi: ExtensionAPI): Promise<boolean> {
 	try {
-		const result = await pi.exec("sh", ["-c", "command -v hppr-notification >/dev/null 2>&1"], {
+		const result = await pi.exec("sh", ["-c", "command -v uprompt >/dev/null 2>&1"], {
 			timeout: 1_000,
 		});
 		return result.code === 0;
@@ -137,10 +128,10 @@ export default function hpprNotificationsExtension(pi: ExtensionAPI) {
 	}
 
 	async function showStatus(ctx: ExtensionCommandContext) {
-		const available = await hpprNotificationAvailable(pi);
+		const available = await upromptAvailable(pi);
 		const suffix = available
-			? "hppr-notification available; use `hppr-notification status` for listener state."
-			: "hppr-notification not found.";
+			? "uprompt available; use `uprompt status` for listener state."
+			: "uprompt not found.";
 		ctx.ui.notify(`HPPR notifications ${enabled ? "on" : "off"}; ${suffix}`, available ? "info" : "warning");
 	}
 
@@ -231,6 +222,6 @@ export default function hpprNotificationsExtension(pi: ExtensionAPI) {
 
 	pi.on("agent_end", async (event) => {
 		if (!enabled || event.willRetry) return;
-		sendHpprDesktopNotification();
+		sendUpromptNotification();
 	});
 }

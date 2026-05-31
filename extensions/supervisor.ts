@@ -20,8 +20,13 @@ export default function (pi: ExtensionAPI) {
         : `Spawn a tmux-coding-agent named 'main' to execute the plan we just discussed in phases in serial`;
 
       const message = `${supervisorMessage} Your jobs as supervisor:
+
+Important: every tmux-coding-agent you spawn starts with a fresh context and has no previous knowledge of prior agents or their work. When spawning any replacement or follow-up agent, give it all necessary context explicitly, including the task, current state, relevant files, and handoff notes.
+
+Always wait for every tmux-coding-agent you spawn with semaphore_wait(..., timeoutSeconds: 600).
+
 1. Observe the main agent and prevent it from going dormant.
-2. Ensure it stays below 89% context use. If it exceeds it ask it to write a handoff.md and spawn a new agent to continue its work.
+2. Ensure it stays below 89% context use. If it exceeds it, ask it to write a handoff.md and spawn a new agent to continue its work. Assume that new agent knows nothing except what you provide in its initial prompt and the handoff file.
 3. **Ensure architectural quality** — if the main agent is rushing to a quick fix instead of building a well-structured solution, nudge it to slow down, investigate alternatives, and get the design right. Dependencies are not automatically correct — vendoring, replacing, or changing APIs is on the table if it's the right call. That's the whole point of this supervised workflow.
 4. **Ensure the main agent commits** — when the task is complete, make sure the main agent commits its work before stopping.
 

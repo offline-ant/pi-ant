@@ -6,6 +6,7 @@
 
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 
 const TMUX_SCRIPT = path.resolve(__dirname, "../bin/pi-tmux");
@@ -109,15 +110,35 @@ const tmuxCodingAgentParams = Type.Object({
 export type TmuxCodingAgentInput = Static<typeof tmuxCodingAgentParams>;
 
 const minitaskParams = Type.Object({
-  questions: Type.Array(
-    Type.String({ minLength: 1, description: "Question or small task to answer with pi -p" }),
-    {
-      minItems: 1,
-      description: "Independent questions/tasks to solve in serial with pi -p.",
-    },
+  task: Type.String({
+    minLength: 1,
+    description: "One question or small task to answer with a single isolated pi -p run.",
+  }),
+  simple: Type.Optional(
+    Type.Boolean({
+      description:
+        "Use for quick rote tasks, like verifying whether a pattern is used in a file. Runs pi with --provider openai-codex --model gpt-5.3-codex-spark, retrying with --thinking off if that exits 1.",
+    }),
   ),
 });
 export type MinitaskInput = Static<typeof minitaskParams>;
+
+type MinitaskResult = {
+  task: string;
+  answer: string;
+  exitCode: number;
+};
+
+function formatMinitaskResult(result: MinitaskResult): string {
+  const exitLabel = result.exitCode === 0 ? "" : ` (exit code ${result.exitCode})`;
+  return [
+    "## Task",
+    result.task,
+    "",
+    `## Answer${exitLabel}`,
+    result.answer || "(no output)",
+  ].join("\n");
+}
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
@@ -391,75 +412,75 @@ export default function (pi: ExtensionAPI) {
     name: "minitask",
     label: "Minitask",
     description:
-      "Run independent tasks or ask questions about this project or environment.",
+      "Run one isolated small task or question about this project/environment with pi -p. " +
+      "For multiple independent tasks, call this tool multiple times in parallel; do not put dependent followups here because each run has no shared context.",
     parameters: minitaskParams,
     renderCall(args) {
-      const payload = JSON.stringify(args.questions, null, 2);
+      const payloadValue = args.task === undefined
+        ? args
+        : args.simple === true
+          ? { task: args.task, simple: true }
+          : args.task;
+      const payload = JSON.stringify(payloadValue, null, 2) ?? String(payloadValue);
       const lines = ["minitask(", ...payload.split("\n").map((line) => `  ${line}`), ")"];
 
       return {
-        render: (_contentWidth: number) => lines,
+        render: (contentWidth: number) => lines.map((line) => truncateToWidth(line, contentWidth)),
         invalidate: () => {
           /* no-op */
         },
       };
     },
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const results: Array<{ question: string; answer: string; exitCode: number }> = [];
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      let answer = "(no output)";
+      let exitCode = 0;
 
-      for (const question of params.questions) {
-        let answer = "(no output)";
-        let exitCode = 0;
+      try {
+        const runPi = (args: string[]) => pi.exec("pi", args, {
+          signal,
+          cwd: ctx.cwd,
+        });
+        const args = params.simple === true
+          ? ["--provider", "openai-codex", "--model", "gpt-5.3-codex-spark", "-p", params.task]
+          : ["-p", params.task];
+        let result = await runPi(args);
 
-        try {
-          const result = await pi.exec("pi", ["-p", question], {
-            signal,
-            cwd: ctx.cwd,
-          });
-
-          exitCode = result.code;
-          answer = outputText(result.stdout, result.stderr);
-          if (exitCode !== 0) {
-            answer = `(exit code ${exitCode}) ${answer}`;
-          }
-        } catch (err) {
-          if (err instanceof Error && err.name === "AbortError") {
-            throw err;
-          }
-
-          answer = `Error: ${err instanceof Error ? err.message : String(err)}`;
-          exitCode = 1;
+        if (params.simple === true && result.code === 1) {
+          result = await runPi([
+            "--provider",
+            "openai-codex",
+            "--model",
+            "gpt-5.3-codex-spark",
+            "--thinking",
+            "off",
+            "-p",
+            params.task,
+          ]);
         }
 
-        results.push({ question, answer, exitCode });
-
-        if (onUpdate) {
-          onUpdate({
-            content: [
-              {
-                type: "text",
-                text: results
-                  .map((item) => `<question> ${item.question} </question><answer> ${item.answer} </answer>`)
-                  .join("\n"),
-              },
-            ],
-            details: {
-              questionsCount: params.questions.length,
-              results,
-            },
-          });
+        exitCode = result.code;
+        answer = outputText(result.stdout, result.stderr);
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") {
+          throw err;
         }
+
+        answer = `Error: ${err instanceof Error ? err.message : String(err)}`;
+        exitCode = 1;
       }
 
-      const text = results
-        .map((item) => `<question> ${item.question} </question><answer> ${item.answer} </answer>`)
-        .join("\n");
+      const result = {
+        task: params.task,
+        answer,
+        exitCode,
+      };
+      const text = formatMinitaskResult(result);
 
       return {
         content: [{ type: "text", text }],
         details: {
-          questionsCount: results.length,
-          results,
+          simple: params.simple === true,
+          result,
         },
       };
     },
