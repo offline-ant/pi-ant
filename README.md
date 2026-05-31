@@ -9,7 +9,8 @@
 - Complete context injection commands (`/read-complete`, `/bash-complete`).
 - Conversation export command (`/save-conversation`).
 - Personal lint and safety extensions (`lints`, `exec-lints`, `/principles`, `/tryout`).
-- HPPR desktop notifications on prompt completion (`/hppr-notifications`) when `hppr-notification` is available.
+- HPPR desktop notifications on prompt completion (`/hppr-notifications`) through `uprompt`.
+- Working status text tweak that removes the spinner from `Working...`.
 - Interactive clarification tool (`ask`).
 - Reflection memory checkpoint command (`/reflect`).
 
