@@ -5,10 +5,11 @@
  */
 
 import * as path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentToolUpdateCallback, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 
 const SEMAPHORE_SCRIPT = path.resolve(__dirname, "../bin/pi-semaphore");
+const TMUX_SCRIPT = path.resolve(__dirname, "../bin/pi-tmux");
 
 export function sanitizeName(name: string): string {
   return name.replace(/[^A-Za-z0-9._:-]/g, "");
@@ -33,6 +34,14 @@ async function runSemaphore(
   return pi.exec("bash", [SEMAPHORE_SCRIPT, ...args], { signal });
 }
 
+async function runTmux(
+  pi: ExtensionAPI,
+  args: string[],
+  signal?: AbortSignal,
+): Promise<{ code: number; stdout: string; stderr: string; killed: boolean }> {
+  return pi.exec("bash", [TMUX_SCRIPT, ...args], { signal });
+}
+
 function resultText(stdout: string, stderr: string): string {
   const out = stdout.trim();
   const err = stderr.trim();
@@ -47,6 +56,8 @@ function resultText(stdout: string, stderr: string): string {
 
 const MAX_RETRIES = 3;
 const DEFAULT_SEMAPHORE_WAIT_TIMEOUT_SECONDS = 600;
+const SEMAPHORE_WAIT_CAPTURE_INTERVAL_MS = 5000;
+const SEMAPHORE_WAIT_CAPTURE_LINES = 8;
 
 const RETRYABLE_ERROR_PATTERN =
   /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|terminated|retry delay/i;
@@ -126,6 +137,138 @@ function formatUserWaitStatus(names: string[], queuedCount: number): string {
   return `Waiting: ${names.join(", ")}${queued}`;
 }
 
+function getCaptureTarget(lockName: string): string {
+  const childMatch = lockName.match(/^(.+?):(?:watch(?:-\d+)?|context)$/);
+  return childMatch?.[1] ?? lockName;
+}
+
+function getCaptureRequests(names: string[]): Array<{ target: string; labels: string[] }> {
+  const labelsByTarget = new Map<string, string[]>();
+  for (const name of names) {
+    const target = getCaptureTarget(name);
+    const labels = labelsByTarget.get(target) ?? [];
+    labels.push(name);
+    labelsByTarget.set(target, labels);
+  }
+
+  return [...labelsByTarget.entries()].map(([target, labels]) => ({ target, labels }));
+}
+
+function formatCaptureLabel(target: string, labels: string[]): string {
+  if (labels.length === 1 && labels[0] === target) {
+    return target;
+  }
+  return `${target} (${labels.join(", ")})`;
+}
+
+async function buildSemaphoreWaitProgressText(
+  pi: ExtensionAPI,
+  names: string[],
+  timeoutSeconds: number,
+  startedAt: number,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+  const timeoutText = timeoutSeconds > 0 ? `, timeout ${timeoutSeconds}s` : "";
+  const sections: string[] = [];
+
+  for (const request of getCaptureRequests(names)) {
+    if (signal?.aborted) {
+      return undefined;
+    }
+
+    try {
+      const result = await runTmux(
+        pi,
+        ["capture", request.target, String(SEMAPHORE_WAIT_CAPTURE_LINES)],
+        signal,
+      );
+      if (result.code !== 0 || result.killed) {
+        continue;
+      }
+
+      const output = result.stdout.trimEnd();
+      if (output.trim().length === 0) {
+        continue;
+      }
+
+      const label = formatCaptureLabel(request.target, request.labels);
+      const frame = `--- ${label}: last ${SEMAPHORE_WAIT_CAPTURE_LINES} semaphore peek lines ---`;
+      sections.push(`${frame}\n${output}\n${frame}`);
+    } catch (_error) {
+      if (signal?.aborted) {
+        return undefined;
+      }
+    }
+  }
+
+  return [
+    `Waiting for ${names.join(", ")} (${elapsedSeconds}s elapsed${timeoutText})`,
+    sections.length > 0 ? sections.join("\n\n") : "(semaphore peek unavailable)",
+  ].join("\n\n");
+}
+
+function startSemaphoreWaitProgressUpdates(
+  pi: ExtensionAPI,
+  names: string[],
+  timeoutSeconds: number,
+  isPollingEnabled: () => boolean,
+  onUpdate: AgentToolUpdateCallback<SemaphoreWaitDetails> | undefined,
+  signal?: AbortSignal,
+): () => void {
+  if (!onUpdate) {
+    return () => {};
+  }
+
+  const startedAt = Date.now();
+  let stopped = false;
+  let inFlight = false;
+  let timer: ReturnType<typeof setInterval> | undefined;
+
+  const stop = () => {
+    stopped = true;
+    if (timer) {
+      clearInterval(timer);
+      timer = undefined;
+    }
+  };
+
+  const update = () => {
+    if (stopped || inFlight || !isPollingEnabled()) {
+      return;
+    }
+    inFlight = true;
+    void (async () => {
+      try {
+        const text = await buildSemaphoreWaitProgressText(pi, names, timeoutSeconds, startedAt, signal);
+        if (!stopped && text !== undefined) {
+          onUpdate({
+            content: [{ type: "text", text }],
+            details: { names, found: false, code: -1, timeoutSeconds },
+          });
+        }
+      } finally {
+        inFlight = false;
+      }
+    })();
+  };
+
+  if (signal) {
+    if (signal.aborted) {
+      return stop;
+    }
+    signal.addEventListener("abort", stop, { once: true });
+  }
+
+  update();
+  timer = setInterval(update, SEMAPHORE_WAIT_CAPTURE_INTERVAL_MS);
+
+  return () => {
+    stop();
+    signal?.removeEventListener("abort", stop);
+  };
+}
+
 function previewText(text: string): string {
   const singleLine = text.replace(/\s+/g, " ").trim();
   return singleLine.length > 80 ? `${singleLine.slice(0, 77)}...` : singleLine;
@@ -152,6 +295,7 @@ function createSemaphoreWaitResult(
 
 export default function semaphoreLocksExtension(pi: ExtensionAPI) {
   let currentLockName: string | null = null;
+  let semaphoreWaitPollingEnabled = true;
 
   // Track consecutive retryable errors to avoid releasing the lock during auto-retry.
   // pi retries up to MAX_RETRIES times. Each retry triggers agent_end → agent_start.
@@ -378,6 +522,36 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
     },
   });
 
+  const pollSemaphoreWaitHandler = async (args: string, ctx: ExtensionContext): Promise<void> => {
+    const value = args.trim().toLowerCase();
+    if (value.length === 0 || value === "toggle") {
+      semaphoreWaitPollingEnabled = !semaphoreWaitPollingEnabled;
+    } else if (["on", "enable", "enabled", "true", "1"].includes(value)) {
+      semaphoreWaitPollingEnabled = true;
+    } else if (["off", "disable", "disabled", "false", "0"].includes(value)) {
+      semaphoreWaitPollingEnabled = false;
+    } else if (value !== "status") {
+      if (ctx.hasUI) {
+        ctx.ui.notify("Usage: /poll-semaphore_wait [on|off|toggle|status]", "warning");
+      }
+      return;
+    }
+
+    if (ctx.hasUI) {
+      ctx.ui.notify(`semaphore_wait polling ${semaphoreWaitPollingEnabled ? "enabled" : "disabled"}.`, "info");
+    }
+  };
+
+  pi.registerCommand("poll-semaphore_wait", {
+    description: "Toggle semaphore_wait progress polling",
+    handler: pollSemaphoreWaitHandler,
+  });
+
+  pi.registerCommand("poll-sempahore_wait", {
+    description: "Toggle semaphore_wait progress polling",
+    handler: pollSemaphoreWaitHandler,
+  });
+
   pi.registerTool({
     name: "semaphore_wait",
     label: "Wait for Locks",
@@ -387,7 +561,7 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
       "Finish all independent tasks BEFORE calling this. " +
       "For agents spawned via tmux-coding-agent, wait on the lock name (e.g., 'worker').",
     parameters: semaphoreWaitSchema,
-    async execute(_toolCallId, params, signal) {
+    async execute(_toolCallId, params, signal, onUpdate) {
       const { safeNames, timeoutSeconds } = getSemaphoreWaitParams(params);
 
       if (safeNames.length === 0) {
@@ -426,6 +600,15 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
           signal.addEventListener("abort", onToolAbort, { once: true });
         }
       }
+
+      const stopProgressUpdates = startSemaphoreWaitProgressUpdates(
+        pi,
+        safeNames,
+        timeoutSeconds,
+        () => semaphoreWaitPollingEnabled,
+        onUpdate,
+        localAbort.signal,
+      );
 
       try {
         const result = await runSemaphore(
@@ -494,6 +677,7 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
           details: { names: safeNames, found, code: result.code, timeoutSeconds } satisfies SemaphoreWaitDetails,
         };
       } finally {
+        stopProgressUpdates();
         waitAbortController = null;
         if (signal) {
           signal.removeEventListener("abort", onToolAbort);
