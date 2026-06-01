@@ -26,9 +26,6 @@ Load this package as a single pi package from `~/.pi/agent/settings.json`:
 }
 ```
 
-The old `pi-semaphore`, `pi-tmux`, `pi-read-complete`, `pi-save-conversation`, `pi-sol`, `pi-ask`, and `pi-reflect` directories are left in the workspace for now as migration source/history, but active settings should not load them.
-
-On macOS, sync the settings file with the path adjusted to the mac workspace layout, e.g. `/Users/claude/Projects/pi/pi-ant` if using absolute paths.
 
 ## HPPR notifications
 
