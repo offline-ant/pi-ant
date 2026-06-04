@@ -5,7 +5,7 @@
 ## Contents
 
 - Semaphore lock coordination (`semaphore_wait`, `/lock`, `/release`, `/wait`, `/lock-list`) backed by `bin/pi-semaphore`.
-- Tmux workflow tools (`tmux-bash`, `tmux-capture`, `tmux-send`, `tmux-kill`, `tmux-coding-agent`, `minitask`) and tmux commands (`/clear-stale`, `/tmux-list`, `/supervise`, `/handoff`) backed by `bin/pi-tmux`.
+- Tmux workflow tools (`tmux-bash`, `tmux-capture`, `tmux-send`, `tmux-kill`, `tmux-coding-agent`, `minitask`, `smarteditor`) and tmux commands (`/clear-stale`, `/tmux-list`, `/supervise`, `/handoff`) backed by `bin/pi-tmux`.
 - Complete context injection commands (`/read-complete`, `/bash-complete`).
 - Conversation export command (`/save-conversation`).
 - Personal lint and safety extensions (`lints`, `exec-lints`, `/principles`, `/tryout`).
@@ -13,6 +13,8 @@
 - Working status text tweak that removes the spinner from `Working...`.
 - Interactive clarification tool (`ask`).
 - Reflection memory checkpoint command (`/reflect`).
+- Working-directory switch command (`/cwd <path>`) that keeps the current session file open.
+- Git worktree creation command (`/worktree <name>`) that switches pi into the new worktree session.
 
 ## Local settings
 
