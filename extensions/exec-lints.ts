@@ -5,8 +5,8 @@
  * - `grep`: always blocked — use the built-in grep tool instead.
  *
  * Rust formatting:
- * - `cargo fmt`: always blocked — follow existing code style instead.
- * - `rustfmt`: always blocked — follow existing code style instead.
+ * - `cargo fmt`: blocked when invoked as a shell command — follow existing code style instead.
+ * - `rustfmt`: blocked when invoked as a shell command — follow existing code style instead.
  *
  * Git safety:
  * - `git restore`: always blocked (other agents may have uncommitted work).
@@ -33,8 +33,8 @@ const GIT_RESTORE_RE = /\bgit\s+restore\b/i;
 const GIT_CHECKOUT_RE = /\bgit\s+checkout\b/i;
 const GIT_STASH_RE = /\bgit\s+stash\b/i;
 const GREP_CMD_RE = /(?:^|[;&|]|\bthen\b|\bdo\b)\s*grep\b/;
-const CARGO_FMT_RE = /\bcargo\s+fmt\b/;
-const RUSTFMT_RE = /\brustfmt\b/;
+const CARGO_FMT_CMD_RE = /(?:^|[;&|\n]\s*)cargo\s+fmt\b/;
+const RUSTFMT_CMD_RE = /(?:^|[;&|\n]\s*)rustfmt\b/;
 
 const GREP_NOTE =
   "Use the built-in `grep` tool instead of the bash `grep` command. " +
@@ -147,8 +147,8 @@ export default function (pi: ExtensionAPI) {
       };
     }
 
-    // rust formatters — always block
-    if (CARGO_FMT_RE.test(command) || RUSTFMT_RE.test(command)) {
+    // rust formatters — block shell-command invocations, not prose mentions
+    if (CARGO_FMT_CMD_RE.test(command) || RUSTFMT_CMD_RE.test(command)) {
       return {
         block: true,
         reason:

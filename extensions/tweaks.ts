@@ -8,7 +8,7 @@ const PRINCIPLES_SUFFIX =
   "Note our design principles: Do the hard part first, clean up as you go, leave no dead code or overcomplicated abstractions behind, being broken between phases is fine, cost of change is 0, avoid quick fixes / hacks, well designed longterm architecture endstate is critcal.";
 
 const MINI_REVIEW_SUFFIX =
-  "Use minitask to do a review of this plan and propose suggestions. Once minitask has returned a list of improvements - apply the obviously correct suggestions, ignore the bad ones, and use the `ask` tool for suggestions you're not sure about.";
+  "Ask minitask for a generic review of this, just issues and potential improvements. Then you evaluate its suggestions: apply clearly good ones, ignore bad ones, and ask me about anything uncertain.";
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("principles", {

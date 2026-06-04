@@ -289,6 +289,9 @@ export default function (pi: ExtensionAPI) {
   const editTool = createEditToolDefinition(cwd);
   pi.registerTool({
     ...editTool,
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      return createEditToolDefinition(ctx.cwd).execute(toolCallId, params, signal, onUpdate, ctx);
+    },
     renderResult(result, options, theme, context) {
       const state = context.state as LintRenderState;
       const baseContext = { ...context, lastComponent: state.baseResultComponent };
@@ -313,6 +316,9 @@ export default function (pi: ExtensionAPI) {
   const writeTool = createWriteToolDefinition(cwd);
   pi.registerTool({
     ...writeTool,
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      return createWriteToolDefinition(ctx.cwd).execute(toolCallId, params, signal, onUpdate, ctx);
+    },
     renderResult(result, options, theme, context) {
       const state = context.state as LintRenderState;
       const baseContext = { ...context, lastComponent: state.baseResultComponent };

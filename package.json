@@ -35,7 +35,9 @@
       "./extensions/reflect.ts",
       "./extensions/hppr-notifications.ts",
       "./extensions/working-text.ts",
-      "./extensions/sqlite.ts"
+      "./extensions/sqlite.ts",
+      "./extensions/cwd.ts",
+      "./extensions/worktree.ts"
     ]
   }
 }
