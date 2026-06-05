@@ -123,32 +123,9 @@ const minitaskParams = Type.Object({
 });
 export type MinitaskInput = Static<typeof minitaskParams>;
 
-const SMARTEDITOR_INSTRUCTION = "Do not summerize your result, make the changes then stop";
-
-const smarteditorParams = Type.Object({
-  task: Type.String({
-    minLength: 1,
-    description: "Describe edits to a file in natural language",
-  }),
-  complex: Type.Optional(
-    Type.Boolean({
-      description:
-        "Use the default pi model instead of the openai-codex spark model.",
-    }),
-  ),
-});
-export type SmarteditorInput = Static<typeof smarteditorParams>;
-
 type MinitaskResult = {
   task: string;
   answer: string;
-  exitCode: number;
-};
-
-type SmarteditorResult = {
-  task: string;
-  diff: string;
-  output: string;
   exitCode: number;
 };
 
@@ -161,23 +138,6 @@ function formatMinitaskResult(result: MinitaskResult): string {
     `## Answer${exitLabel}`,
     result.answer || "(no output)",
   ].join("\n");
-}
-
-function formatSmarteditorResult(result: SmarteditorResult): string {
-  const exitLabel = result.exitCode === 0 ? "" : ` (exit code ${result.exitCode})`;
-  const lines = [
-    "## Task",
-    result.task,
-    "",
-    `## Git Diff${exitLabel}`,
-    result.diff || "(no diff)",
-  ];
-
-  if (result.exitCode !== 0) {
-    lines.push("", "## Tool Output", result.output || "(no output)");
-  }
-
-  return lines.join("\n");
 }
 
 export default function (pi: ExtensionAPI) {
@@ -444,102 +404,6 @@ export default function (pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text }],
         details: { code: result.code, args },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "smarteditor",
-    label: "Smarteditor",
-    description: "Describe edits to a file in natural language",
-    promptSnippet: "Describe edits to a file in natural language",
-    parameters: smarteditorParams,
-    renderCall(args) {
-      const payloadValue = args.complex === true
-        ? { task: args.task, complex: true }
-        : args.task;
-      const payload = JSON.stringify(payloadValue, null, 2) ?? String(payloadValue);
-      const lines = ["smarteditor(", ...payload.split("\n").map((line) => `  ${line}`), ")"];
-
-      return {
-        render: (contentWidth: number) => lines.flatMap((line) => wrapTextWithAnsi(line, contentWidth)),
-        invalidate: () => {
-          /* no-op */
-        },
-      };
-    },
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const runInCwd = (command: string, args: string[]) => pi.exec(command, args, {
-        signal,
-        cwd: ctx.cwd,
-      });
-      const statusResult = await runInCwd("git", [
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=all",
-      ]);
-      const statusText = statusResult.stdout.trimEnd() || statusResult.stderr.trim() || "(no output)";
-
-      if (statusResult.code !== 0) {
-        throw new Error(statusText);
-      }
-
-      if (statusResult.stdout.trim().length > 0) {
-        throw new Error(`smarteditor requires a clean git worktree before editing.\n\n${statusText}`);
-      }
-
-      const prompt = `${params.task.trimEnd()}\n\n${SMARTEDITOR_INSTRUCTION}`;
-      const args = params.complex === true
-        ? ["-p", prompt]
-        : ["--provider", "openai-codex", "--model", "gpt-5.3-codex-spark", "-p", prompt];
-      let output = "(no output)";
-      let exitCode = 0;
-
-      try {
-        let piResult = await runInCwd("pi", args);
-
-        if (params.complex !== true && piResult.code === 1) {
-          piResult = await runInCwd("pi", [
-            "--provider",
-            "openai-codex",
-            "--model",
-            "gpt-5.3-codex-spark",
-            "--thinking",
-            "off",
-            "-p",
-            prompt,
-          ]);
-        }
-
-        exitCode = piResult.code;
-        output = outputText(piResult.stdout, piResult.stderr);
-      } catch (err) {
-        if (err instanceof Error && err.name === "AbortError") {
-          throw err;
-        }
-
-        output = `Error: ${err instanceof Error ? err.message : String(err)}`;
-        exitCode = 1;
-      }
-
-      const diffResult = await runInCwd("git", ["diff", "--no-ext-diff", "HEAD", "--"]);
-      const diff = diffResult.code === 0
-        ? diffResult.stdout.trimEnd()
-        : `Error collecting git diff: ${outputText(diffResult.stdout, diffResult.stderr)}`;
-      const result = {
-        task: params.task,
-        diff,
-        output,
-        exitCode,
-      };
-      const text = formatSmarteditorResult(result);
-
-      return {
-        content: [{ type: "text", text }],
-        details: {
-          complex: params.complex === true,
-          result,
-        },
       };
     },
   });
