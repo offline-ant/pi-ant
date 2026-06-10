@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Context Explorer</title>
+<style>
+  :root {
+    --bg: #0d1117; --fg: #c9d1d9; --border: #30363d;
+    --accent: #58a6ff; --muted: #8b949e; --dim: #484f58;
+    --read: #3fb950;
+    --hover: #161b22;
+    --panel-bg: #010409; --panel-border: #21262d;
+    --btn-bg: #21262d; --btn-hover: #30363d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font: 13px/1.5 ui-monospace, "Cascadia Code", "Fira Code", monospace; background: var(--bg); color: var(--fg); overflow: hidden; height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 10px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+  header h1 { font-size: 1em; color: var(--accent); white-space: nowrap; }
+  .meta { font-size: 0.85em; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stats { display: flex; gap: 14px; margin-left: auto; }
+  .stat { text-align: center; }
+  .stat .val { font-size: 1.05em; font-weight: 600; }
+  .stat .lbl { font-size: 0.7em; color: var(--muted); }
+  .controls { padding: 6px 16px; border-bottom: 1px solid var(--border); display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+  button { background: var(--btn-bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 4px 12px; cursor: pointer; font: inherit; font-size: 0.85em; }
+  button:hover { background: var(--btn-hover); }
+  .controls input[type="text"] { background: var(--btn-bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; font: inherit; font-size: 0.85em; width: 180px; }
+  .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 0; flex: 1; overflow: hidden; border-bottom: 1px solid var(--border); }
+  .panel { display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); }
+  .panel:last-child { border-right: none; }
+  .panel-title { padding: 6px 12px; font-size: 0.8em; font-weight: 600; border-bottom: 1px solid var(--border); flex-shrink: 0; display: flex; justify-content: space-between; align-items: center; }
+  .panel-title .count { color: var(--muted); font-weight: 400; }
+  .tbl-wrap { flex: 1; overflow-y: auto; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  th { position: sticky; top: 0; background: var(--panel-bg); padding: 4px 10px; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; text-align: left; font-size: 0.78em; z-index: 1; }
+  td { padding: 2px 10px; border-bottom: 1px solid var(--panel-border); white-space: nowrap; font-size: 0.83em; overflow: hidden; text-overflow: ellipsis; }
+  tr:hover td { outline: 1px solid var(--accent); outline-offset: -1px; }
+  .size-col { color: var(--muted); text-align: right; width: 80px; }
+  .pct-col { text-align: right; width: 50px; font-weight: 600; }
+  .lvl-col { text-align: center; width: 36px; cursor: pointer; user-select: none; font-weight: 700; font-size: 0.8em; }
+  .unread-row td { color: var(--dim); }
+  .error { color: #f85149; padding: 16px; }
+  .loading { color: var(--muted); padding: 16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>&#x1F4C2; Context Explorer</h1>
+  <span class="meta" id="cwd"></span>
+  <div class="stats" id="stats"></div>
+</header>
+<div class="controls">
+  <button id="refresh-btn">&#x27F3; Refresh</button>
+  <input type="text" id="filter" placeholder="Filter files...">
+</div>
+<div class="panels">
+  <div class="panel" id="read-panel">
+    <div class="panel-title">&#x1F4D6; Read <span class="count" id="read-count"></span></div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>File</th><th>Size</th><th>Lvl</th><th>%</th></tr></thead>
+        <tbody id="read-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="panel" id="unread-panel">
+    <div class="panel-title">&#x1F4C4; Unread <span class="count" id="unread-count"></span></div>
+    <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>File</th><th>Size</th><th>Lvl</th></tr></thead>
+        <tbody id="unread-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<div class="loading" id="loading">Loading...</div>
+<script src="viewer.js"></script>
+</body>
+</html>

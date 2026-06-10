@@ -2,7 +2,9 @@
  * Execution-level lints and safety guards.
  *
  * Grep:
- * - `grep`: always blocked — use the built-in grep tool instead.
+ * - local `grep`: always blocked — use the built-in grep tool instead.
+ * - `grep` inside remote/nested quoted commands (for example `ssh host '... grep ...'`)
+ *   and `grep` filtering `ssh` output are ignored because the built-in grep tool cannot replace them.
  *
  * Rust formatting:
  * - `cargo fmt`: blocked when invoked as a shell command — follow existing code style instead.
@@ -32,9 +34,10 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 const GIT_RESTORE_RE = /\bgit\s+restore\b/i;
 const GIT_CHECKOUT_RE = /\bgit\s+checkout\b/i;
 const GIT_STASH_RE = /\bgit\s+stash\b/i;
-const GREP_CMD_RE = /(?:^|[;&|]|\bthen\b|\bdo\b)\s*grep\b/;
 const CARGO_FMT_CMD_RE = /(?:^|[;&|\n]\s*)cargo\s+fmt\b/;
 const RUSTFMT_CMD_RE = /(?:^|[;&|\n]\s*)rustfmt\b/;
+const SHELL_COMMAND_SEPARATORS = new Set([";", "&", "&&", "||", "|", "\n", "("]);
+const SHELL_COMMAND_START_KEYWORDS = new Set(["if", "then", "do", "else", "elif", "while", "until"]);
 
 const GREP_NOTE =
   "Use the built-in `grep` tool instead of the bash `grep` command. " +
@@ -61,16 +64,147 @@ const PIPE_TAIL_RE = /\|\s*tail\s+-[^\|]*$/;
 
 type TmuxBashInput = { name: string; command: string };
 type TmuxSendInput = { name: string; text: string; enter?: boolean };
+type BashInput = { command: string };
+type ShellToken = { type: "word" | "operator"; text: string };
+type ShellInvocation = { name: string; args: string[]; hasSshEarlierInPipeline: boolean };
 
 /**
  * Extract the text to check from a tool call event.
  * Returns undefined for tool types we don't inspect.
  */
-function extractCommand(event: { toolName: string; input: any }): string | undefined {
-  if (event.toolName === "bash") return event.input?.command;
-  if (event.toolName === "tmux-bash") return (event.input as TmuxBashInput)?.command;
-  if (event.toolName === "tmux-send") return (event.input as TmuxSendInput)?.text;
+function extractCommand(event: { toolName: string; input: unknown }): string | undefined {
+  if (event.toolName === "bash") return (event.input as Partial<BashInput> | undefined)?.command;
+  if (event.toolName === "tmux-bash") return (event.input as Partial<TmuxBashInput> | undefined)?.command;
+  if (event.toolName === "tmux-send") return (event.input as Partial<TmuxSendInput> | undefined)?.text;
   return undefined;
+}
+
+function tokenizeShell(command: string): ShellToken[] {
+  const tokens: ShellToken[] = [];
+  let word = "";
+  let quote: "'" | '"' | undefined;
+
+  const pushWord = () => {
+    if (word.length === 0) return;
+    tokens.push({ type: "word", text: word });
+    word = "";
+  };
+
+  for (let i = 0; i < command.length; i++) {
+    const char = command[i];
+
+    if (quote) {
+      if (char === "\\" && quote === '"' && i + 1 < command.length) {
+        word += command[i + 1];
+        i++;
+        continue;
+      }
+      if (char === quote) {
+        quote = undefined;
+        continue;
+      }
+      word += char;
+      continue;
+    }
+
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+
+    if (char === "\\" && i + 1 < command.length) {
+      word += command[i + 1];
+      i++;
+      continue;
+    }
+
+    if (char === "\n") {
+      pushWord();
+      tokens.push({ type: "operator", text: "\n" });
+      continue;
+    }
+
+    if (/\s/.test(char)) {
+      pushWord();
+      continue;
+    }
+
+    if (char === "|" || char === "&") {
+      pushWord();
+      const next = command[i + 1];
+      if (next === char) {
+        tokens.push({ type: "operator", text: `${char}${next}` });
+        i++;
+      } else {
+        tokens.push({ type: "operator", text: char });
+      }
+      continue;
+    }
+
+    if (char === ";" || char === "(" || char === ")") {
+      pushWord();
+      tokens.push({ type: "operator", text: char });
+      continue;
+    }
+
+    word += char;
+  }
+
+  pushWord();
+  return tokens;
+}
+
+function isAssignmentWord(word: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(word);
+}
+
+function getLocalShellInvocations(command: string): ShellInvocation[] {
+  const invocations: ShellInvocation[] = [];
+  let expectingCommand = true;
+  let currentInvocation: ShellInvocation | undefined;
+  let pipelineHasSsh = false;
+
+  for (const token of tokenizeShell(command)) {
+    if (token.type === "operator") {
+      if (SHELL_COMMAND_SEPARATORS.has(token.text)) {
+        expectingCommand = true;
+        currentInvocation = undefined;
+        if (token.text !== "|") pipelineHasSsh = false;
+      }
+      continue;
+    }
+
+    const word = token.text;
+    if (SHELL_COMMAND_START_KEYWORDS.has(word)) {
+      expectingCommand = true;
+      currentInvocation = undefined;
+      continue;
+    }
+
+    if (expectingCommand) {
+      if (isAssignmentWord(word)) continue;
+      currentInvocation = { name: word, args: [], hasSshEarlierInPipeline: pipelineHasSsh };
+      invocations.push(currentInvocation);
+      expectingCommand = false;
+      if (commandBasename(word) === "ssh") pipelineHasSsh = true;
+      continue;
+    }
+
+    currentInvocation?.args.push(word);
+  }
+
+  return invocations;
+}
+
+function commandBasename(command: string): string {
+  const parts = command.split("/");
+  return parts[parts.length - 1] ?? command;
+}
+
+function hasBlockedLocalGrep(command: string): boolean {
+  return getLocalShellInvocations(command).some(
+    (invocation) => commandBasename(invocation.name) === "grep" && !invocation.hasSshEarlierInPipeline,
+  );
 }
 
 function blockRestore(toolName: string, command: string) {
@@ -138,8 +272,8 @@ export default function (pi: ExtensionAPI) {
     const command = extractCommand(event);
     if (command == null) return undefined;
 
-    // grep command — block in bash only, use grep tool instead
-    if (event.toolName === "bash" && GREP_CMD_RE.test(command)) {
+    // grep command — block local bash invocations only, use grep tool instead
+    if (event.toolName === "bash" && hasBlockedLocalGrep(command)) {
       return {
         block: true,
         reason:

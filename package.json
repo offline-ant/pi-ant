@@ -33,7 +33,8 @@
       "./extensions/working-text.ts",
       "./extensions/sqlite.ts",
       "./extensions/cwd.ts",
-      "./extensions/worktree.ts"
+      "./extensions/worktree.ts",
+      "./extensions/context-explorer.ts"
     ]
   }
 }
