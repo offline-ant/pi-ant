@@ -117,7 +117,7 @@ const minitaskParams = Type.Object({
   simple: Type.Optional(
     Type.Boolean({
       description:
-        "Use for quick rote tasks, like verifying whether a pattern is used in a file. Runs pi with --provider openai-codex --model gpt-5.3-codex-spark, retrying with --thinking off if that exits 1.",
+        "Use for quick rote tasks, like verifying whether a pattern is used in a file. Runs pi with --provider openai-codex --model gpt-5.3-codex-spark, retrying with --thinking off if that exits nonzero, then falling back to deepseek/deepseek-v4-pro if Spark still fails.",
     }),
   ),
 });
@@ -445,7 +445,7 @@ export default function (pi: ExtensionAPI) {
           : ["-p", params.task];
         let result = await runPi(args);
 
-        if (params.simple === true && result.code === 1) {
+        if (params.simple === true && result.code !== 0) {
           result = await runPi([
             "--provider",
             "openai-codex",
@@ -453,6 +453,17 @@ export default function (pi: ExtensionAPI) {
             "gpt-5.3-codex-spark",
             "--thinking",
             "off",
+            "-p",
+            params.task,
+          ]);
+        }
+
+        if (params.simple === true && result.code !== 0) {
+          result = await runPi([
+            "--provider",
+            "deepseek",
+            "--model",
+            "deepseek-v4-pro",
             "-p",
             params.task,
           ]);
