@@ -24,7 +24,6 @@
     "extensions": [
       "./extensions/semaphore-locks.ts",
       "./extensions/tmux.ts",
-      "./extensions/supervisor.ts",
       "./extensions/read-complete.ts",
       "./extensions/lints.ts",
       "./extensions/exec-lints.ts",
@@ -37,7 +36,8 @@
       "./extensions/worktree.ts",
       "./extensions/tmux-fork.ts",
       "./extensions/context-explorer.ts",
-      "./extensions/browser.ts"
+      "./extensions/browser.ts",
+      "./extensions/prompt-history.ts"
     ]
   }
 }
