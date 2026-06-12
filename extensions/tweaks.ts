@@ -39,7 +39,37 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.on("session_start", async () => {
+  pi.on("session_start", async (_event, ctx) => {
+    ctx.ui.addAutocompleteProvider((current) => ({
+      triggerCharacters: ["#"],
+      async getSuggestions(lines, cursorLine, cursorCol, options) {
+        const line = lines[cursorLine] ?? "";
+        const beforeCursor = line.slice(0, cursorCol);
+        const match = beforeCursor.match(/(?:^|[ \t])#([^\s#]*)$/);
+        const query = match?.[1];
+        if (query === undefined || !"principles".startsWith(query.toLowerCase())) {
+          return current.getSuggestions(lines, cursorLine, cursorCol, options);
+        }
+
+        return {
+          prefix: `#${query}`,
+          items: [
+            {
+              value: PRINCIPLES_SUFFIX,
+              label: "#principles",
+              description: "Insert the design principles suffix",
+            },
+          ],
+        };
+      },
+      applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
+        return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+      },
+      shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
+        return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
+      },
+    }));
+
     let active = pi.getActiveTools();
     // Enable grep (registered but not in the default active set)
     if (!active.includes("grep")) active = [...active, "grep"];

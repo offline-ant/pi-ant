@@ -17,7 +17,8 @@
   "bin": {
     "pi-semaphore": "./bin/pi-semaphore",
     "pi-tmux": "./bin/pi-tmux",
-    "pi-claude-agent": "./bin/pi-claude-agent"
+    "pi-claude-agent": "./bin/pi-claude-agent",
+    "browser-io": "./bin/browser-io"
   },
   "pi": {
     "extensions": [
@@ -34,7 +35,9 @@
       "./extensions/sqlite.ts",
       "./extensions/cwd.ts",
       "./extensions/worktree.ts",
-      "./extensions/context-explorer.ts"
+      "./extensions/tmux-fork.ts",
+      "./extensions/context-explorer.ts",
+      "./extensions/browser.ts"
     ]
   }
 }
