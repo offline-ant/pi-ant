@@ -1,0 +1,586 @@
+#!/usr/bin/env -S uv --quiet run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#   "websockets>=16,<17",
+# ]
+# ///
+"""Minimal browser automation session helper for pi-ant.
+
+Input is a JSON object passed with --request-json or stdin:
+{
+  "session_id": "default",
+  "browser": "chromium" | "firefox",
+  "url": "https://...",
+  "eval": "document.title"
+}
+
+The sequence is: navigate URL (if given), screenshot, eval (if given), screenshot.
+"""
+
+import argparse
+import asyncio
+import base64
+import contextlib
+import datetime as dt
+import fcntl
+import itertools
+import json
+import os
+import re
+import shutil
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+import websockets
+
+ROOT = Path("/tmp/browser-io")
+SESSIONS = ROOT / "sessions"
+PROFILES = ROOT / "profiles"
+SCREENSHOTS = ROOT / "screenshots"
+LOCKS = ROOT / "locks"
+LOGS = ROOT / "logs"
+
+DEFAULT_SESSION_ID = "default"
+DEFAULT_BROWSER = "chromium"
+DEFAULT_WIDTH = 1440
+DEFAULT_HEIGHT = 1200
+DEFAULT_TIMEOUT = 10.0
+
+
+class BrowserIoError(Exception):
+    pass
+
+
+def utc_stamp() -> str:
+    return dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+
+
+def clean_session_id(value: str | None) -> str:
+    raw = value or DEFAULT_SESSION_ID
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip(".-")
+    return cleaned or DEFAULT_SESSION_ID
+
+
+def ensure_dirs() -> None:
+    for directory in (SESSIONS, PROFILES, SCREENSHOTS, LOCKS, LOGS):
+        directory.mkdir(parents=True, exist_ok=True)
+
+
+@contextlib.contextmanager
+def session_lock(session_id: str):
+    ensure_dirs()
+    lock_path = LOCKS / f"{session_id}.lock"
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def session_path(session_id: str) -> Path:
+    return SESSIONS / f"{session_id}.json"
+
+
+def read_session(session_id: str) -> dict[str, Any] | None:
+    path = session_path(session_id)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text("utf-8"))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_session(session_id: str, data: dict[str, Any]) -> None:
+    path = session_path(session_id)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", "utf-8")
+
+
+def is_pid_alive(pid: object) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def port_open(port: object) -> bool:
+    if not isinstance(port, int):
+        return False
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+def free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def find_executable(names: list[str]) -> str:
+    for name in names:
+        path = shutil.which(name)
+        if path:
+            return path
+    raise BrowserIoError(f"Could not find executable: {', '.join(names)}")
+
+
+def terminate_session(data: dict[str, Any] | None) -> None:
+    if not data:
+        return
+    pid = data.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        return
+    try:
+        os.kill(pid, 15)
+    except OSError:
+        return
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        if not is_pid_alive(pid):
+            return
+        time.sleep(0.1)
+    with contextlib.suppress(OSError):
+        os.kill(pid, 9)
+
+
+def should_headless() -> bool:
+    return not bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def browser_profile(browser: str, session_id: str) -> Path:
+    profile = PROFILES / browser / session_id
+    profile.mkdir(parents=True, exist_ok=True)
+    return profile
+
+
+def launch_browser(browser: str, session_id: str) -> dict[str, Any]:
+    port = free_port()
+    profile = browser_profile(browser, session_id)
+    log_path = LOGS / f"{session_id}.{browser}.stderr.log"
+    log_file = log_path.open("ab")
+
+    if browser == "chromium":
+        binary = find_executable(["chromium", "chromium-browser", "google-chrome", "google-chrome-stable"])
+        command = [
+            binary,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={profile}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+            "--disable-gpu",
+            "about:blank",
+        ]
+        if should_headless():
+            command.insert(1, "--headless=new")
+            command.insert(2, "--no-sandbox")
+    elif browser == "firefox":
+        binary = find_executable(["firefox"])
+        command = [
+            binary,
+            "--new-instance",
+            "--remote-debugging-port",
+            str(port),
+            "--remote-allow-hosts",
+            "localhost,127.0.0.1",
+            "--profile",
+            str(profile),
+            "about:blank",
+        ]
+        if should_headless():
+            command.insert(1, "--headless")
+    else:
+        raise BrowserIoError(f"Unsupported browser: {browser}")
+
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=log_file,
+        start_new_session=True,
+    )
+    log_file.close()
+
+    data = {
+        "session_id": session_id,
+        "browser": browser,
+        "pid": proc.pid,
+        "port": port,
+        "profile": str(profile),
+        "log": str(log_path),
+        "created_at": dt.datetime.now(dt.UTC).isoformat(),
+        "last_used_at": dt.datetime.now(dt.UTC).isoformat(),
+    }
+    write_session(session_id, data)
+    return data
+
+
+def wait_http_json(url: str, timeout: float) -> Any:
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=0.5) as response:
+                return json.load(response)
+        except Exception as error:
+            last_error = error
+            time.sleep(0.1)
+    raise BrowserIoError(f"Timed out waiting for {url}: {last_error}")
+
+
+def ensure_session(session_id: str, browser: str) -> dict[str, Any]:
+    existing = read_session(session_id)
+    if existing and existing.get("browser") != browser:
+        terminate_session(existing)
+        existing = None
+
+    if existing and is_pid_alive(existing.get("pid")) and port_open(existing.get("port")):
+        existing["last_used_at"] = dt.datetime.now(dt.UTC).isoformat()
+        write_session(session_id, existing)
+        return existing
+
+    terminate_session(existing)
+    return launch_browser(browser, session_id)
+
+
+def screenshot_path(session_id: str, browser: str, phase: str) -> Path:
+    directory = SCREENSHOTS / session_id
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{utc_stamp()}-{browser}-{phase}.png"
+
+
+class CdpClient:
+    def __init__(self, websocket: Any):
+        self.websocket = websocket
+        self.ids = itertools.count(1)
+
+    async def request(self, method: str, params: dict[str, Any] | None = None, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
+        request_id = next(self.ids)
+        await self.websocket.send(json.dumps({"id": request_id, "method": method, "params": params or {}}))
+        while True:
+            raw = await asyncio.wait_for(self.websocket.recv(), timeout=timeout)
+            message = json.loads(raw)
+            if message.get("id") != request_id:
+                continue
+            if "error" in message:
+                raise BrowserIoError(json.dumps(message["error"], ensure_ascii=False))
+            result = message.get("result", {})
+            return result if isinstance(result, dict) else {}
+
+
+class ChromiumBackend:
+    def __init__(self, port: int):
+        self.port = port
+        self.client: CdpClient | None = None
+
+    async def __aenter__(self):
+        pages = wait_http_json(f"http://127.0.0.1:{self.port}/json/list", DEFAULT_TIMEOUT)
+        if not isinstance(pages, list):
+            raise BrowserIoError("Chromium /json/list did not return a list")
+        page = next((item for item in pages if isinstance(item, dict) and item.get("type") == "page"), None)
+        if not page or not isinstance(page.get("webSocketDebuggerUrl"), str):
+            raise BrowserIoError("Chromium has no debuggable page")
+        websocket = await websockets.connect(page["webSocketDebuggerUrl"], max_size=50_000_000)
+        self.client = CdpClient(websocket)
+        await self.client.request("Page.enable")
+        await self.client.request("Runtime.enable")
+        await self.client.request("Emulation.setDeviceMetricsOverride", {
+            "width": DEFAULT_WIDTH,
+            "height": DEFAULT_HEIGHT,
+            "deviceScaleFactor": 1,
+            "mobile": False,
+        })
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if self.client:
+            await self.client.websocket.close()
+
+    async def navigate(self, url: str) -> None:
+        assert self.client is not None
+        await self.client.request("Page.navigate", {"url": url})
+        await self.wait_ready()
+
+    async def wait_ready(self) -> None:
+        deadline = time.monotonic() + DEFAULT_TIMEOUT
+        while time.monotonic() < deadline:
+            try:
+                value = await self.eval("document.readyState")
+                if value in ("interactive", "complete"):
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(0.1)
+
+    async def eval(self, expression: str) -> Any:
+        assert self.client is not None
+        result = await self.client.request("Runtime.evaluate", {
+            "expression": expression,
+            "awaitPromise": True,
+            "returnByValue": True,
+        })
+        if "exceptionDetails" in result:
+            details = result["exceptionDetails"]
+            if isinstance(details, dict):
+                text = details.get("text")
+                exception = details.get("exception")
+                description = exception.get("description") if isinstance(exception, dict) else None
+                if text and description:
+                    raise BrowserIoError(f"{text}: {description}")
+                raise BrowserIoError(str(description or text or "JavaScript exception"))
+            raise BrowserIoError("JavaScript exception")
+        value = result.get("result", {})
+        if isinstance(value, dict):
+            if "value" in value:
+                return value["value"]
+            if "unserializableValue" in value:
+                return value["unserializableValue"]
+            if value.get("type") == "undefined":
+                return None
+        return value
+
+    async def screenshot(self, path: Path) -> None:
+        assert self.client is not None
+        result = await self.client.request("Page.captureScreenshot", {"format": "png", "fromSurface": True})
+        data = result.get("data")
+        if not isinstance(data, str):
+            raise BrowserIoError("Chromium screenshot returned no data")
+        path.write_bytes(base64.b64decode(data))
+
+    async def info(self) -> dict[str, Any]:
+        return {
+            "url": await self.eval("window.location.href"),
+            "title": await self.eval("document.title"),
+        }
+
+
+def decode_bidi_value(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    value_type = value.get("type")
+    if value_type in ("undefined", "null"):
+        return None
+    if value_type in ("string", "number", "boolean", "bigint"):
+        return value.get("value")
+    if value_type == "array":
+        items = value.get("value", [])
+        return [decode_bidi_value(item) for item in items] if isinstance(items, list) else []
+    if value_type == "object":
+        items = value.get("value", [])
+        if not isinstance(items, list):
+            return {}
+        return {str(key): decode_bidi_value(item) for key, item in items}
+    if "value" in value:
+        return value["value"]
+    return value
+
+
+class BidiClient:
+    def __init__(self, port: int):
+        self.url = f"ws://127.0.0.1:{port}/session"
+        self.websocket: Any = None
+        self.ids = itertools.count(1)
+
+    async def __aenter__(self):
+        deadline = time.monotonic() + DEFAULT_TIMEOUT
+        last_error: Exception | None = None
+        while time.monotonic() < deadline:
+            try:
+                self.websocket = await asyncio.wait_for(websockets.connect(self.url, max_size=50_000_000), timeout=1.0)
+                await self.request("session.new", {"capabilities": {}})
+                return self
+            except Exception as error:
+                last_error = error
+                if self.websocket:
+                    with contextlib.suppress(Exception):
+                        await self.websocket.close()
+                    self.websocket = None
+                await asyncio.sleep(0.1)
+        raise BrowserIoError(f"Timed out connecting to Firefox BiDi at {self.url}: {last_error}")
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        with contextlib.suppress(Exception):
+            await self.request("session.end", {}, timeout=2.0)
+        if self.websocket:
+            await self.websocket.close()
+
+    async def request(self, method: str, params: dict[str, Any] | None = None, timeout: float = DEFAULT_TIMEOUT) -> dict[str, Any]:
+        request_id = next(self.ids)
+        await self.websocket.send(json.dumps({"id": request_id, "method": method, "params": params or {}}))
+        while True:
+            raw = await asyncio.wait_for(self.websocket.recv(), timeout=timeout)
+            message = json.loads(raw)
+            if message.get("type") == "event":
+                continue
+            if message.get("id") != request_id:
+                continue
+            if message.get("type") == "error":
+                raise BrowserIoError(str(message.get("message") or message.get("error") or method))
+            result = message.get("result", {})
+            return result if isinstance(result, dict) else {}
+
+
+class FirefoxBackend:
+    def __init__(self, port: int):
+        self.port = port
+        self.client: BidiClient | None = None
+        self.context_id: str | None = None
+
+    async def __aenter__(self):
+        self.client = await BidiClient(self.port).__aenter__()
+        contexts = (await self.client.request("browsingContext.getTree", {})).get("contexts", [])
+        if not isinstance(contexts, list) or not contexts:
+            raise BrowserIoError("Firefox has no browsing context")
+        context_id = contexts[0].get("context") if isinstance(contexts[0], dict) else None
+        if not isinstance(context_id, str):
+            raise BrowserIoError("Firefox context id missing")
+        self.context_id = context_id
+        with contextlib.suppress(Exception):
+            await self.client.request("browsingContext.setViewport", {
+                "context": self.context_id,
+                "viewport": {"width": DEFAULT_WIDTH, "height": DEFAULT_HEIGHT},
+                "devicePixelRatio": 1,
+            })
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        if self.client:
+            await self.client.__aexit__(exc_type, exc, tb)
+
+    async def navigate(self, url: str) -> None:
+        assert self.client is not None and self.context_id is not None
+        await self.client.request("browsingContext.navigate", {
+            "context": self.context_id,
+            "url": url,
+            "wait": "complete",
+        })
+
+    async def eval(self, expression: str) -> Any:
+        assert self.client is not None and self.context_id is not None
+        result = await self.client.request("script.evaluate", {
+            "target": {"context": self.context_id},
+            "expression": expression,
+            "awaitPromise": True,
+            "resultOwnership": "none",
+        })
+        if result.get("type") == "exception":
+            details = result.get("exceptionDetails", {})
+            message = details.get("text") if isinstance(details, dict) else None
+            exception = result.get("exception")
+            description = exception.get("description") if isinstance(exception, dict) else None
+            if message and description:
+                raise BrowserIoError(f"{message}: {description}")
+            raise BrowserIoError(str(description or message or "JavaScript exception"))
+        return decode_bidi_value(result.get("result"))
+
+    async def screenshot(self, path: Path) -> None:
+        assert self.client is not None and self.context_id is not None
+        result = await self.client.request("browsingContext.captureScreenshot", {"context": self.context_id})
+        data = result.get("data")
+        if not isinstance(data, str):
+            raise BrowserIoError("Firefox screenshot returned no data")
+        path.write_bytes(base64.b64decode(data))
+
+    async def info(self) -> dict[str, Any]:
+        return {
+            "url": await self.eval("window.location.href"),
+            "title": await self.eval("document.title"),
+        }
+
+
+async def run_request(request: dict[str, Any]) -> dict[str, Any]:
+    session_id = clean_session_id(request.get("session_id") if isinstance(request.get("session_id"), str) else None)
+    browser = request.get("browser") if isinstance(request.get("browser"), str) else DEFAULT_BROWSER
+    if browser not in ("chromium", "firefox"):
+        raise BrowserIoError(f"Unsupported browser: {browser}")
+    url = request.get("url") if isinstance(request.get("url"), str) and request.get("url") else None
+    expression = request.get("eval") if isinstance(request.get("eval"), str) and request.get("eval") else None
+
+    with session_lock(session_id):
+        session = ensure_session(session_id, browser)
+        port = session.get("port")
+        if not isinstance(port, int):
+            raise BrowserIoError("Session has no numeric port")
+
+        backend_context = ChromiumBackend(port) if browser == "chromium" else FirefoxBackend(port)
+        async with backend_context as backend:
+            if url:
+                await backend.navigate(url)
+
+            before = screenshot_path(session_id, browser, "before-eval")
+            await backend.screenshot(before)
+
+            eval_result = None
+            eval_error = None
+            if expression:
+                try:
+                    eval_result = await backend.eval(expression)
+                except Exception as error:
+                    eval_error = str(error)
+
+            after = screenshot_path(session_id, browser, "after-eval")
+            await backend.screenshot(after)
+            info = await backend.info()
+
+        session["last_used_at"] = dt.datetime.now(dt.UTC).isoformat()
+        write_session(session_id, session)
+
+    result: dict[str, Any] = {
+        "session_id": session_id,
+        "browser": browser,
+        "url": info.get("url"),
+        "title": info.get("title"),
+        "before_screenshot": str(before),
+        "after_screenshot": str(after),
+    }
+    if expression:
+        result["eval_result"] = eval_result
+        if eval_error is not None:
+            result["eval_error"] = eval_error
+    return result
+
+
+def load_request(args: argparse.Namespace) -> dict[str, Any]:
+    raw = args.request_json if args.request_json is not None else sys.stdin.read()
+    if not raw.strip():
+        return {}
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise BrowserIoError("Request JSON must be an object")
+    return data
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Control a persistent browser session and capture before/after screenshots.")
+    parser.add_argument("--request-json", help="Browser request JSON object. Reads stdin when omitted.")
+    args = parser.parse_args()
+
+    try:
+        request = load_request(args)
+        result = asyncio.run(run_request(request))
+    except Exception as error:
+        print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False), file=sys.stderr)
+        raise SystemExit(1)
+
+    print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

@@ -13,6 +13,20 @@ sanitize_name() {
   printf '%s' "${1:-}" | tr -cd '[:alnum:]._-'
 }
 
+shell_join() {
+  local result=""
+  local quoted
+  local arg
+  for arg in "$@"; do
+    printf -v quoted '%q' "$arg"
+    if [[ -n "$result" ]]; then
+      result+=" "
+    fi
+    result+="$quoted"
+  done
+  printf '%s' "$result"
+}
+
 require_tmux() {
   if [[ -z "${TMUX:-}" ]]; then
     echo "error: not running inside a tmux session (TMUX is not set)" >&2
@@ -720,6 +734,166 @@ cmd_coding_agent() {
   fi
 }
 
+cmd_session_agent() {
+  require_tmux
+  ensure_lock_dir
+
+  local requested_name="${1:-}"
+  local folder="${2:-}"
+  local session_file="${3:-}"
+  shift 3 || true
+
+  [[ -n "$requested_name" ]] || { echo "error: session-agent requires <lock-name> <folder> <session-file> [pi args...]" >&2; return 1; }
+  [[ -n "$folder" ]] || { echo "error: session-agent requires <lock-name> <folder> <session-file> [pi args...]" >&2; return 1; }
+  [[ -n "$session_file" ]] || { echo "error: session-agent requires <lock-name> <folder> <session-file> [pi args...]" >&2; return 1; }
+  [[ -d "$folder" ]] || { echo "error: folder does not exist: $folder" >&2; return 1; }
+  [[ -f "$session_file" ]] || { echo "error: session file does not exist: $session_file" >&2; return 1; }
+
+  local context_alert=""
+  local prompt_file=""
+  local status_only=0
+  local pi_args_array=()
+  local extra_pi_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --status-only)
+        status_only=1
+        shift
+        ;;
+      --context-alert)
+        shift
+        context_alert="${1:-}"
+        shift || true
+        ;;
+      --context-alert=*)
+        context_alert="${1#*=}"
+        shift
+        ;;
+      --prompt-file)
+        shift
+        prompt_file="${1:-}"
+        shift || true
+        ;;
+      --prompt-file=*)
+        prompt_file="${1#*=}"
+        shift
+        ;;
+      --pi-args)
+        shift
+        read -r -a extra_pi_args <<< "${1:-}"
+        pi_args_array+=("${extra_pi_args[@]}")
+        shift || true
+        ;;
+      --pi-args=*)
+        read -r -a extra_pi_args <<< "${1#*=}"
+        pi_args_array+=("${extra_pi_args[@]}")
+        shift
+        ;;
+      *)
+        pi_args_array+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -n "$prompt_file" && ! -f "$prompt_file" ]]; then
+    echo "error: prompt file does not exist: $prompt_file" >&2
+    return 1
+  fi
+
+  local safe_name
+  safe_name="$(sanitize_name "$requested_name")"
+  [[ -n "$safe_name" ]] || { echo "error: invalid lock name" >&2; return 1; }
+
+  local lock_name
+  lock_name="$(find_unique_lock_name "$safe_name")"
+
+  local env_flags=(-e "PI_LOCK_NAME=$lock_name" -e "PI_FORK=true")
+  if [[ -n "$context_alert" ]]; then
+    env_flags+=(-e "PI_CONTEXT_ALERT=$context_alert")
+  fi
+
+  reserve_lock_file "$lock_name"
+
+  local context_lock_name=""
+  if [[ -n "$context_alert" ]]; then
+    context_lock_name="${lock_name}:context"
+    reserve_lock_file "$context_lock_name"
+  fi
+
+  local command_array=(pi --session "$session_file")
+  if [[ ${#pi_args_array[@]} -gt 0 ]]; then
+    command_array+=("${pi_args_array[@]}")
+  fi
+  if [[ -n "$prompt_file" ]]; then
+    command_array+=("@$prompt_file")
+  fi
+
+  local command
+  command="$(shell_join "${command_array[@]}")"
+
+  local prompt_cleanup=""
+  if [[ -n "$prompt_file" ]]; then
+    local prompt_dir
+    local quoted_prompt_dir
+    prompt_dir="$(dirname -- "$prompt_file")"
+    case "$prompt_dir" in
+      /tmp/pi-tmux-fork-*|${TMPDIR:-/tmp}/pi-tmux-fork-*)
+        printf -v quoted_prompt_dir '%q' "$prompt_dir"
+        prompt_cleanup="rm -rf -- $quoted_prompt_dir; "
+        ;;
+    esac
+  fi
+
+  local wrapped_command
+  wrapped_command="if ( ${command} ); then status=0; else status=\$?; fi; ${prompt_cleanup}rm -f '$(lock_path "$lock_name")' '$(lock_path "${lock_name}:context")'; printf '%s\n' \"\${TMUX_PANE:-}\" > '$(idle_path "$lock_name")'; exit \$status"
+
+  local pane_id
+  if ! pane_id="$(tmux new-window -n "$lock_name" -d -P -F '#{pane_id}' "${env_flags[@]}" -c "$folder" -- bash -lc "$wrapped_command" 2>&1)"; then
+    rm -f -- "$(lock_path "$lock_name")" "$(lock_path "${lock_name}:context")"
+    echo "error: failed to create session-agent pane: $pane_id" >&2
+    return 1
+  fi
+
+  record_pane_if_lock_active "$lock_name" "$pane_id" || true
+  if [[ -n "$context_lock_name" ]]; then
+    record_pane_if_lock_active "$context_lock_name" "$pane_id" || true
+  fi
+  mark_coding_agent_lock "$lock_name"
+
+  tmux set-option -g remain-on-exit on >/dev/null 2>&1 || true
+
+  if (( status_only )); then
+    echo "Started tmux fork '$lock_name' in $folder (session: $session_file)."
+    return 0
+  fi
+
+  echo "Pane '$lock_name' created. Waiting for pi to start..." >&2
+
+  local output
+  output="$(capture_startup_output "$pane_id" 10 5)"
+  output="$(printf '%s\n' "$output" | strip_startup_help)"
+
+  echo "Pi session agent '$lock_name' started in $folder."
+  echo "Session: $session_file"
+  echo
+  echo "Startup output:"
+  printf '%s\n' "${output:-'(empty)'}"
+  echo
+  echo "Send work: tmux-send('$lock_name'). Wait: semaphore_wait('$lock_name')."
+
+  if [[ -n "$context_lock_name" ]]; then
+    echo "Context alert lock: '$context_lock_name' (releases when context >= ${context_alert}%)"
+    echo "Wait for either: semaphore_wait(names=['$lock_name', '$context_lock_name'])"
+  fi
+
+  if [[ "$lock_name" != "$safe_name" ]]; then
+    echo
+    echo "⚠️  WARNING: Lock name '$safe_name' was already in use — renamed to '$lock_name'."
+    echo "   Use semaphore_wait('$lock_name') to wait for this pane, NOT '$safe_name'."
+  fi
+}
+
 cmd_claude_agent() {
   require_tmux
   ensure_lock_dir
@@ -990,6 +1164,7 @@ Usage:
   pi-tmux kill <lock-name|pane-id>
   pi-tmux watch <lock-name> <pattern>
   pi-tmux coding-agent <lock-name> <folder> [pi args...]
+  pi-tmux session-agent <lock-name> <folder> <session-file> [--status-only] [--context-alert N] [--prompt-file file] [pi args...]
   pi-tmux claude-agent <lock-name> <folder> [--model <name>] [claude args...]
   pi-tmux list
   pi-tmux clear-stale
@@ -1007,6 +1182,7 @@ main() {
     kill) cmd_kill "$@" ;;
     watch) cmd_watch "$@" ;;
     coding-agent) cmd_coding_agent "$@" ;;
+    session-agent) cmd_session_agent "$@" ;;
     claude-agent) cmd_claude_agent "$@" ;;
     line-count) cmd_line_count "$@" ;;
     pane-id) cmd_pane_id "$@" ;;
