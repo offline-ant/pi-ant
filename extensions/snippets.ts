@@ -26,7 +26,7 @@ Tell each call frame to:
 3. Run focused relevant checks when practical.
 4. If the work writes or materially changes a plan, ask minitask for a generic review of the plan before returning. Triage the review in the same call frame: apply clearly good suggestions, ignore bad ones, and move real unresolved questions to needs-decision with a scratch/decisions artifact.
 5. Update workboard.md as required before returning, when this work came from a workboard item.
-6. Call return with a concise report of what was done, files changed, checks run and results, remaining work, and any unexpected problems, obstacles, or blockers.
+6. Call return with { result: "..." }, where result is the exact concise text to return to the caller. Include changed files, checks, remaining work, and blockers in that text only when relevant.
 
 After each return, inspect the result, verify or clean up as needed, and decide whether another call should continue with updated context. You may pause when a major unexpected blocker or design choice is uncovered.
 

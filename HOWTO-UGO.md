@@ -62,11 +62,13 @@ Starting ugo requires:
 
 - `workboard.md` exists;
 - current directory is a git repository;
-- git worktree is clean.
+- the git worktree has no dirty files except root `workboard.md` and files under root `scratch/`.
 
 Ugo always commits after each ugo-guide or ugo-do phase if files changed. The
 diff is the repo change; the commit message records the ugo-guide item/reason,
-prompt, session, and ugo-guide/ugo-do result. If commit fails, ugo pauses.
+prompt, session, and ugo-guide/ugo-do result. Ugo uses `git add -A` when
+checkpointing, so any dirty files present when a phase finishes are included in
+the checkpoint commit. If commit fails, ugo pauses.
 
 `/ugo-disable` disables loop control without aborting the current agent turn. Use
 Escape to abort the active turn.

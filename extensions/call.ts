@@ -1,10 +1,12 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 
 const CALL_TOOL = "call";
 const RETURN_TOOL = "return";
 const STATE_CUSTOM_TYPE = "pi-ant:call-state";
 const MESSAGE_CUSTOM_TYPE = "pi-ant:call-message";
+const RETURN_NOW_COMMAND = "return-now";
 
 const callParams = Type.Object({
   task: Type.String({
@@ -21,28 +23,10 @@ const callParams = Type.Object({
 type CallParams = Static<typeof callParams>;
 
 const returnParams = Type.Object({
-  summary: Type.String({
+  result: Type.String({
     minLength: 1,
-    description: "Concise result of the call frame.",
+    description: "Exact text result to return to the call site.",
   }),
-  changedFiles: Type.Optional(
-    Type.Array(Type.String(), {
-      description: "Files changed by the call frame, if any.",
-    }),
-  ),
-  checks: Type.Optional(
-    Type.Array(Type.String(), {
-      description: "Checks run and their results.",
-    }),
-  ),
-  blockers: Type.Optional(
-    Type.Array(Type.String(), {
-      description: "Remaining blockers or questions.",
-    }),
-  ),
-  notes: Type.Optional(
-    Type.String({ description: "Optional extra details. Keep concise." }),
-  ),
 });
 
 type ReturnParams = Static<typeof returnParams>;
@@ -85,14 +69,7 @@ function stringArray(value: unknown): string[] | undefined {
 }
 
 function isReturnParams(value: unknown): value is ReturnParams {
-  if (!isRecord(value)) return false;
-  return (
-    typeof value.summary === "string" &&
-    (value.changedFiles === undefined || stringArray(value.changedFiles) !== undefined) &&
-    (value.checks === undefined || stringArray(value.checks) !== undefined) &&
-    (value.blockers === undefined || stringArray(value.blockers) !== undefined) &&
-    (value.notes === undefined || typeof value.notes === "string")
-  );
+  return isRecord(value) && typeof value.result === "string";
 }
 
 function isCallPhase(value: unknown): value is CallPhase {
@@ -243,20 +220,50 @@ function callFrameActiveTools(active: ActiveCallFrame): string[] {
   return uniqueTools(tools);
 }
 
-function formatReturn(value: ReturnParams, active: ActiveCallFrame): string {
-  const lines = ["## call returned", "", `Task: ${active.task}`, "", "Summary:", value.summary];
-  if (value.changedFiles && value.changedFiles.length > 0) {
-    lines.push("", "Changed files:", ...value.changedFiles.map((file) => `- ${file}`));
+function formatReturn(value: ReturnParams): string {
+  return value.result;
+}
+
+function parseReturnNowText(args: string | undefined): string {
+  const trimmed = (args ?? "").trim();
+  if (trimmed.length < 2) return trimmed;
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+    return trimmed.slice(1, -1);
   }
-  if (value.checks && value.checks.length > 0) {
-    lines.push("", "Checks:", ...value.checks.map((check) => `- ${check}`));
+  return trimmed;
+}
+
+function activeToolsForState(state: CallState | undefined, fallbackTools: string[]): string[] {
+  if (!state) return rootActiveTools(defaultState(fallbackTools));
+  const active = topFrame(state);
+  if (active && active.phase !== "paused" && active.phase !== "returning") {
+    return callFrameActiveTools(active);
   }
-  if (value.blockers && value.blockers.length > 0) {
-    lines.push("", "Blockers:", ...value.blockers.map((blocker) => `- ${blocker}`));
+  if (active?.phase === "returning") {
+    return activeToolsForState(popTopFrame(state), fallbackTools);
   }
-  if (value.notes?.trim()) lines.push("", "Notes:", value.notes.trim());
-  if (active.callBranchLeafId) lines.push("", `Call branch leaf: ${active.callBranchLeafId}`);
-  return lines.join("\n");
+  return rootActiveTools(state);
+}
+
+function renderCallArgs(args: CallParams) {
+  const payload = JSON.stringify(args, null, 2) ?? String(args);
+  const lines = ["call(", ...payload.split("\n").map((line) => `  ${line}`), ")"];
+  return {
+    render: (contentWidth: number) => lines.flatMap((line) => wrapTextWithAnsi(line, contentWidth)),
+    invalidate: () => {
+      /* no-op */
+    },
+  };
+}
+
+function messageText(content: string | Array<{ type: string; text?: string }>): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((item): item is { type: "text"; text: string } => item.type === "text" && typeof item.text === "string")
+    .map((item) => item.text)
+    .join("\n");
 }
 
 function callPrompt(task: string, complex: boolean): string {
@@ -266,8 +273,8 @@ function callPrompt(task: string, complex: boolean): string {
     complex
       ? "This is a complex call frame. You may use the call tool for substantial delegated subtasks; otherwise work directly."
       : "Do not call the call tool or delegate recursively.",
-    "Before finishing, call return exactly once with a concise summary, changedFiles, checks, blockers, and notes as applicable.",
-    "If you are blocked or the task is already complete, call return and explain that state.",
+    "Before finishing, call return exactly once with { result: \"...\" }.",
+    "If you are blocked or the task is already complete, put that concise state directly in result.",
     "",
     "Task:",
     task,
@@ -282,9 +289,19 @@ function statusText(state: CallState | undefined): string | undefined {
 }
 
 export default function (pi: ExtensionAPI) {
+  pi.registerMessageRenderer(MESSAGE_CUSTOM_TYPE, (message, _options, theme) => {
+    const text = messageText(message.content);
+    const lines = [theme.fg("accent", "[return]"), ...text.split("\n")];
+    return {
+      render: (contentWidth: number) => lines.flatMap((line) => wrapTextWithAnsi(line, contentWidth)),
+      invalidate: () => {
+        /* no-op */
+      },
+    };
+  });
+
   let currentState: CallState | undefined;
   let terminateCallTurn = false;
-  const scheduledFinishes = new Set<string>();
 
   function resolveState(ctx: ExtensionContext): CallState | undefined {
     const persisted = getLatestState(ctx);
@@ -298,12 +315,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function applyTools(state: CallState | undefined): void {
-    const active = topFrame(state);
-    if (active && active.phase !== "paused") {
-      pi.setActiveTools(callFrameActiveTools(active));
-      return;
-    }
-    pi.setActiveTools(rootActiveTools(state ?? defaultState(pi.getActiveTools())));
+    pi.setActiveTools(activeToolsForState(state, pi.getActiveTools()));
   }
 
   function updateUi(ctx: ExtensionContext, state: CallState | undefined): void {
@@ -315,7 +327,6 @@ export default function (pi: ExtensionAPI) {
     }
     const lines: string[] = [];
     const active = topFrame(state);
-    if (state.bobsMode) lines.push("bobs-mode: root tools restricted to call");
     if (active) {
       lines.push(`call frame: ${active.phase} (depth ${state.stack.length})`);
       lines.push(`nested call: ${active.complex ? "allowed" : "disabled"}`);
@@ -335,25 +346,39 @@ export default function (pi: ExtensionAPI) {
     updateUi(ctx, state);
   }
 
-  function scheduleFinish(ctx: ExtensionContext, id: string): void {
-    if (scheduledFinishes.has(id)) return;
-    scheduledFinishes.add(id);
+  async function finishReturn(
+    ctx: ExtensionCommandContext,
+    state: CallState,
+    active: ActiveCallFrame,
+    options: { triggerTurn: boolean },
+  ): Promise<boolean> {
+    if (!active.returnValue || !active.returnPointId) {
+      ctx.ui.notify("No complete call return is ready to finish.", "warning");
+      return false;
+    }
 
-    const poll = () => {
-      const active = topFrame(currentState);
-      if (!active || active.id !== id || active.phase !== "returning") {
-        scheduledFinishes.delete(id);
-        return;
-      }
-      if (!ctx.isIdle()) {
-        setTimeout(poll, 100);
-        return;
-      }
-      scheduledFinishes.delete(id);
-      pi.sendUserMessage(`/call-finish ${id}`, { expandPromptTemplates: true });
-    };
+    const callBranchLeafId = active.callBranchLeafId ?? ctx.sessionManager.getLeafId() ?? undefined;
+    const returnedActive: ActiveCallFrame = { ...active, callBranchLeafId };
+    const result = await ctx.navigateTree(active.returnPointId, { suppressStatus: true });
+    if (result.cancelled) {
+      setState(ctx, replaceTopFrame(state, { ...returnedActive, phase: "paused", reason: "return navigation was cancelled" }));
+      ctx.ui.notify("call return navigation cancelled; call is paused.", "warning");
+      return false;
+    }
 
-    setTimeout(poll, 0);
+    const nextState = popTopFrame(state);
+    setState(ctx, nextState);
+    const content = formatReturn(active.returnValue);
+    pi.sendMessage(
+      {
+        customType: MESSAGE_CUSTOM_TYPE,
+        content,
+        display: true,
+        details: { active: returnedActive, returnValue: active.returnValue },
+      },
+      { triggerTurn: options.triggerTurn },
+    );
+    return true;
   }
 
   pi.registerTool({
@@ -362,6 +387,15 @@ export default function (pi: ExtensionAPI) {
     description: "Enter a call frame to do work.",
     promptSnippet: "Enter a call frame to do work.",
     parameters: callParams,
+    renderCall: renderCallArgs,
+    renderResult() {
+      return {
+        render: () => [],
+        invalidate: () => {
+          /* no-op */
+        },
+      };
+    },
     async execute(_toolCallId, params: CallParams, _signal, _onUpdate, ctx) {
       const state = resolveState(ctx) ?? defaultState(pi.getActiveTools());
       const parent = topFrame(state);
@@ -406,8 +440,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: RETURN_TOOL,
     label: "Return",
-    description: "Return from the call frame with the provided result.",
-    promptSnippet: "Return from the call frame with the provided result",
+    description: "Return exact text from the call frame to the call site.",
+    promptSnippet: "Return exact text from the call frame to the call site",
     parameters: returnParams,
     async execute(_toolCallId, params: ReturnParams, _signal, _onUpdate, ctx) {
       const state = resolveState(ctx);
@@ -425,8 +459,18 @@ export default function (pi: ExtensionAPI) {
         returnValue: params,
         callBranchLeafId: ctx.sessionManager.getLeafId() ?? undefined,
       };
-      setState(ctx, replaceTopFrame(state, returning));
-      scheduleFinish(ctx, returning.id);
+      const returningState = replaceTopFrame(state, returning);
+      setState(ctx, returningState);
+      ctx.clearQueue();
+      ctx.scheduleAfterAgent(async (commandCtx) => {
+        const latestState = currentState;
+        const latestActive = topFrame(latestState);
+        if (!latestState || !latestActive || latestActive.id !== returning.id || latestActive.phase !== "returning") {
+          return undefined;
+        }
+        const continueAgent = await finishReturn(commandCtx, latestState, latestActive, { triggerTurn: false });
+        return { continueAgent };
+      });
       return {
         content: [{ type: "text", text: "Returning to the call site." }],
         details: params,
@@ -479,47 +523,44 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("call-finish", {
-    description: "Finish the active call frame after return has been called.",
+  pi.registerCommand(RETURN_NOW_COMMAND, {
+    description: "Force-return from the active call frame with an error message. Usage: /return-now \"message\"",
     handler: async (args, ctx) => {
-      await ctx.waitForIdle();
-      const requestedId = (args ?? "").trim();
+      const message = parseReturnNowText(args);
+      if (!message) {
+        ctx.ui.notify("Usage: /return-now \"message\"", "warning");
+        return;
+      }
+
+      if (!ctx.isIdle()) {
+        ctx.abort();
+        await ctx.waitForIdle();
+      } else {
+        await ctx.waitForIdle();
+      }
+
       const state = resolveState(ctx);
       const active = topFrame(state);
-      if (!state || !active || active.phase !== "returning" || !active.returnValue || !active.returnPointId) {
-        ctx.ui.notify("No returning call frame to finish.", "warning");
+      if (!state || !active) {
+        ctx.ui.notify("No active call frame to return from.", "warning");
         return;
       }
-      if (requestedId && requestedId !== active.id) {
-        ctx.ui.notify(`Ignoring stale call-finish for ${requestedId}; active call is ${active.id}.`, "warning");
-        return;
-      }
-
-      const callBranchLeafId = ctx.sessionManager.getLeafId() ?? undefined;
-      const returnedActive: ActiveCallFrame = { ...active, callBranchLeafId };
-      const result = await ctx.navigateTree(active.returnPointId);
-      if (result.cancelled) {
-        setState(ctx, {
-          ...replaceTopFrame(state, { ...returnedActive, phase: "paused", reason: "return navigation was cancelled" }),
-        });
-        ctx.ui.notify("call return navigation cancelled; call is paused.", "warning");
+      if (!active.returnPointId) {
+        ctx.ui.notify("The active call frame does not have a return point yet.", "warning");
         return;
       }
 
-      const nextState = popTopFrame(state);
-      appendState(nextState);
-      applyTools(nextState);
-      updateUi(ctx, nextState);
-      const content = formatReturn(active.returnValue, returnedActive);
-      pi.sendMessage(
-        {
-          customType: MESSAGE_CUSTOM_TYPE,
-          content,
-          display: true,
-          details: { active: returnedActive, returnValue: active.returnValue },
-        },
-        { triggerTurn: true },
-      );
+      const returning: ActiveCallFrame = {
+        ...active,
+        phase: "returning",
+        returnValue: { result: message },
+        callBranchLeafId: ctx.sessionManager.getLeafId() ?? undefined,
+      };
+      const returningState = replaceTopFrame(state, returning);
+      setState(ctx, returningState);
+      ctx.clearQueue();
+      ctx.ui.setEditorText?.("");
+      await finishReturn(ctx, returningState, returning, { triggerTurn: true });
     },
   });
 
@@ -559,7 +600,7 @@ export default function (pi: ExtensionAPI) {
         ? "You may call the call tool for substantial delegated subtasks."
         : "Do not call the call tool.";
       return {
-        systemPrompt: `${event.systemPrompt}\n\nYou are inside a call frame. Complete the delegated task using tools as needed. ${delegationGuidance} End by calling return exactly once with a concise structured result.`,
+        systemPrompt: `${event.systemPrompt}\n\nYou are inside a call frame. Complete the delegated task using tools as needed. ${delegationGuidance} End by calling return exactly once with { result: \"...\" }; put the exact text that should be returned to the caller in result.`,
       };
     }
     if (state?.bobsMode && state.stack.length === 0) {
@@ -609,7 +650,7 @@ export default function (pi: ExtensionAPI) {
     const reminded: ActiveCallFrame = { ...active, enforcementCount: active.enforcementCount + 1 };
     setState(ctx, replaceTopFrame(state, reminded));
     void pi.sendUserMessage(
-      "You are still inside a call frame. Call return now with the completed state, changed files, checks, blockers, and notes. Do not do more work unless needed to produce an accurate return.",
+      "You are still inside a call frame. Call return now with { result: \"...\" }. Put the exact concise text that should be returned to the caller in result. Do not do more work unless needed to produce an accurate return.",
       { deliverAs: "followUp" },
     );
   });

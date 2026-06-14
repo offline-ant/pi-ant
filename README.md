@@ -9,7 +9,7 @@ These are the pi tools registered by this package:
 - `ask` — ask the user interactive multiple-choice or free-form questions.
 - `browser` — control persistent Chromium/Firefox sessions through `bin/browser-io`, including navigation, awaited JavaScript eval, and before/after screenshots under `/tmp/browser-io`.
 - `call` — enter an in-session call frame with normal tools enabled; the frame must finish with `return`, and only the compact return result is resumed at the call site.
-- `return` — return from an active `call` frame with a compact structured result.
+- `return` — return exact result text from an active `call` frame.
 - `minitask` — run an isolated one-shot pi RPC task without this session's context.
 - `semaphore_wait` — block until one or more semaphore locks release, backed by `bin/pi-semaphore`.
 - `sqlite` — run `sqlite3` against `AGENTS.db` in the current working directory; auto-enabled when that database exists.
@@ -21,7 +21,7 @@ These are the pi tools registered by this package:
 ## Commands, snippets, and safety extensions
 
 - Semaphore lock commands: `/lock`, `/release`, `/wait`, `/lock-list`.
-- Call-frame commands: `/bobs-mode [on|off|status|toggle]` toggles Bob's mode and can restrict the root tool set to `call`; `/call-finish` is the internal return bridge. See `HOWTO-CALL-MODE.md`.
+- Call-frame commands: `/bobs-mode [on|off|status|toggle]` toggles Bob's mode and can restrict the root tool set to `call`; `/return-now "message"` force-returns from an active call frame with `message` as the result. See `HOWTO-CALL-MODE.md`.
 - Tmux workflow commands: `/clear-stale`, `/tmux-list`, `/prompt-mini`, `/abort-mini`, `/expand-minitask`, `/tmux-fork`.
 - Complete context injection commands: `/read-complete`, `/bash-complete`.
 - SQLite workflow commands: `/sqlite-init`, `/agent-db`.
