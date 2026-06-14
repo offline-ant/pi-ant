@@ -5,17 +5,12 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, SessionEntry, SessionHeader } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 
 const TMUX_SCRIPT = path.resolve(__dirname, "../bin/pi-tmux");
-const PI_FORK = process.env.PI_FORK === "true";
-const FORK_BLOCK_MESSAGE = "You are the fork, this tool is blocked. Do what you were told.";
 
 /** Per-pane state for new-only capture */
 const captureState = new Map<string, number>(); // target:paneId -> totalLines at last capture
@@ -130,26 +125,6 @@ const minitaskParams = Type.Object({
 });
 export type MinitaskInput = Static<typeof minitaskParams>;
 
-const tempforkParams = Type.Object({
-  task: Type.String({
-    minLength: 1,
-    description: "One question or small task to answer in a temporary fork of the current session using pi -p.",
-  }),
-  folder: Type.Optional(
-    Type.String({ description: "Working directory for the temporary fork. Defaults to the current working directory." }),
-  ),
-  simple: Type.Optional(
-    Type.Boolean({
-      description:
-        "Use the same cheap/fallback model sequence as minitask instead of the current session model.",
-    }),
-  ),
-  keepSession: Type.Optional(
-    Type.Boolean({ description: "Keep the temporary snapshot and forked session directory instead of deleting it." }),
-  ),
-});
-export type TempforkInput = Static<typeof tempforkParams>;
-
 type MinitaskResult = {
   task: string;
   answer: string;
@@ -158,13 +133,6 @@ type MinitaskResult = {
 
 type PiPrintTaskRun = MinitaskResult & {
   args: string[];
-};
-
-type TempforkFiles = {
-  root: string;
-  snapshotFile: string;
-  promptFile: string;
-  sessionDir: string;
 };
 
 function formatMinitaskResult(result: MinitaskResult): string {
@@ -185,41 +153,6 @@ function buildPiPrintAttempts(simple: boolean, baseArgs: string[]): string[][] {
     ["--provider", "openai-codex", "--model", "gpt-5.3-codex-spark", "--thinking", "off", ...baseArgs],
     ["--provider", "deepseek", "--model", "deepseek-v4-pro", ...baseArgs],
   ];
-}
-
-async function runPiPrintTask(
-  pi: ExtensionAPI,
-  task: string,
-  cwd: string,
-  baseArgs: string[],
-  simple: boolean,
-  signal?: AbortSignal,
-  forkEnv = false,
-): Promise<PiPrintTaskRun> {
-  let answer = "(no output)";
-  let exitCode = 0;
-  let usedArgs = baseArgs;
-
-  try {
-    for (const args of buildPiPrintAttempts(simple, baseArgs)) {
-      usedArgs = args;
-      const command = forkEnv ? "env" : "pi";
-      const commandArgs = forkEnv ? ["PI_FORK=true", "pi", ...args] : args;
-      const result = await pi.exec(command, commandArgs, { signal, cwd });
-      exitCode = result.code;
-      answer = outputText(result.stdout, result.stderr);
-      if (!simple || result.code === 0) break;
-    }
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw err;
-    }
-
-    answer = `Error: ${err instanceof Error ? err.message : String(err)}`;
-    exitCode = 1;
-  }
-
-  return { task, answer, exitCode, args: usedArgs };
 }
 
 type RpcRecord = Record<string, unknown> & {
@@ -450,8 +383,8 @@ class MiniRpcProcess {
     });
   }
 
-  static start(cwd: string, args: string[], forkEnv: boolean, onEvent: (record: RpcRecord) => void): MiniRpcProcess {
-    const child = spawn(forkEnv ? "env" : "pi", forkEnv ? ["PI_FORK=true", "pi", ...args] : args, {
+  static start(cwd: string, args: string[], onEvent: (record: RpcRecord) => void): MiniRpcProcess {
+    const child = spawn("pi", args, {
       cwd,
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -577,7 +510,6 @@ async function runPiRpcTask(
   signal: AbortSignal | undefined,
   onUpdate: ((update: { content: Array<{ type: "text"; text: string }>; details: unknown }) => void) | undefined,
   callbacks: MiniRpcRunCallbacks,
-  forkEnv = false,
 ): Promise<PiPrintTaskRun> {
   let answer = "(no output)";
   let exitCode = 0;
@@ -612,7 +544,7 @@ async function runPiRpcTask(
       publishLiveState();
     };
 
-    const mini = MiniRpcProcess.start(cwd, args, forkEnv, (record) => {
+    const mini = MiniRpcProcess.start(cwd, args, (record) => {
       if (record.type === "tool_execution_start") {
         const toolCallId = typeof record.toolCallId === "string" ? record.toolCallId : `tool-${liveState.tools.size + 1}`;
         liveState.tools.set(toolCallId, {
@@ -708,66 +640,6 @@ async function runPiRpcTask(
   }
 
   return { task, answer, exitCode, args: usedArgs };
-}
-
-function assistantHasToolCall(message: AssistantMessage): boolean {
-  return message.content.some((content) => content.type === "toolCall");
-}
-
-function pruneUnresolvedToolCallTail(entries: SessionEntry[]): SessionEntry[] {
-  let pendingToolCallIds = new Set<string>();
-  let pendingStartIndex: number | undefined;
-
-  for (let i = 0; i < entries.length; i++) {
-    const entry = entries[i];
-    if (entry.type !== "message") continue;
-
-    if (entry.message.role === "assistant") {
-      if (assistantHasToolCall(entry.message)) {
-        pendingToolCallIds = new Set(
-          entry.message.content
-            .filter((content) => content.type === "toolCall")
-            .map((content) => content.id),
-        );
-        pendingStartIndex = i;
-      } else if (pendingToolCallIds.size > 0) {
-        pendingToolCallIds = new Set();
-        pendingStartIndex = undefined;
-      }
-      continue;
-    }
-
-    if (entry.message.role === "toolResult") {
-      pendingToolCallIds.delete(entry.message.toolCallId);
-      if (pendingToolCallIds.size === 0) {
-        pendingStartIndex = undefined;
-      }
-      continue;
-    }
-
-    if (entry.message.role === "user" && pendingToolCallIds.size > 0) {
-      pendingToolCallIds = new Set();
-      pendingStartIndex = undefined;
-    }
-  }
-
-  return pendingToolCallIds.size > 0 && pendingStartIndex !== undefined
-    ? entries.slice(0, pendingStartIndex)
-    : entries;
-}
-
-async function createTempforkFiles(header: SessionHeader, entries: SessionEntry[], task: string): Promise<TempforkFiles> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tempfork-"));
-  const snapshotFile = path.join(root, "snapshot.jsonl");
-  const promptFile = path.join(root, "prompt.md");
-  const sessionDir = path.join(root, "sessions");
-  const snapshotEntries: Array<SessionHeader | SessionEntry> = [header, ...pruneUnresolvedToolCallTail(entries)];
-
-  await fs.mkdir(sessionDir, { recursive: true });
-  await fs.writeFile(snapshotFile, `${snapshotEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
-  await fs.writeFile(promptFile, task, "utf8");
-
-  return { root, snapshotFile, promptFile, sessionDir };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -1090,104 +962,6 @@ export default function (pi: ExtensionAPI) {
         content: [{ type: "text", text }],
         details: {
           simple: params.simple === true,
-          result,
-          args: result.args,
-        },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "tempfork",
-    label: "Tempfork",
-    description:
-      "Run one isolated small task or question in a temporary fork of the current session with pi -p. " +
-      "Use when the task needs this conversation's context but should not modify the current session.",
-    promptSnippet: "Run a one-shot pi -p task in a temporary fork of the current session",
-    promptGuidelines: [
-      "Use tempfork for independent one-shot questions that need the current session context; use minitask when no current-session context is needed.",
-      "Do not use tempfork for dependent follow-up work because each tempfork runs in its own temporary session and exits.",
-    ],
-    parameters: tempforkParams,
-    renderCall(args) {
-      const payloadValue = args.task === undefined
-        ? args
-        : args.simple === true || args.keepSession === true || args.folder !== undefined
-          ? {
-              task: args.task,
-              ...(args.folder !== undefined ? { folder: args.folder } : {}),
-              ...(args.simple === true ? { simple: true } : {}),
-              ...(args.keepSession === true ? { keepSession: true } : {}),
-            }
-          : args.task;
-      const payload = JSON.stringify(payloadValue, null, 2) ?? String(payloadValue);
-      const lines = ["tempfork(", ...payload.split("\n").map((line) => `  ${line}`), ")"];
-
-      return {
-        render: (contentWidth: number) => lines.flatMap((line) => wrapTextWithAnsi(line, contentWidth)),
-        invalidate: () => {
-          /* no-op */
-        },
-      };
-    },
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      if (PI_FORK) {
-        return {
-          content: [{ type: "text", text: FORK_BLOCK_MESSAGE }],
-          details: { blocked: true, reason: "PI_FORK=true" },
-          terminate: true,
-        };
-      }
-
-      const header = ctx.sessionManager.getHeader();
-      if (!header) {
-        throw new Error("Current session has no header; cannot create tempfork");
-      }
-
-      const cwd = path.resolve(ctx.cwd, params.folder ?? ".");
-      let files: TempforkFiles | undefined;
-      let result: PiPrintTaskRun | undefined;
-
-      try {
-        files = await createTempforkFiles(header, ctx.sessionManager.getBranch(), params.task);
-        result = await runPiRpcTask(
-          params.task,
-          cwd,
-          ["--fork", files.snapshotFile, "--session-dir", files.sessionDir, "--mode", "rpc"],
-          params.simple === true,
-          signal,
-          onUpdate,
-          {
-            isExpanded: () => miniTaskExpanded,
-            onStart(task) {
-              activeMiniTask = task;
-            },
-            onDone(task) {
-              if (activeMiniTask?.id === task.id) {
-                activeMiniTask = undefined;
-              }
-            },
-          },
-          true,
-        );
-      } finally {
-        if (files && params.keepSession !== true) {
-          await fs.rm(files.root, { recursive: true, force: true });
-        }
-      }
-
-      if (!result) {
-        throw new Error("tempfork did not produce a result");
-      }
-
-      const text = formatMinitaskResult(result);
-
-      return {
-        content: [{ type: "text", text }],
-        details: {
-          simple: params.simple === true,
-          kept: params.keepSession === true,
-          files: params.keepSession === true ? files : undefined,
           result,
           args: result.args,
         },
