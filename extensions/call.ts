@@ -359,15 +359,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: CALL_TOOL,
     label: "Call",
-    description:
-      "Enter a call frame for a delegated task using the current conversation context. The call frame gets normal tools and must finish by calling return.",
-    promptSnippet: "Enter a call frame for a delegated task, then resume from its compact return result",
-    promptGuidelines: [
-      "Use call to perform operational work that needs tools while keeping the root conversation focused on compact return results.",
-      "Call call as the only tool call in an assistant turn; do not combine call with read, bash, edit, or other operational tools.",
-      "Set complex to true only when this call frame may need to delegate substantial subtasks via nested call frames.",
-      "Do not call the call tool for trivial final answers that need no tool work.",
-    ],
+    description: "Enter a call frame to do work.",
+    promptSnippet: "Enter a call frame to do work.",
     parameters: callParams,
     async execute(_toolCallId, params: CallParams, _signal, _onUpdate, ctx) {
       const state = resolveState(ctx) ?? defaultState(pi.getActiveTools());
@@ -413,12 +406,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: RETURN_TOOL,
     label: "Return",
-    description: "Return from the active call frame with a compact structured result.",
-    promptSnippet: "Return from the active call frame with a compact structured result",
-    promptGuidelines: [
-      "Use return exactly once as the final action in a call frame.",
-      "The return summary should be concise and include changed files, checks, blockers, and important notes.",
-    ],
+    description: "Return from the call frame with the provided result.",
+    promptSnippet: "Return from the call frame with the provided result",
     parameters: returnParams,
     async execute(_toolCallId, params: ReturnParams, _signal, _onUpdate, ctx) {
       const state = resolveState(ctx);
@@ -575,7 +564,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (state?.bobsMode && state.stack.length === 0) {
       return {
-        systemPrompt: `${event.systemPrompt}\n\nBob's mode is active. The root conversation should not do operational tool work directly. Use call for work that needs tools, and otherwise answer concisely from the compact results already returned.`,
+        systemPrompt: `${event.systemPrompt}\n\nBob's mode is active. Treat the root conversation as an orchestration thread, not a work thread. Default to call for any task, continuation, status check, recommendation, or question whose answer is not already fully available from compact root context. Do not give generic next-step options when current project/session state is unknown; call a frame to inspect and return a compact recommendation. Answer directly only for purely conversational/conceptual questions or when recent compact call results already contain all needed facts.`,
       };
     }
     return undefined;

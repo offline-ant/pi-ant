@@ -46,9 +46,17 @@ as its final action.
 /bobs-mode status
 ```
 
-When Bob's mode is on, root active tools are restricted to `call`. Inside a call
-frame, pi restores the tools that were active before Bob's mode was enabled,
-adds `return`, and removes `call` to avoid recursion.
+When Bob's mode is on, root active tools are restricted to `call`. The root is
+an orchestration thread, not a work thread: default to `call` for tasks,
+continuation, status checks, recommendations, and questions whose answers are not
+already fully available from compact root context. In particular, do not offer
+generic next-step options when current project/session state is unknown; call a
+frame to inspect and return a compact recommendation. Answer directly only for
+purely conversational/conceptual questions or when recent compact call results
+already contain the needed facts.
+
+Inside a call frame, pi restores the tools that were active before Bob's mode was
+enabled, adds `return`, and removes `call` to avoid recursion.
 
 `/call-finish` is an internal command used by `return` to navigate back to the call
 site.
