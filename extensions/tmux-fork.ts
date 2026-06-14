@@ -15,7 +15,7 @@ const PI_FORK = process.env.PI_FORK === "true";
 const FORK_BLOCK_MESSAGE = "You are the fork, this tool is blocked. Do what you were told.";
 const FORK_SYSTEM_PROMPT = [
   "You are running in a forked/sub-agent pi process, not the original controlling session.",
-  "Do not call tmux-fork or tempfork from this process; those tools are blocked here.",
+  "Do not call tmux-fork from this process; that tool is blocked here.",
   "Complete only the task you were given and report the result back.",
 ].join("\n");
 
