@@ -18,21 +18,26 @@
     "pi-semaphore": "./bin/pi-semaphore",
     "pi-tmux": "./bin/pi-tmux",
     "pi-claude-agent": "./bin/pi-claude-agent",
-    "browser-io": "./bin/browser-io"
+    "browser-io": "./bin/browser-io",
+    "pi-guidance-loop": "./bin/pi-guidance-loop"
   },
   "pi": {
     "extensions": [
+      "./extensions/nesting.ts",
       "./extensions/semaphore-locks.ts",
       "./extensions/tmux.ts",
       "./extensions/read-complete.ts",
       "./extensions/lints.ts",
       "./extensions/exec-lints.ts",
       "./extensions/tweaks.ts",
+      "./extensions/guidance.ts",
+      "./extensions/ugo.ts",
       "./extensions/ask.ts",
       "./extensions/reflect.ts",
       "./extensions/working-text.ts",
       "./extensions/sqlite.ts",
       "./extensions/cwd.ts",
+      "./extensions/workboard.ts",
       "./extensions/worktree.ts",
       "./extensions/tmux-fork.ts",
       "./extensions/context-explorer.ts",

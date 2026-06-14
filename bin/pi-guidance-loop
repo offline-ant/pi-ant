@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+
+RESULT_RE = re.compile(r"<pi-guidance-result>\s*(\{.*?\})\s*</pi-guidance-result>", re.S)
+DEFAULT_PROMPT = "Investigate the lowest runnable item in workboard.md and call present_guidance with the result."
+LOCK_FILE = ".workboard-guidance.lock"
+
+
+def acquire_lock():
+    lock = open(LOCK_FILE, "w", encoding="utf-8")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print(f"Another pi-guidance-loop is already running in this directory ({LOCK_FILE}).", file=sys.stderr)
+        raise SystemExit(2)
+    lock.write(str(os.getpid()))
+    lock.flush()
+    return lock
+
+
+def run_pi(prompt, guidance=False):
+    env = os.environ.copy()
+    if guidance:
+        env["PI_GUIDANCE"] = "true"
+    else:
+        env.pop("PI_GUIDANCE", None)
+
+    result = subprocess.run(
+        ["pi", "-p", prompt],
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    return result.returncode, result.stdout
+
+
+def parse_guidance(output):
+    matches = RESULT_RE.findall(output)
+    if not matches:
+        raise ValueError("No <pi-guidance-result> JSON block found in guidance output")
+    return json.loads(matches[-1])
+
+
+def apply_workboard_update(update):
+    prompt = "\n".join([
+        "Apply this workboard.md update only.",
+        "Do not change source code or authority docs.",
+        "Edit workboard.md so it reflects the requested state change.",
+        "If workboard.md does not exist, report that and stop.",
+        "",
+        "Requested update:",
+        update,
+    ])
+    return run_pi(prompt, guidance=False)
+
+
+def main():
+    _lock = acquire_lock()
+    max_iterations = int(os.environ.get("PI_GUIDANCE_MAX_ITERATIONS", "20"))
+    prompt = " ".join(sys.argv[1:]).strip() or DEFAULT_PROMPT
+
+    for iteration in range(1, max_iterations + 1):
+        print(f"\n=== guidance iteration {iteration} ===", flush=True)
+        code, output = run_pi(prompt, guidance=True)
+        print(output, end="" if output.endswith("\n") else "\n", flush=True)
+        if code != 0:
+            return code
+
+        try:
+            guidance = parse_guidance(output)
+        except Exception as exc:
+            print(f"Failed to parse guidance output: {exc}", file=sys.stderr)
+            return 2
+
+        status = guidance.get("status")
+        if status == "STALLED":
+            print("PI guidance stalled; stopping.", flush=True)
+            return 0
+
+        if status == "DONE":
+            update = guidance.get("workboardUpdate")
+            if not isinstance(update, str) or not update.strip():
+                print("DONE guidance did not include workboardUpdate; stopping.", file=sys.stderr)
+                return 2
+            print("\n=== applying workboard update ===", flush=True)
+            code, output = apply_workboard_update(update)
+            print(output, end="" if output.endswith("\n") else "\n", flush=True)
+            if code != 0:
+                return code
+            prompt = DEFAULT_PROMPT
+            continue
+
+        if status == "CONTINUE":
+            next_prompt = guidance.get("nextPrompt")
+            if not isinstance(next_prompt, str) or not next_prompt.strip():
+                print("CONTINUE guidance did not include nextPrompt; stopping.", file=sys.stderr)
+                return 2
+            print("\n=== executing guidance nextPrompt ===", flush=True)
+            code, output = run_pi(next_prompt, guidance=False)
+            print(output, end="" if output.endswith("\n") else "\n", flush=True)
+            if code != 0:
+                return code
+            prompt = DEFAULT_PROMPT
+            continue
+
+        print(f"Unknown guidance status: {status!r}", file=sys.stderr)
+        return 2
+
+    print(f"Reached PI_GUIDANCE_MAX_ITERATIONS={max_iterations}; stopping.", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

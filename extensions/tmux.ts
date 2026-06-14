@@ -1130,7 +1130,7 @@ export default function (pi: ExtensionAPI) {
         },
       };
     },
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
       if (PI_FORK) {
         return {
           content: [{ type: "text", text: FORK_BLOCK_MESSAGE }],
@@ -1150,13 +1150,24 @@ export default function (pi: ExtensionAPI) {
 
       try {
         files = await createTempforkFiles(header, ctx.sessionManager.getBranch(), params.task);
-        result = await runPiPrintTask(
-          pi,
+        result = await runPiRpcTask(
           params.task,
           cwd,
-          ["--fork", files.snapshotFile, "--session-dir", files.sessionDir, "-p", `@${files.promptFile}`],
+          ["--fork", files.snapshotFile, "--session-dir", files.sessionDir, "--mode", "rpc"],
           params.simple === true,
           signal,
+          onUpdate,
+          {
+            isExpanded: () => miniTaskExpanded,
+            onStart(task) {
+              activeMiniTask = task;
+            },
+            onDone(task) {
+              if (activeMiniTask?.id === task.id) {
+                activeMiniTask = undefined;
+              }
+            },
+          },
           true,
         );
       } finally {

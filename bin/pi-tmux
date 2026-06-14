@@ -272,8 +272,13 @@ cmd_bash() {
   local wrapped_command
   wrapped_command="if ( ${command} ); then status=0; else status=\$?; fi; rm -f '$(lock_path "$lock_name")'; printf '%s\n' \"\${TMUX_PANE:-}\" > '$(idle_path "$lock_name")'; exit \$status"
 
+  local env_flags=(-e "PI_LOCK_NAME=$lock_name")
+  if [[ -n "${PI_NESTED:-}" ]]; then
+    env_flags+=(-e "PI_NESTED=$PI_NESTED")
+  fi
+
   local pane_id
-  if ! pane_id="$(tmux new-window -n "$lock_name" -d -P -F '#{pane_id}' -e "PI_LOCK_NAME=$lock_name" -- bash -lc "$wrapped_command" 2>&1)"; then
+  if ! pane_id="$(tmux new-window -n "$lock_name" -d -P -F '#{pane_id}' "${env_flags[@]}" -- bash -lc "$wrapped_command" 2>&1)"; then
     rm -f -- "$(lock_path "$lock_name")"
     echo "error: failed to create tmux pane: $pane_id" >&2
     return 1
@@ -677,6 +682,9 @@ cmd_coding_agent() {
 
   # Build env flags for tmux new-window
   local env_flags=(-e "PI_LOCK_NAME=$lock_name")
+  if [[ -n "${PI_NESTED:-}" ]]; then
+    env_flags+=(-e "PI_NESTED=$PI_NESTED")
+  fi
   if [[ -n "$context_alert" ]]; then
     env_flags+=(-e "PI_CONTEXT_ALERT=$context_alert")
   fi
@@ -809,6 +817,9 @@ cmd_session_agent() {
   lock_name="$(find_unique_lock_name "$safe_name")"
 
   local env_flags=(-e "PI_LOCK_NAME=$lock_name" -e "PI_FORK=true")
+  if [[ -n "${PI_NESTED:-}" ]]; then
+    env_flags+=(-e "PI_NESTED=$PI_NESTED")
+  fi
   if [[ -n "$context_alert" ]]; then
     env_flags+=(-e "PI_CONTEXT_ALERT=$context_alert")
   fi
@@ -942,6 +953,9 @@ cmd_claude_agent() {
     -e "PI_CLI_PATH=$(command -v pi)"
     -e "PI_CLAUDE_ARGC=${#claude_args_array[@]}"
   )
+  if [[ -n "${PI_NESTED:-}" ]]; then
+    env_flags+=(-e "PI_NESTED=$PI_NESTED")
+  fi
   local i
   for i in "${!claude_args_array[@]}"; do
     env_flags+=(-e "PI_CLAUDE_ARG_${i}=${claude_args_array[$i]}")
