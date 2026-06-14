@@ -13,20 +13,22 @@ export const CUT_SUFFIX =
 export const MINI_REVIEW_SUFFIX =
   "Ask minitask for a generic review of this, just issues and potential improvements. Then you evaluate its suggestions: apply clearly good ones, ignore bad ones, and ask me about anything uncertain.";
 
-export const MINIVISE_SNIPPET = `Use minitask to execute the plan we just discussed. Your task as supervisor:
+export const CALL_PROGRESS_SNIPPET = `Use call to execute the plan we just discussed. Your task as controller:
 
-Important: every minitask starts with a fresh conversation and has no previous knowledge of this discussion, prior minitasks, or their work. It will already have read AGENTS.md/context files for the working directory, so only provide task-specific context: the plan, current state, relevant files, constraints not already covered there, and exactly what scope it should attempt.
+Important: call opens a call frame in the current session context with tools enabled. The call frame must finish by calling return. The tool-heavy call branch stays inspectable in the session tree, while the controller resumes from only the compact return result.
 
-Start with a single minitask assigned to execute the entire feasible plan as far as possible. Do not split the work into phases by default. Use additional minitasks only after the prior minitask returns with completed work, blockers, remaining scope, or a clear handoff; or when multiple independent, non-overlapping tasks can safely run in parallel. For dependent tasks or tasks that may edit the same files, run minitasks serially and include the latest state/results in each new prompt.
+Start with a single call assigned to execute the entire feasible plan as far as possible. Do not split the work into phases by default. Use additional calls only after the prior call returns with completed work, blockers, remaining scope, or a clear handoff. For dependent tasks or tasks that may edit the same files, run calls serially and include the latest returned state/results in each new call task.
 
-Tell each minitask to:
+Tell each call frame to:
 
-1. Execute as much of the supplied plan and scope as possible before reporting back.
+1. Execute as much of the supplied plan and scope as possible before returning.
 2. Make the necessary code, document, and spec changes directly when safe.
 3. Run focused relevant checks when practical.
-4. Return a concise report of what was done, files changed if known, checks run and results, remaining work, and any unexpected problems, obstacles, or blockers.
+4. If the work writes or materially changes a plan, ask minitask for a generic review of the plan before returning. Triage the review in the same call frame: apply clearly good suggestions, ignore bad ones, and move real unresolved questions to needs-decision with a scratch/decisions artifact.
+5. Update workboard.md as required before returning, when this work came from a workboard item.
+6. Call return with a concise report of what was done, files changed, checks run and results, remaining work, and any unexpected problems, obstacles, or blockers.
 
-After each minitask returns, inspect its report, verify or clean up as needed, and decide whether another minitask should continue with updated context. You may pause when a major unexpected blocker or design choice is uncovered.
+After each return, inspect the result, verify or clean up as needed, and decide whether another call should continue with updated context. You may pause when a major unexpected blocker or design choice is uncovered.
 
 You are done when all feasible parts of the plan have been implemented, relevant specs and documents updated, relevant checks completed or clearly reported, and you have returned a final summary of what was done plus any remaining obstacles.`;
 
@@ -58,18 +60,19 @@ Check:
 
 Return: recommended shape, avoided abstractions/shims, state ownership, semantic risks, names to remove/rename, and questions for me if any. Do not implement until this review is done.`;
 
-export const ENRICH_SNIPPET = `Use minitask for an enrichment pass only. Do not implement.
+export const ENRICH_SNIPPET = `Perform an enrichment pass only. Do not implement source changes or authority-doc changes.
 
-Read the relevant required-reading, handoff, plans, and current code/docs for this topic.
+Read the relevant required-reading, handoff, plans, and current code/docs for this topic. If you write or materially change a plan, ask minitask for a generic review of the plan before finishing, then triage the review in the same pass: apply clearly good suggestions, ignore bad ones, and split real unresolved questions into needs-decision with a scratch/decisions artifact.
 
-Return:
+Return with:
 1. Current factual state with file references.
 2. Stale or contradictory docs.
-3. Open design questions.
+3. Open design questions, with decision artifacts for questions needing human input.
 4. What can be decided now vs what needs user input.
 5. Risks of overcomplication or stale compatibility.
+6. How workboard.md was updated: usually move executable enriched work to ready, or move blockers to needs-decision.
 
-Separate facts, inferences, and guesses. Do not edit files.`;
+Separate facts, inferences, and guesses. Do not edit source code or authority docs during enrichment.`;
 
 export const DISTILL_SNIPPET = `Before finishing, distill durable facts from this work.
 
@@ -100,9 +103,9 @@ export const SNIPPETS: PromptSnippet[] = [
     description: "Insert the minitask review suffix",
   },
   {
-    key: "minivise",
-    value: MINIVISE_SNIPPET,
-    description: "Insert minitask supervisor instructions",
+    key: "call-progress",
+    value: CALL_PROGRESS_SNIPPET,
+    description: "Insert call-frame progress instructions",
   },
   {
     key: "supervise",
@@ -117,7 +120,7 @@ export const SNIPPETS: PromptSnippet[] = [
   {
     key: "enrich",
     value: ENRICH_SNIPPET,
-    description: "Insert minitask enrichment instructions",
+    description: "Insert enrichment instructions",
   },
   {
     key: "distill",

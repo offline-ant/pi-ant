@@ -264,15 +264,16 @@ function decisionSignalPrompt(
 function formatGuidanceSummary(
   guidance: PresentGuidanceParams,
   prompt: string | undefined,
+  displayUgoLabels = false,
 ): string {
   const lines = [
-    `Guidance result: ${guidance.status}`,
+    `${displayUgoLabels ? "ugo-guide result" : "Guidance result"}: ${guidance.status}`,
     `Item: ${guidance.item}`,
     `Reason: ${guidance.reason}`,
   ];
   if (guidance.artifact) lines.push(`Artifact: ${guidance.artifact}`);
   if (guidance.notes) lines.push(`Notes: ${guidance.notes}`);
-  if (prompt) lines.push("", "Do prompt:", prompt);
+  if (prompt) lines.push("", displayUgoLabels ? "ugo-do prompt:" : "Worker prompt:", prompt);
   if (guidance.choices && guidance.choices.length > 0) {
     lines.push("", "Choices:");
     for (const choice of guidance.choices) {
@@ -286,10 +287,18 @@ function formatGuidanceSummary(
 
 function formatSessionMessage(state: UgoState): string {
   if (state.phase === "guide")
-    return `Ugo: guide phase #${state.iteration} (${state.mode}).`;
+    return "Select the next runnable workboard.md item and present the guidance result.";
   if (state.phase === "do" && state.previousGuidance)
     return formatGuidanceSummary(state.previousGuidance, state.doPrompt);
-  return `Ugo: ${state.phase}${state.reason ? ` — ${state.reason}` : ""}.`;
+  return `Workboard state: ${state.phase}${state.reason ? ` — ${state.reason}` : ""}.`;
+}
+
+function formatDisplaySessionMessage(state: UgoState): string {
+  if (state.phase === "guide")
+    return `ugo-guide phase #${state.iteration} (${state.mode}).`;
+  if (state.phase === "do" && state.previousGuidance)
+    return formatGuidanceSummary(state.previousGuidance, state.doPrompt, true);
+  return `${stateActor(state)} ${state.phase}${state.reason ? ` — ${state.reason}` : ""}.`;
 }
 
 function hasReplacementMessageMethods(
@@ -315,6 +324,17 @@ function promptPreview(prompt: string): string {
   return `${prompt.slice(0, 120)}${prompt.length > 120 ? "…" : ""}`;
 }
 
+function phaseActor(phase: "guide" | "do"): "ugo-guide" | "ugo-do" {
+  return phase === "guide" ? "ugo-guide" : "ugo-do";
+}
+
+function stateActor(state: UgoState): string {
+  if (state.phase === "guide" || state.phase === "do")
+    return phaseActor(state.phase);
+  if (state.phase === "stalled") return "ugo-guide";
+  return "ugo";
+}
+
 function updateUi(ctx: ExtensionContext, state: UgoState | undefined): void {
   if (!state?.active) {
     ctx.ui.setStatus("ugo", undefined);
@@ -322,39 +342,40 @@ function updateUi(ctx: ExtensionContext, state: UgoState | undefined): void {
     return;
   }
 
+  const actor = stateActor(state);
   ctx.ui.setStatus(
     "ugo",
-    ctx.ui.theme.fg("accent", `ugo:${state.phase}#${state.iteration}`),
+    ctx.ui.theme.fg("accent", `${actor}:${state.phase}#${state.iteration}`),
   );
 
   const widget = [
-    `ugo: ${state.phase} phase #${state.iteration} (${state.mode})`,
+    `${actor}: ${state.phase} phase #${state.iteration} (${state.mode})`,
   ];
   if (state.phase === "guide") {
     if (state.previousGuidance)
       widget.push(
-        `previous guidance: ${state.previousGuidance.status} — ${state.previousGuidance.item}`,
+        `previous ugo-guide result: ${state.previousGuidance.status} — ${state.previousGuidance.item}`,
       );
     widget.push("current: choosing next workboard step");
   } else if (state.phase === "do") {
     if (state.previousGuidance)
       widget.push(
-        `guidance: ${state.previousGuidance.status} — ${state.previousGuidance.item}`,
+        `ugo-guide result: ${state.previousGuidance.status} — ${state.previousGuidance.item}`,
       );
     if (state.doPrompt) {
       const label =
         state.mode === "manual" && !state.doCompleted
-          ? "do prompt ready"
-          : "current do prompt";
+          ? "ugo-do prompt ready"
+          : "current ugo-do prompt";
       widget.push(`${label}: ${promptPreview(state.doPrompt)}`);
     }
   } else {
     if (state.lastGuidance)
       widget.push(
-        `guidance: ${state.lastGuidance.status} — ${state.lastGuidance.item}`,
+        `ugo-guide result: ${state.lastGuidance.status} — ${state.lastGuidance.item}`,
       );
     if (state.doPrompt)
-      widget.push(`do prompt: ${promptPreview(state.doPrompt)}`);
+      widget.push(`ugo-do prompt: ${promptPreview(state.doPrompt)}`);
   }
   if (state.reason) widget.push(`reason: ${state.reason}`);
   ctx.ui.setWidget("ugo", widget);
@@ -481,25 +502,26 @@ function commitMessage(params: {
     params.state.previousGuidance?.item ??
     params.state.lastGuidance?.item ??
     params.state.phase;
+  const actor = phaseActor(params.phase);
   return [
     commitSubject(item),
     "",
-    `Ugo phase: ${params.phase}`,
-    `Ugo iteration: ${params.state.iteration}`,
-    `Ugo mode: ${params.state.mode}`,
+    `${actor} phase`,
+    `ugo loop iteration: ${params.state.iteration}`,
+    `ugo mode: ${params.state.mode}`,
     params.sessionFile ? `Session: ${params.sessionFile}` : undefined,
     "",
-    "Guidance:",
+    "ugo-guide result:",
     guidanceDetails(
       params.guidance ??
         params.state.previousGuidance ??
         params.state.lastGuidance,
     ),
     "",
-    "Prompt:",
+    `${actor} prompt:`,
     params.prompt.trim() || "(empty)",
     "",
-    "Agent result:",
+    `${actor} result:`,
     params.response.trim() || "(no assistant text captured)",
     "",
   ]
@@ -600,15 +622,16 @@ function statusPath(line: string): string {
     : rawPath;
 }
 
-function isWatchedDecisionPath(path: string): boolean {
-  return path === WORKBOARD_FILE || path.startsWith(`${DECISIONS_DIR}/`);
+function isWorkboardOrScratchPath(path: string): boolean {
+  const normalized = path.startsWith("./") ? path.slice(2) : path;
+  return normalized === WORKBOARD_FILE || normalized.startsWith("scratch/");
 }
 
-function statusOnlyTouchesDecisionFiles(status: string): boolean {
+function statusOnlyTouchesWorkboardOrScratch(status: string): boolean {
   if (!status.trim()) return true;
   return status
     .split(/\r?\n/)
-    .every((line) => isWatchedDecisionPath(statusPath(line)));
+    .every((line) => isWorkboardOrScratchPath(statusPath(line)));
 }
 
 export default function (pi: ExtensionAPI) {
@@ -711,19 +734,19 @@ export default function (pi: ExtensionAPI) {
         ...params,
       });
       if (committed)
-        ctx.ui.notify(`Ugo committed ${params.phase} phase.`, "info");
+        ctx.ui.notify(`${phaseActor(params.phase)} committed.`, "info");
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const pausedState: UgoState = {
         ...params.state,
         phase: "paused",
-        reason: `git commit failed after ${params.phase}: ${message}`,
+        reason: `git commit failed after ${params.phase === "guide" ? "guidance" : "worker"} step: ${message}`,
       };
       await persistCurrentState(ctx, pausedState);
       updateUi(ctx, pausedState);
       ctx.ui.notify(
-        `Ugo paused: git commit failed after ${params.phase}. ${message}`,
+        `ugo paused: git commit failed after ${phaseActor(params.phase)}. ${message}`,
         "error",
       );
       return false;
@@ -770,7 +793,7 @@ export default function (pi: ExtensionAPI) {
         if (latestState && !latestState.active) {
           updateUi(signalCtx, latestState);
           signalCtx.ui.notify(
-            "Ugo is disabled; not committing or continuing.",
+            "ugo disabled; not committing or continuing.",
             "info",
           );
           return;
@@ -794,7 +817,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     if (result.cancelled)
-      ctx.ui.notify("Ugo decision signal session was cancelled.", "warning");
+      ctx.ui.notify("ugo-do decision signal session was cancelled.", "warning");
   }
 
   function scheduleDecisionSignalScan(
@@ -813,11 +836,11 @@ export default function (pi: ExtensionAPI) {
           const signal = await scanDecisionSignals(ctx.cwd);
           if (!signal) return;
           const status = await gitStatus(ctx.cwd);
-          if (!statusOnlyTouchesDecisionFiles(status)) {
+          if (!statusOnlyTouchesWorkboardOrScratch(status)) {
             if (!decisionWatcherBlocked) {
               decisionWatcherBlocked = true;
               ctx.ui.notify(
-                "Ugo saw a DONE/CLARIFY signal but unrelated files are dirty. Clean or commit them, then save the signal file again or run /ugo-continue.",
+                "ugo-guide saw a DONE/CLARIFY signal but non-scratch files are dirty. Clean or commit them, then save the signal file again or run /ugo-continue.",
                 "warning",
               );
             }
@@ -827,7 +850,10 @@ export default function (pi: ExtensionAPI) {
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
-          ctx.ui.notify(`Ugo decision watcher failed: ${message}`, "error");
+          ctx.ui.notify(
+            `ugo-guide decision watcher failed: ${message}`,
+            "error",
+          );
         } finally {
           decisionWatcherBusy = false;
         }
@@ -854,7 +880,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
     ctx.ui.notify(
-      "Ugo is watching workboard.md and scratch/decisions for DONE:/CLARIFY:.",
+      "ugo-guide is watching workboard.md and scratch/decisions for DONE:/CLARIFY:.",
       "info",
     );
     scheduleDecisionSignalScan(ctx, state);
@@ -877,14 +903,14 @@ export default function (pi: ExtensionAPI) {
       withSession: async (doCtx) => {
         updateUi(doCtx, state);
         if (!state.doPrompt) {
-          doCtx.ui.notify("Ugo do phase has no do prompt.", "error");
+          doCtx.ui.notify("ugo-do has no prompt.", "error");
           return;
         }
 
         if (state.mode === "manual") {
           doCtx.ui.setEditorText(state.doPrompt);
           doCtx.ui.notify(
-            "Ugo prepared the do prompt. Edit or submit it, then run /ugo-continue after the turn finishes.",
+            "ugo-do prompt prepared. Edit or submit it, then run /ugo-continue after the turn finishes.",
             "info",
           );
           return;
@@ -895,7 +921,7 @@ export default function (pi: ExtensionAPI) {
         if (latestState && !latestState.active) {
           updateUi(doCtx, latestState);
           doCtx.ui.notify(
-            "Ugo is disabled; not committing or continuing.",
+            "ugo disabled; not committing or continuing.",
             "info",
           );
           return;
@@ -912,7 +938,7 @@ export default function (pi: ExtensionAPI) {
         const afterCommitState = getLatestState(doCtx);
         if (afterCommitState && !afterCommitState.active) {
           updateUi(doCtx, afterCommitState);
-          doCtx.ui.notify("Ugo is disabled; not continuing.", "info");
+          doCtx.ui.notify("ugo disabled; not continuing.", "info");
           return;
         }
         await runGuideSession(doCtx, {
@@ -925,7 +951,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     if (result.cancelled)
-      ctx.ui.notify("Ugo do session was cancelled.", "warning");
+      ctx.ui.notify("ugo-do session was cancelled.", "warning");
   }
 
   async function continueAfterGuidance(
@@ -943,7 +969,7 @@ export default function (pi: ExtensionAPI) {
       };
       await persistCurrentState(ctx, stalledState);
       updateUi(ctx, stalledState);
-      ctx.ui.notify(`Ugo stalled: ${guidance.reason}`, "warning");
+      ctx.ui.notify(`ugo-guide stalled: ${guidance.reason}`, "warning");
       await startDecisionWatcher(ctx, stalledState);
       return;
     }
@@ -959,12 +985,12 @@ export default function (pi: ExtensionAPI) {
         active: true,
         phase: "paused",
         lastGuidance: guidance,
-        reason: "guidance did not include an executable prompt",
+        reason: "guidance did not include an executable worker prompt",
       };
       await persistCurrentState(ctx, pausedState);
       updateUi(ctx, pausedState);
       ctx.ui.notify(
-        "Ugo paused: guidance did not include a prompt.",
+        "ugo-guide paused: guidance did not include a ugo-do prompt.",
         "warning",
       );
       return;
@@ -997,7 +1023,7 @@ export default function (pi: ExtensionAPI) {
       await persistCurrentState(ctx, pausedState);
       updateUi(ctx, pausedState);
       ctx.ui.notify(
-        `Ugo paused after ${state.maxIterations} guide iterations.`,
+        `ugo-guide paused after ${state.maxIterations} iterations.`,
         "warning",
       );
       return;
@@ -1035,7 +1061,7 @@ export default function (pi: ExtensionAPI) {
           await persistCurrentState(guideCtx, pausedState);
           updateUi(guideCtx, pausedState);
           guideCtx.ui.notify(
-            "Ugo paused: present_guidance was not called.",
+            "ugo-guide paused: present_guidance was not called.",
             "warning",
           );
           return;
@@ -1053,7 +1079,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     if (result.cancelled)
-      ctx.ui.notify("Ugo guide session was cancelled.", "warning");
+      ctx.ui.notify("ugo-guide session was cancelled.", "warning");
   }
 
   pi.registerCommand("ugo", {
@@ -1063,7 +1089,7 @@ export default function (pi: ExtensionAPI) {
       const parsed = parseStartArgs(args);
       if (!(await hasWorkboard(ctx.cwd))) {
         ctx.ui.notify(
-          "Ugo needs workboard.md. Run /new-workboard first or create workboard.md.",
+          "ugo-guide needs workboard.md. Run /new-workboard first or create workboard.md.",
           "warning",
         );
         return;
@@ -1073,12 +1099,12 @@ export default function (pi: ExtensionAPI) {
         status = await gitStatus(ctx.cwd);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        ctx.ui.notify(`Ugo requires a git repository: ${message}`, "error");
+        ctx.ui.notify(`ugo requires a git repository: ${message}`, "error");
         return;
       }
-      if (status.length > 0) {
+      if (!statusOnlyTouchesWorkboardOrScratch(status)) {
         ctx.ui.notify(
-          "Ugo requires a clean worktree before starting because it commits after each phase.",
+          "ugo requires a clean worktree before starting except for workboard.md and scratch/ changes because ugo-guide/ugo-do commit after each phase.",
           "error",
         );
         return;
@@ -1091,13 +1117,13 @@ export default function (pi: ExtensionAPI) {
         maxIterations: parsed.maxIterations,
         originalTools: withoutPresentGuidance(pi.getActiveTools()),
       };
-      ctx.ui.notify(`Starting ugo in ${parsed.mode} mode.`, "info");
+      ctx.ui.notify(`Starting ugo-guide in ${parsed.mode} mode.`, "info");
       await runGuideSession(ctx, initialState);
     },
   });
 
   pi.registerCommand("ugo-continue", {
-    description: "Continue ugo after a manual do phase",
+    description: "Continue ugo after a manual ugo-do phase",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
       const state = getLatestState(ctx);
@@ -1110,7 +1136,7 @@ export default function (pi: ExtensionAPI) {
         const guidance = getLatestGuidance(ctx);
         if (!guidance) {
           ctx.ui.notify(
-            "Ugo guide phase has no present_guidance result yet.",
+            "ugo-guide has no present_guidance result yet.",
             "warning",
           );
           return;
@@ -1134,7 +1160,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       ctx.ui.notify(
-        `Ugo is ${state.phase}; not continuing automatically.`,
+        `ugo is ${state.phase}; not continuing automatically.`,
         "warning",
       );
     },
@@ -1159,7 +1185,7 @@ export default function (pi: ExtensionAPI) {
       activateToolsForState(disabledState);
       updateUi(ctx, disabledState);
       ctx.ui.notify(
-        "Ugo disabled. The current agent turn is not aborted.",
+        "ugo disabled. The current agent turn is not aborted.",
         "info",
       );
     },
@@ -1173,7 +1199,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify("No ugo state in this session.", "info");
         return;
       }
-      ctx.ui.notify(formatSessionMessage(state), "info");
+      ctx.ui.notify(formatDisplaySessionMessage(state), "info");
     },
   });
 
@@ -1183,7 +1209,9 @@ export default function (pi: ExtensionAPI) {
       closeDecisionWatchers();
     activateToolsForState(currentState);
     if (currentState?.active)
-      pi.setSessionName(`ugo ${currentState.phase} #${currentState.iteration}`);
+      pi.setSessionName(
+        `${stateActor(currentState)} ${currentState.phase} #${currentState.iteration}`,
+      );
     updateUi(ctx, currentState);
   });
 
@@ -1216,7 +1244,7 @@ export default function (pi: ExtensionAPI) {
       updateUi(ctx, completedState);
       ctx.ui.setEditorText("/ugo-continue");
       ctx.ui.notify(
-        "Ugo do phase finished. Submit /ugo-continue to start the next guide phase.",
+        "ugo-do finished. Submit /ugo-continue to start the next ugo-guide phase.",
         "info",
       );
     }

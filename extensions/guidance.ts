@@ -24,7 +24,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "present_guidance",
     label: "Present Guidance",
-    description: "Validate and present final PI_GUIDANCE output. After this succeeds, copy the result block exactly as the final answer.",
+    description: "Validate and present the final workboard guidance result. After this succeeds, copy the result block exactly as the final answer.",
     parameters: PRESENT_GUIDANCE_PARAMS,
     async execute(_toolCallId, params) {
       const errors = validateGuidance(params);
