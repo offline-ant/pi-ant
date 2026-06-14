@@ -2,9 +2,11 @@
  * Execution-level lints and safety guards.
  *
  * Grep:
- * - local `grep`: always blocked — use the built-in grep tool instead.
+ * - standalone local `grep`: blocked — use the built-in grep tool instead.
+ * - `grep` used as a pipeline filter (`... | grep ...`) is allowed because the
+ *   built-in grep tool cannot replace stdin filtering.
  * - `grep` inside remote/nested quoted commands (for example `ssh host '... grep ...'`)
- *   and `grep` filtering `ssh` output are ignored because the built-in grep tool cannot replace them.
+ *   is ignored because the built-in grep tool cannot replace it.
  *
  * Rust formatting:
  * - `cargo fmt`: blocked when invoked as a shell command — follow existing code style instead.
@@ -16,8 +18,10 @@
  * - `git stash`: blocked on first attempt, allowed on retry (warn once).
  *
  * Pipe-tail lint:
- * - `| tail -<n>` at the end of a pipe decreases observability for the user
+ * - local `| tail -<n>` at the end of a pipe decreases observability for the user
  *   — they can't scroll back to see the full output.
+ * - `tail` inside remote/nested quoted commands and `tail` filtering `ssh` output
+ *   are ignored because they may be needed to reduce remote output.
  * - In tmux-bash: the trailing `| tail …` is silently stripped and a warning
  *   is returned alongside the normal result.
  * - In bash: the command is blocked (once) with a message to use tmux-bash
@@ -65,8 +69,14 @@ const PIPE_TAIL_RE = /\|\s*tail\s+-[^\|]*$/;
 type TmuxBashInput = { name: string; command: string };
 type TmuxSendInput = { name: string; text: string; enter?: boolean };
 type BashInput = { command: string };
-type ShellToken = { type: "word" | "operator"; text: string };
-type ShellInvocation = { name: string; args: string[]; hasSshEarlierInPipeline: boolean };
+type ShellToken = { type: "word" | "operator"; text: string; start: number };
+type ShellInvocation = {
+  name: string;
+  args: string[];
+  hasEarlierInPipeline: boolean;
+  hasSshEarlierInPipeline: boolean;
+  rawStart: number;
+};
 
 /**
  * Extract the text to check from a tool call event.
@@ -82,12 +92,19 @@ function extractCommand(event: { toolName: string; input: unknown }): string | u
 function tokenizeShell(command: string): ShellToken[] {
   const tokens: ShellToken[] = [];
   let word = "";
+  let wordStart: number | undefined;
   let quote: "'" | '"' | undefined;
+
+  const appendWordChar = (char: string, index: number) => {
+    wordStart ??= index;
+    word += char;
+  };
 
   const pushWord = () => {
     if (word.length === 0) return;
-    tokens.push({ type: "word", text: word });
+    tokens.push({ type: "word", text: word, start: wordStart ?? 0 });
     word = "";
+    wordStart = undefined;
   };
 
   for (let i = 0; i < command.length; i++) {
@@ -95,7 +112,7 @@ function tokenizeShell(command: string): ShellToken[] {
 
     if (quote) {
       if (char === "\\" && quote === '"' && i + 1 < command.length) {
-        word += command[i + 1];
+        appendWordChar(command[i + 1], i);
         i++;
         continue;
       }
@@ -103,24 +120,25 @@ function tokenizeShell(command: string): ShellToken[] {
         quote = undefined;
         continue;
       }
-      word += char;
+      appendWordChar(char, i);
       continue;
     }
 
     if (char === "'" || char === '"') {
+      wordStart ??= i;
       quote = char;
       continue;
     }
 
     if (char === "\\" && i + 1 < command.length) {
-      word += command[i + 1];
+      appendWordChar(command[i + 1], i);
       i++;
       continue;
     }
 
     if (char === "\n") {
       pushWord();
-      tokens.push({ type: "operator", text: "\n" });
+      tokens.push({ type: "operator", text: "\n", start: i });
       continue;
     }
 
@@ -133,21 +151,21 @@ function tokenizeShell(command: string): ShellToken[] {
       pushWord();
       const next = command[i + 1];
       if (next === char) {
-        tokens.push({ type: "operator", text: `${char}${next}` });
+        tokens.push({ type: "operator", text: `${char}${next}`, start: i });
         i++;
       } else {
-        tokens.push({ type: "operator", text: char });
+        tokens.push({ type: "operator", text: char, start: i });
       }
       continue;
     }
 
     if (char === ";" || char === "(" || char === ")") {
       pushWord();
-      tokens.push({ type: "operator", text: char });
+      tokens.push({ type: "operator", text: char, start: i });
       continue;
     }
 
-    word += char;
+    appendWordChar(char, i);
   }
 
   pushWord();
@@ -162,14 +180,22 @@ function getLocalShellInvocations(command: string): ShellInvocation[] {
   const invocations: ShellInvocation[] = [];
   let expectingCommand = true;
   let currentInvocation: ShellInvocation | undefined;
+  let pipelineHasEarlierCommand = false;
   let pipelineHasSsh = false;
 
   for (const token of tokenizeShell(command)) {
     if (token.type === "operator") {
+      if (token.text === "|") {
+        expectingCommand = true;
+        currentInvocation = undefined;
+        pipelineHasEarlierCommand = true;
+        continue;
+      }
       if (SHELL_COMMAND_SEPARATORS.has(token.text)) {
         expectingCommand = true;
         currentInvocation = undefined;
-        if (token.text !== "|") pipelineHasSsh = false;
+        pipelineHasEarlierCommand = false;
+        pipelineHasSsh = false;
       }
       continue;
     }
@@ -183,7 +209,13 @@ function getLocalShellInvocations(command: string): ShellInvocation[] {
 
     if (expectingCommand) {
       if (isAssignmentWord(word)) continue;
-      currentInvocation = { name: word, args: [], hasSshEarlierInPipeline: pipelineHasSsh };
+      currentInvocation = {
+        name: word,
+        args: [],
+        hasEarlierInPipeline: pipelineHasEarlierCommand,
+        hasSshEarlierInPipeline: pipelineHasSsh,
+        rawStart: token.start,
+      };
       invocations.push(currentInvocation);
       expectingCommand = false;
       if (commandBasename(word) === "ssh") pipelineHasSsh = true;
@@ -203,8 +235,23 @@ function commandBasename(command: string): string {
 
 function hasBlockedLocalGrep(command: string): boolean {
   return getLocalShellInvocations(command).some(
-    (invocation) => commandBasename(invocation.name) === "grep" && !invocation.hasSshEarlierInPipeline,
+    (invocation) =>
+      commandBasename(invocation.name) === "grep" &&
+      !invocation.hasEarlierInPipeline &&
+      !invocation.hasSshEarlierInPipeline,
   );
+}
+
+function getBlockedLocalPipeTail(command: string): ShellInvocation | undefined {
+  const invocations = getLocalShellInvocations(command);
+  const lastInvocation = invocations[invocations.length - 1];
+  if (!lastInvocation || commandBasename(lastInvocation.name) !== "tail") return undefined;
+  if (!lastInvocation.args.some((arg) => arg.startsWith("-"))) return undefined;
+  if (!lastInvocation.hasEarlierInPipeline || lastInvocation.hasSshEarlierInPipeline) return undefined;
+
+  const beforeTail = command.slice(0, lastInvocation.rawStart);
+  if (!beforeTail.includes("build") && !beforeTail.includes("check")) return undefined;
+  return lastInvocation;
 }
 
 function blockRestore(toolName: string, command: string) {
@@ -272,7 +319,7 @@ export default function (pi: ExtensionAPI) {
     const command = extractCommand(event);
     if (command == null) return undefined;
 
-    // grep command — block local bash invocations only, use grep tool instead
+    // grep command — block standalone local bash invocations only, use grep tool instead
     if (event.toolName === "bash" && hasBlockedLocalGrep(command)) {
       return {
         block: true,
@@ -315,25 +362,22 @@ export default function (pi: ExtensionAPI) {
       return warnStash(event.toolName, command);
     }
 
-    // pipe tail lint — only when a preceding pipe segment contains 'build' or 'check'
-    if (PIPE_TAIL_RE.test(command)) {
-      const segments = command.split("|").slice(0, -1); // all segments before the tail
-      if (segments.some((s) => s.includes("build") || s.includes("check"))) {
-        if (event.toolName === "tmux-bash") {
-          // Silently strip the trailing `| tail …`
-          (event.input as TmuxBashInput).command = stripPipeTail(command);
-          return undefined;
-        }
-        // bash / tmux-send: block first attempt, allow retry
-        if (warnedBashPipeTail) return undefined;
-        warnedBashPipeTail = true;
-        return {
-          block: true,
-          reason:
-            `Blocked: trailing \`| tail\` hides build output in ${event.toolName} command: ${command}. ` +
-            `Re-run without the pipe tail: \`${stripPipeTail(command)}\``,
-        };
+    // pipe tail lint — only when a local preceding pipe segment contains 'build' or 'check'
+    if (getBlockedLocalPipeTail(command)) {
+      if (event.toolName === "tmux-bash") {
+        // Silently strip the trailing `| tail …`
+        (event.input as TmuxBashInput).command = stripPipeTail(command);
+        return undefined;
       }
+      // bash / tmux-send: block first attempt, allow retry
+      if (warnedBashPipeTail) return undefined;
+      warnedBashPipeTail = true;
+      return {
+        block: true,
+        reason:
+          `Blocked: trailing \`| tail\` hides build output in ${event.toolName} command: ${command}. ` +
+          `Re-run without the pipe tail: \`${stripPipeTail(command)}\``,
+      };
     }
 
     return undefined;
