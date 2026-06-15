@@ -876,6 +876,7 @@ cmd_session_agent() {
 
   if (( status_only )); then
     echo "Started tmux fork '$lock_name' in $folder (session: $session_file)."
+    echo "PI_TMUX_LOCK_NAME=$lock_name"
     return 0
   fi
 
