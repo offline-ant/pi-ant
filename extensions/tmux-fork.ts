@@ -4,12 +4,10 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import * as os from "node:os";
-import { SessionManager, type ExtensionAPI, type SessionEntry, type SessionHeader } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
+import { flushSessionFile, runTmux, writePromptFile } from "./tmux-helpers.ts";
 
-const TMUX_SCRIPT = path.resolve(__dirname, "../bin/pi-tmux");
-const FORK_COMMAND_TIMEOUT_MS = 120_000;
 const FORK_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PI_FORK = process.env.PI_FORK === "true";
 const FORK_BLOCK_MESSAGE = "You are the fork, this tool is blocked. Do what you were told.";
@@ -62,17 +60,6 @@ function errorMessage(error: unknown): string {
 function outputText(stdout: string, stderr: string): string {
   const text = stdout.trim() || stderr.trim();
   return text.length > 0 ? text : "(no output)";
-}
-
-function flushSessionFile(sessionManager: SessionManager, sessionFile: string): void {
-  const header = sessionManager.getHeader();
-  if (!header) {
-    throw new Error("New session has no header");
-  }
-
-  const entries: Array<SessionHeader | SessionEntry> = [header, ...sessionManager.getEntries()];
-  fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
-  fs.writeFileSync(sessionFile, `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
 }
 
 function parseCommandLine(input: string): string[] {
@@ -177,17 +164,6 @@ function validateInput(input: TmuxForkInput): string | undefined {
     }
   }
   return undefined;
-}
-
-async function runTmux(pi: ExtensionAPI, args: string[], signal?: AbortSignal) {
-  return pi.exec("bash", [TMUX_SCRIPT, ...args], { signal, timeout: FORK_COMMAND_TIMEOUT_MS });
-}
-
-function writePromptFile(prompt: string): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-tmux-fork-"));
-  const file = path.join(dir, "prompt.md");
-  fs.writeFileSync(file, prompt, "utf8");
-  return file;
 }
 
 async function forkIntoTmux(pi: ExtensionAPI, input: TmuxForkInput, cwd: string, sessionManager: SessionManager, signal?: AbortSignal) {

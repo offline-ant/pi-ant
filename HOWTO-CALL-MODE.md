@@ -3,35 +3,46 @@
 Bob's mode tries Bob's `call()`/`return()` shape inside pi.
 
 The root conversation should not do operational tool work directly. It calls
-`call({ task })`; the call frame runs on a side branch with normal tools enabled
-and must finish by calling `return({ result: "..." })`. Pi then directly
-navigates back to the call site and inserts only that result text there. The
-tool-heavy call branch stays in the session tree for inspection, but it is not on
-the resumed root branch.
+`call({ task })`; the call frame runs in a forked pi session in a new tmux pane
+with normal tools enabled and must finish by calling `return({ result: "..." })`.
+The parent `call` tool waits for that result and returns it as normal tool-result
+content, so the root agent continues from the compact returned text.
+
+The tool-heavy worker branch stays in its forked session and tmux pane for
+inspection. It is not merged into the root session tree.
 
 ## Tools
 
 ### `call`
 
 ```json
-{ "task": "..." }
+{
+  "task": "...",
+  "complex": false,
+  "timeoutSeconds": 3600
+}
 ```
 
-Starts a call frame using the current conversation context. `call` is available in
-normal mode and in Bob's mode. It should be the only tool call in its assistant
-turn; the call frame does operational work after pi enters it.
+Starts a tmux-backed call frame using the current conversation context before the
+parent assistant's unresolved `call` tool call. `call` is available in normal mode
+and in Bob's mode. It should be the only tool call in its assistant turn because
+sibling tool work is not included in the forked worker context. The parent blocks
+until the worker returns, exits early, is aborted, or times out.
+
+Set `complex: true` only when the worker may need nested `call` frames for
+substantial subtasks. `timeoutSeconds <= 0` waits indefinitely.
 
 ### `return`
 
 ```json
 {
-  "result": "Exact text to return to the call site"
+  "result": "Exact text to return to the parent call tool"
 }
 ```
 
-Returns from the active call frame. The call frame should call `return` exactly once
-as its final action. The `result` string is inserted directly at the call site.
-Return is completed by a post-agent session action, not by a slash-command bridge.
+Returns from the active tmux call frame. The call frame should call `return`
+exactly once as its final action. `return` writes the result for the parent and
+requests graceful shutdown of the worker pi process.
 
 ## Commands
 
@@ -41,7 +52,7 @@ Return is completed by a post-agent session action, not by a slash-command bridg
 /bobs-mode on
 /bobs-mode off
 /bobs-mode status
-/return-now "message" # force-return from the active call frame with message as the result
+/return-now "message" # child-frame recovery: return message and shut down
 ```
 
 When Bob's mode is on, root active tools are restricted to `call`. The root is
@@ -53,12 +64,12 @@ frame to inspect and return a compact recommendation. Answer directly only for
 purely conversational/conceptual questions or when recent compact call results
 already contain the needed facts.
 
-Inside a call frame, pi restores the tools that were active before Bob's mode was
-enabled, adds `return`, and removes `call` to avoid recursion.
+Inside a call frame, pi restores the worker tools captured by the parent, adds
+`return`, and adds `call` only for complex frames.
 
-`/return-now "message"` is a manual recovery command. It aborts/waits for the
-current frame if needed, navigates back to the call site, and inserts the message
-as a successful call result.
+`/return-now "message"` is a manual recovery command for a child tmux call frame.
+It aborts/waits for the current worker if needed, writes `message` as the call
+result, and requests worker shutdown. Outside a tmux call frame it only warns.
 
 ## Ugo guidance
 

@@ -1,21 +1,35 @@
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
+import { flushSessionFile, runTmux, writePromptFile } from "./tmux-helpers.ts";
 
 const CALL_TOOL = "call";
 const RETURN_TOOL = "return";
-const STATE_CUSTOM_TYPE = "pi-ant:call-state";
-const MESSAGE_CUSTOM_TYPE = "pi-ant:call-message";
+const ROOT_STATE_CUSTOM_TYPE = "pi-ant:call-state";
+const CALL_RUNTIME_CUSTOM_TYPE = "pi-ant:call-runtime";
 const RETURN_NOW_COMMAND = "return-now";
+const DEFAULT_CALL_TIMEOUT_SECONDS = 3600;
+const RESULT_POLL_INTERVAL_MS = 250;
+const PROGRESS_UPDATE_INTERVAL_MS = 5000;
+const LOCK_DIR = "/tmp/pi-semaphores";
 
 const callParams = Type.Object({
   task: Type.String({
     minLength: 1,
-    description: "Task to complete in a call frame using the current conversation context.",
+    description: "Task to complete in a forked tmux call frame using the current conversation context.",
   }),
   complex: Type.Optional(
     Type.Boolean({
-      description: "Allow this call frame to delegate substantial subtasks via nested call frames.",
+      description: "Allow this call frame to use call for substantial delegated subtasks.",
+    }),
+  ),
+  timeoutSeconds: Type.Optional(
+    Type.Number({
+      description:
+        "Maximum seconds to wait for the forked call frame to return. Default: 3600. Use <= 0 to wait indefinitely.",
     }),
   ),
 });
@@ -25,38 +39,54 @@ type CallParams = Static<typeof callParams>;
 const returnParams = Type.Object({
   result: Type.String({
     minLength: 1,
-    description: "Exact text result to return to the call site.",
+    description: "Exact text result to return to the parent call frame.",
   }),
 });
 
 type ReturnParams = Static<typeof returnParams>;
 
-type CallPhase = "starting" | "doing" | "returning" | "paused";
+interface RootCallState {
+  bobsMode: boolean;
+  rootTools: string[];
+}
 
-interface ActiveCallFrame {
+interface CallRuntimeState {
   id: string;
   task: string;
   complex: boolean;
-  phase: CallPhase;
-  rootTools: string[];
-  bobsMode: boolean;
-  enforcementCount: number;
-  returnPointId?: string;
-  returnValue?: ReturnParams;
-  callBranchLeafId?: string;
-  reason?: string;
-}
-
-interface CallState {
-  bobsMode: boolean;
-  rootTools: string[];
-  stack: ActiveCallFrame[];
+  resultPath: string;
+  parentSession: string;
+  childSession: string;
+  parentCwd: string;
+  childCwd: string;
+  lockName: string;
+  workerTools: string[];
+  createdAt: string;
 }
 
 interface CustomStateEntryLike {
   type: string;
   customType?: string;
   data?: unknown;
+}
+
+interface CallResultFile {
+  id: string;
+  result: string;
+  timestamp: string;
+  sessionFile?: string;
+}
+
+interface CallToolDetails {
+  id: string;
+  lockName: string;
+  requestedLockName: string;
+  resultPath: string;
+  childSessionFile: string;
+  task: string;
+  complex: boolean;
+  elapsedMs?: number;
+  status?: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -68,91 +98,6 @@ function stringArray(value: unknown): string[] | undefined {
   return value.every((item) => typeof item === "string") ? value : undefined;
 }
 
-function isReturnParams(value: unknown): value is ReturnParams {
-  return isRecord(value) && typeof value.result === "string";
-}
-
-function isCallPhase(value: unknown): value is CallPhase {
-  return value === "starting" || value === "doing" || value === "returning" || value === "paused";
-}
-
-function parseActiveCallFrame(value: unknown): ActiveCallFrame | undefined {
-  if (!isRecord(value)) return undefined;
-  const id = value.id;
-  const task = value.task;
-  const phase = value.phase;
-  const rootTools = stringArray(value.rootTools);
-  const bobsMode = value.bobsMode;
-  const enforcementCount = value.enforcementCount;
-  const complex = value.complex;
-  const returnPointId = value.returnPointId;
-  const returnValue = value.returnValue;
-  const callBranchLeafId = value.callBranchLeafId;
-  const reason = value.reason;
-
-  if (
-    typeof id !== "string" ||
-    typeof task !== "string" ||
-    !isCallPhase(phase) ||
-    rootTools === undefined ||
-    typeof bobsMode !== "boolean" ||
-    typeof enforcementCount !== "number" ||
-    (complex !== undefined && typeof complex !== "boolean") ||
-    (returnPointId !== undefined && typeof returnPointId !== "string") ||
-    (returnValue !== undefined && !isReturnParams(returnValue)) ||
-    (callBranchLeafId !== undefined && typeof callBranchLeafId !== "string") ||
-    (reason !== undefined && typeof reason !== "string")
-  ) {
-    return undefined;
-  }
-
-  return {
-    id,
-    task,
-    complex: typeof complex === "boolean" ? complex : false,
-    phase,
-    rootTools,
-    bobsMode,
-    enforcementCount,
-    returnPointId: typeof returnPointId === "string" ? returnPointId : undefined,
-    returnValue: isReturnParams(returnValue) ? returnValue : undefined,
-    callBranchLeafId: typeof callBranchLeafId === "string" ? callBranchLeafId : undefined,
-    reason: typeof reason === "string" ? reason : undefined,
-  };
-}
-
-function parseActiveCallFrameArray(value: unknown): ActiveCallFrame[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const frames: ActiveCallFrame[] = [];
-  for (const item of value) {
-    const frame = parseActiveCallFrame(item);
-    if (!frame) return undefined;
-    frames.push(frame);
-  }
-  return frames;
-}
-
-function parseCallState(value: unknown): CallState | undefined {
-  if (!isRecord(value)) return undefined;
-  const bobsMode = value.bobsMode;
-  const rootTools = stringArray(value.rootTools);
-  if (typeof bobsMode !== "boolean" || rootTools === undefined) return undefined;
-
-  if (value.stack !== undefined) {
-    const stack = parseActiveCallFrameArray(value.stack);
-    if (!stack) return undefined;
-    return { bobsMode, rootTools, stack };
-  }
-
-  if (value.active !== undefined) {
-    const active = parseActiveCallFrame(value.active);
-    if (!active) return undefined;
-    return { bobsMode, rootTools, stack: [active] };
-  }
-
-  return { bobsMode, rootTools, stack: [] };
-}
-
 function getCustomStateEntries(ctx: ExtensionContext): CustomStateEntryLike[] {
   const entries: CustomStateEntryLike[] = [];
   for (const entry of ctx.sessionManager.getBranch()) {
@@ -162,20 +107,72 @@ function getCustomStateEntries(ctx: ExtensionContext): CustomStateEntryLike[] {
   return entries;
 }
 
-function getLatestState(ctx: ExtensionContext): CallState | undefined {
+function parseRootCallState(value: unknown): RootCallState | undefined {
+  if (!isRecord(value)) return undefined;
+  const bobsMode = value.bobsMode;
+  const rootTools = stringArray(value.rootTools);
+  if (typeof bobsMode !== "boolean" || rootTools === undefined) return undefined;
+  return { bobsMode, rootTools: stripControlTools(rootTools) };
+}
+
+function getLatestRootState(ctx: ExtensionContext): RootCallState | undefined {
   const entries = getCustomStateEntries(ctx);
   for (let index = entries.length - 1; index >= 0; index--) {
     const entry = entries[index];
-    if (entry.customType === STATE_CUSTOM_TYPE) {
-      const state = parseCallState(entry.data);
-      if (state) return state;
-    }
+    if (entry.customType !== ROOT_STATE_CUSTOM_TYPE) continue;
+    const state = parseRootCallState(entry.data);
+    if (state) return state;
   }
   return undefined;
 }
 
-function defaultState(activeTools: string[]): CallState {
-  return { bobsMode: false, rootTools: stripControlTools(activeTools), stack: [] };
+function parseCallRuntime(value: unknown): CallRuntimeState | undefined {
+  if (!isRecord(value)) return undefined;
+  const workerTools = stringArray(value.workerTools);
+  if (
+    typeof value.id !== "string" ||
+    typeof value.task !== "string" ||
+    typeof value.complex !== "boolean" ||
+    typeof value.resultPath !== "string" ||
+    typeof value.parentSession !== "string" ||
+    typeof value.childSession !== "string" ||
+    typeof value.parentCwd !== "string" ||
+    typeof value.childCwd !== "string" ||
+    typeof value.lockName !== "string" ||
+    workerTools === undefined ||
+    typeof value.createdAt !== "string"
+  ) {
+    return undefined;
+  }
+
+  return {
+    id: value.id,
+    task: value.task,
+    complex: value.complex,
+    resultPath: value.resultPath,
+    parentSession: value.parentSession,
+    childSession: value.childSession,
+    parentCwd: value.parentCwd,
+    childCwd: value.childCwd,
+    lockName: value.lockName,
+    workerTools: stripControlTools(workerTools),
+    createdAt: value.createdAt,
+  };
+}
+
+function getLatestCallRuntime(ctx: ExtensionContext): CallRuntimeState | undefined {
+  const entries = getCustomStateEntries(ctx);
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry.customType !== CALL_RUNTIME_CUSTOM_TYPE) continue;
+    const runtime = parseCallRuntime(entry.data);
+    if (runtime) return runtime;
+  }
+  return undefined;
+}
+
+function defaultRootState(activeTools: string[]): RootCallState {
+  return { bobsMode: false, rootTools: stripControlTools(activeTools) };
 }
 
 function stripControlTools(tools: string[]): string[] {
@@ -186,42 +183,13 @@ function uniqueTools(tools: string[]): string[] {
   return [...new Set(tools)];
 }
 
-function topFrame(state: CallState | undefined): ActiveCallFrame | undefined {
-  if (!state || state.stack.length === 0) return undefined;
-  return state.stack[state.stack.length - 1];
-}
-
-function pushFrame(state: CallState, active: ActiveCallFrame): CallState {
-  return { ...state, stack: [...state.stack, active] };
-}
-
-function replaceTopFrame(state: CallState, active: ActiveCallFrame): CallState {
-  const stack = [...state.stack];
-  if (stack.length === 0) {
-    stack.push(active);
-  } else {
-    stack[stack.length - 1] = active;
-  }
-  return { ...state, stack };
-}
-
-function popTopFrame(state: CallState): CallState {
-  return { ...state, stack: state.stack.slice(0, -1) };
-}
-
-function rootActiveTools(state: CallState): string[] {
+function rootActiveTools(state: RootCallState): string[] {
   if (state.bobsMode) return [CALL_TOOL];
   return uniqueTools([...state.rootTools, CALL_TOOL]).filter((tool) => tool !== RETURN_TOOL);
 }
 
-function callFrameActiveTools(active: ActiveCallFrame): string[] {
-  const tools = [...active.rootTools, RETURN_TOOL];
-  if (active.complex) tools.push(CALL_TOOL);
-  return uniqueTools(tools);
-}
-
-function formatReturn(value: ReturnParams): string {
-  return value.result;
+function runtimeActiveTools(runtime: CallRuntimeState): string[] {
+  return uniqueTools([...runtime.workerTools, RETURN_TOOL, ...(runtime.complex ? [CALL_TOOL] : [])]);
 }
 
 function parseReturnNowText(args: string | undefined): string {
@@ -235,18 +203,6 @@ function parseReturnNowText(args: string | undefined): string {
   return trimmed;
 }
 
-function activeToolsForState(state: CallState | undefined, fallbackTools: string[]): string[] {
-  if (!state) return rootActiveTools(defaultState(fallbackTools));
-  const active = topFrame(state);
-  if (active && active.phase !== "paused" && active.phase !== "returning") {
-    return callFrameActiveTools(active);
-  }
-  if (active?.phase === "returning") {
-    return activeToolsForState(popTopFrame(state), fallbackTools);
-  }
-  return rootActiveTools(state);
-}
-
 function renderCallArgs(args: CallParams) {
   const payload = JSON.stringify(args, null, 2) ?? String(args);
   const lines = ["call(", ...payload.split("\n").map((line) => `  ${line}`), ")"];
@@ -258,18 +214,10 @@ function renderCallArgs(args: CallParams) {
   };
 }
 
-function messageText(content: string | Array<{ type: string; text?: string }>): string {
-  if (typeof content === "string") return content;
-  return content
-    .filter((item): item is { type: "text"; text: string } => item.type === "text" && typeof item.text === "string")
-    .map((item) => item.text)
-    .join("\n");
-}
-
 function callPrompt(task: string, complex: boolean): string {
   return [
-    "You are inside a call frame.",
-    "Use the available tools to complete the delegated task in this same session branch.",
+    "You are inside a tmux-backed call frame.",
+    "Use the available tools to complete the delegated task in this forked pi session.",
     complex
       ? "This is a complex call frame. You may use the call tool for substantial delegated subtasks; otherwise work directly."
       : "Do not call the call tool or delegate recursively.",
@@ -281,158 +229,449 @@ function callPrompt(task: string, complex: boolean): string {
   ].join("\n");
 }
 
-function statusText(state: CallState | undefined): string | undefined {
-  if (!state) return undefined;
-  const active = topFrame(state);
-  if (active) return `call:${state.stack.length}:${active.phase}`;
-  return state.bobsMode ? "bobs:on" : undefined;
+function statusText(rootState: RootCallState | undefined, runtime: CallRuntimeState | undefined): string | undefined {
+  if (runtime) return `call:child${runtime.complex ? ":complex" : ""}`;
+  if (!rootState) return undefined;
+  return rootState.bobsMode ? "bobs:on" : undefined;
+}
+
+function isTmuxAvailable(): boolean {
+  return !!process.env.TMUX;
+}
+
+function makeCallId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function sanitizeLockName(name: string): string {
+  return name.replace(/[^A-Za-z0-9._:-]/g, "");
+}
+
+function activeLockPath(name: string): string {
+  return path.join(LOCK_DIR, name);
+}
+
+function isLockActive(name: string): boolean {
+  return fs.existsSync(activeLockPath(name));
+}
+
+function isLockFinished(name: string): boolean {
+  return !fs.existsSync(activeLockPath(name));
+}
+
+function createResultPath(callId: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-ant-call-${callId}-`));
+  try {
+    fs.chmodSync(dir, 0o700);
+  } catch {
+    // Best effort; mkdtemp already respects the process umask.
+  }
+  return path.join(dir, "result.json");
+}
+
+function parseCallResult(raw: string, resultPath: string, expectedId: string): CallResultFile {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const preview = raw.length > 2000 ? `${raw.slice(0, 2000)}\n[truncated]` : raw;
+    throw new Error(`Invalid call result JSON at ${resultPath}: ${error instanceof Error ? error.message : String(error)}\n${preview}`);
+  }
+
+  if (!isRecord(parsed) || typeof parsed.id !== "string" || typeof parsed.result !== "string" || typeof parsed.timestamp !== "string") {
+    throw new Error(`Invalid call result shape at ${resultPath}`);
+  }
+  if (parsed.id !== expectedId) {
+    throw new Error(`Call result id mismatch at ${resultPath}: expected ${expectedId}, got ${parsed.id}`);
+  }
+
+  return {
+    id: parsed.id,
+    result: parsed.result,
+    timestamp: parsed.timestamp,
+    sessionFile: typeof parsed.sessionFile === "string" ? parsed.sessionFile : undefined,
+  };
+}
+
+function writeCallResult(runtime: CallRuntimeState, result: string, sessionFile: string | undefined): void {
+  fs.mkdirSync(path.dirname(runtime.resultPath), { recursive: true, mode: 0o700 });
+  const tmp = `${runtime.resultPath}.${process.pid}.${Date.now()}.tmp`;
+  const payload: CallResultFile = {
+    id: runtime.id,
+    result,
+    timestamp: new Date().toISOString(),
+    sessionFile,
+  };
+
+  fs.writeFileSync(tmp, `${JSON.stringify(payload)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  try {
+    fs.linkSync(tmp, runtime.resultPath);
+  } catch (error) {
+    if (isRecord(error) && error.code === "EEXIST") {
+      throw new Error(`Call result already exists; duplicate return refused: ${runtime.resultPath}`);
+    }
+    throw error;
+  } finally {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // ignore cleanup failure
+    }
+  }
+}
+
+function getTimeoutSeconds(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_CALL_TIMEOUT_SECONDS;
+  if (!Number.isFinite(value)) throw new Error("timeoutSeconds must be a finite number");
+  if (value <= 0) return 0;
+  return Math.ceil(value);
+}
+
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new Error("Call frame aborted"));
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(new Error("Call frame aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function parseActualLockName(text: string, requestedLockName: string): string {
+  const machineMatch = text.match(/^PI_TMUX_LOCK_NAME=([^\s]+)$/m);
+  if (machineMatch) return machineMatch[1];
+  const statusMatch = text.match(/Started tmux fork '([^']+)'/);
+  if (statusMatch) return statusMatch[1];
+  return requestedLockName;
+}
+
+function getPreCallLeafId(ctx: ExtensionContext, toolCallId: string): string | null {
+  const leaf = ctx.sessionManager.getLeafEntry();
+  if (!leaf) return null;
+  if (leaf.type !== "message" || leaf.message.role !== "assistant") return ctx.sessionManager.getLeafId();
+
+  const hasThisCall = leaf.message.content.some(
+    (item) => isRecord(item) && item.type === "toolCall" && item.id === toolCallId && item.name === CALL_TOOL,
+  );
+  if (hasThisCall) return leaf.parentId ?? null;
+
+  const hasAnyCallTool = leaf.message.content.some(
+    (item) => isRecord(item) && item.type === "toolCall" && item.name === CALL_TOOL,
+  );
+  if (hasAnyCallTool) {
+    throw new Error("Could not identify this call tool in the current assistant message; refusing to fork an unmatched tool-call transcript.");
+  }
+
+  return leaf.id;
+}
+
+function captureWorkerTools(pi: ExtensionAPI, rootState: RootCallState, runtime: CallRuntimeState | undefined): string[] {
+  if (runtime) return stripControlTools(runtime.workerTools);
+  if (rootState.bobsMode) return stripControlTools(rootState.rootTools);
+  return stripControlTools(pi.getActiveTools());
+}
+
+async function captureTmuxOutput(pi: ExtensionAPI, lockName: string, lines = 80): Promise<string> {
+  try {
+    const result = await runTmux(pi, ["capture", lockName, String(lines)]);
+    const text = result.stdout.trimEnd() || result.stderr.trimEnd();
+    return text || "(no tmux output)";
+  } catch (error) {
+    return `Could not capture tmux output for ${lockName}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+async function killTmuxPane(pi: ExtensionAPI, lockName: string): Promise<void> {
+  try {
+    await runTmux(pi, ["kill", lockName]);
+  } catch {
+    // Best effort on abort.
+  }
+}
+
+async function waitForCallResult(
+  pi: ExtensionAPI,
+  options: {
+    id: string;
+    actualLockName: string;
+    requestedLockName: string;
+    resultPath: string;
+    childSessionFile: string;
+    task: string;
+    complex: boolean;
+    timeoutSeconds: number;
+    signal?: AbortSignal;
+    onUpdate?: (partial: { content: Array<{ type: "text"; text: string }>; details: CallToolDetails }) => void;
+  },
+): Promise<CallResultFile> {
+  const startedAt = Date.now();
+  let lastProgressAt = 0;
+
+  while (true) {
+    if (fs.existsSync(options.resultPath)) {
+      return parseCallResult(fs.readFileSync(options.resultPath, "utf8"), options.resultPath, options.id);
+    }
+
+    if (options.signal?.aborted) {
+      await killTmuxPane(pi, options.actualLockName);
+      throw new Error("Call frame aborted");
+    }
+
+    const elapsedMs = Date.now() - startedAt;
+    if (options.timeoutSeconds > 0 && elapsedMs >= options.timeoutSeconds * 1000) {
+      const output = await captureTmuxOutput(pi, options.actualLockName, 40);
+      throw new Error(
+        [
+          `Call frame timed out after ${options.timeoutSeconds}s.`,
+          `tmux lock: ${options.actualLockName}`,
+          `child session: ${options.childSessionFile}`,
+          `result path: ${options.resultPath}`,
+          "",
+          "Last tmux output:",
+          output,
+        ].join("\n"),
+      );
+    }
+
+    if (isLockFinished(options.actualLockName)) {
+      if (fs.existsSync(options.resultPath)) {
+        return parseCallResult(fs.readFileSync(options.resultPath, "utf8"), options.resultPath, options.id);
+      }
+      const output = await captureTmuxOutput(pi, options.actualLockName);
+      throw new Error(
+        [
+          "Call frame exited before writing a return result.",
+          `tmux lock: ${options.actualLockName}`,
+          `child session: ${options.childSessionFile}`,
+          `result path: ${options.resultPath}`,
+          "",
+          "Last tmux output:",
+          output,
+        ].join("\n"),
+      );
+    }
+
+    if (options.onUpdate && elapsedMs - lastProgressAt >= PROGRESS_UPDATE_INTERVAL_MS) {
+      lastProgressAt = elapsedMs;
+      const output = await captureTmuxOutput(pi, options.actualLockName, 12);
+      options.onUpdate({
+        content: [
+          {
+            type: "text",
+            text: [
+              `Waiting for call frame ${options.actualLockName} (${Math.floor(elapsedMs / 1000)}s elapsed).`,
+              `Child session: ${options.childSessionFile}`,
+              "",
+              output,
+            ].join("\n"),
+          },
+        ],
+        details: {
+          id: options.id,
+          lockName: options.actualLockName,
+          requestedLockName: options.requestedLockName,
+          resultPath: options.resultPath,
+          childSessionFile: options.childSessionFile,
+          task: options.task,
+          complex: options.complex,
+          elapsedMs,
+          status: "waiting",
+        },
+      });
+    }
+
+    await delay(RESULT_POLL_INTERVAL_MS, options.signal);
+  }
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.registerMessageRenderer(MESSAGE_CUSTOM_TYPE, (message, _options, theme) => {
-    const text = messageText(message.content);
-    const lines = [theme.fg("accent", "[return]"), ...text.split("\n")];
-    return {
-      render: (contentWidth: number) => lines.flatMap((line) => wrapTextWithAnsi(line, contentWidth)),
-      invalidate: () => {
-        /* no-op */
-      },
-    };
-  });
+  let currentRootState: RootCallState | undefined;
+  let currentRuntime: CallRuntimeState | undefined;
 
-  let currentState: CallState | undefined;
-  let terminateCallTurn = false;
-
-  function resolveState(ctx: ExtensionContext): CallState | undefined {
-    const persisted = getLatestState(ctx);
-    if (currentState && currentState.stack.length > 0) return currentState;
-    return persisted ?? currentState;
+  function resolveRootState(ctx: ExtensionContext): RootCallState | undefined {
+    const persisted = getLatestRootState(ctx);
+    currentRootState = persisted ?? currentRootState;
+    return currentRootState;
   }
 
-  function appendState(state: CallState): void {
-    currentState = state;
-    pi.appendEntry(STATE_CUSTOM_TYPE, state);
+  function resolveRuntime(ctx: ExtensionContext): CallRuntimeState | undefined {
+    const runtime = getLatestCallRuntime(ctx);
+    currentRuntime = runtime;
+    return runtime;
   }
 
-  function applyTools(state: CallState | undefined): void {
-    pi.setActiveTools(activeToolsForState(state, pi.getActiveTools()));
+  function appendRootState(state: RootCallState): void {
+    currentRootState = state;
+    pi.appendEntry(ROOT_STATE_CUSTOM_TYPE, state);
   }
 
-  function updateUi(ctx: ExtensionContext, state: CallState | undefined): void {
-    const status = statusText(state);
-    ctx.ui.setStatus("call", status ? ctx.ui.theme.fg("accent", status) : undefined);
-    if (!state) {
-      ctx.ui.setWidget("call", undefined);
+  function applyTools(rootState: RootCallState | undefined, runtime: CallRuntimeState | undefined): void {
+    if (runtime) {
+      pi.setActiveTools(runtimeActiveTools(runtime));
       return;
     }
-    const lines: string[] = [];
-    const active = topFrame(state);
-    if (active) {
-      lines.push(`call frame: ${active.phase} (depth ${state.stack.length})`);
-      lines.push(`nested call: ${active.complex ? "allowed" : "disabled"}`);
-      lines.push(`task: ${active.task.slice(0, 160)}${active.task.length > 160 ? "…" : ""}`);
-      if (state.stack.length > 1) {
-        const parent = state.stack[state.stack.length - 2];
-        lines.push(`parent: ${parent.task.slice(0, 120)}${parent.task.length > 120 ? "…" : ""}`);
-      }
-      if (active.reason) lines.push(`reason: ${active.reason}`);
-    }
-    ctx.ui.setWidget("call", lines.length > 0 ? lines : undefined);
+    pi.setActiveTools(rootActiveTools(rootState ?? defaultRootState(pi.getActiveTools())));
   }
 
-  function setState(ctx: ExtensionContext, state: CallState): void {
-    appendState(state);
-    applyTools(state);
-    updateUi(ctx, state);
+  function updateUi(ctx: ExtensionContext, rootState: RootCallState | undefined, runtime: CallRuntimeState | undefined): void {
+    const status = statusText(rootState, runtime);
+    ctx.ui.setStatus("call", status ? ctx.ui.theme.fg("accent", status) : undefined);
+
+    if (runtime) {
+      ctx.ui.setWidget("call", [
+        `tmux call frame${runtime.complex ? " (complex)" : ""}`,
+        `task: ${runtime.task.slice(0, 160)}${runtime.task.length > 160 ? "…" : ""}`,
+        `return target: ${runtime.resultPath}`,
+      ]);
+      return;
+    }
+
+    if (rootState?.bobsMode) {
+      ctx.ui.setWidget("call", ["bobs-mode: root tools restricted to call"]);
+      return;
+    }
+
+    ctx.ui.setWidget("call", undefined);
   }
 
-  async function finishReturn(
-    ctx: ExtensionCommandContext,
-    state: CallState,
-    active: ActiveCallFrame,
-    options: { triggerTurn: boolean },
-  ): Promise<boolean> {
-    if (!active.returnValue || !active.returnPointId) {
-      ctx.ui.notify("No complete call return is ready to finish.", "warning");
-      return false;
+  function refresh(ctx: ExtensionContext): void {
+    const rootState = resolveRootState(ctx) ?? defaultRootState(pi.getActiveTools());
+    const runtime = resolveRuntime(ctx);
+    currentRootState = rootState;
+    applyTools(rootState, runtime);
+    updateUi(ctx, rootState, runtime);
+  }
+
+  async function startForkedCall(
+    ctx: ExtensionContext,
+    params: CallParams,
+    toolCallId: string,
+    signal: AbortSignal | undefined,
+    onUpdate: ((partial: { content: Array<{ type: "text"; text: string }>; details: CallToolDetails }) => void) | undefined,
+  ): Promise<{ result: CallResultFile; details: CallToolDetails }> {
+    if (!isTmuxAvailable()) {
+      throw new Error("call requires tmux; start pi inside a tmux session to use tmux-backed call frames.");
     }
 
-    const callBranchLeafId = active.callBranchLeafId ?? ctx.sessionManager.getLeafId() ?? undefined;
-    const returnedActive: ActiveCallFrame = { ...active, callBranchLeafId };
-    const result = await ctx.navigateTree(active.returnPointId, { suppressStatus: true });
-    if (result.cancelled) {
-      setState(ctx, replaceTopFrame(state, { ...returnedActive, phase: "paused", reason: "return navigation was cancelled" }));
-      ctx.ui.notify("call return navigation cancelled; call is paused.", "warning");
-      return false;
+    const parentSession = ctx.sessionManager.getSessionFile();
+    if (!parentSession || !fs.existsSync(parentSession)) {
+      throw new Error("Current session is not persisted; cannot fork a tmux call frame.");
     }
 
-    const nextState = popTopFrame(state);
-    setState(ctx, nextState);
-    const content = formatReturn(active.returnValue);
-    pi.sendMessage(
-      {
-        customType: MESSAGE_CUSTOM_TYPE,
-        content,
-        display: true,
-        details: { active: returnedActive, returnValue: active.returnValue },
-      },
-      { triggerTurn: options.triggerTurn },
+    const timeoutSeconds = getTimeoutSeconds(params.timeoutSeconds);
+    const callId = makeCallId();
+    const requestedLockName = sanitizeLockName(`call-${callId}`);
+    const resultPath = createResultPath(callId);
+    const targetCwd = ctx.cwd;
+    const preCallLeafId = getPreCallLeafId(ctx, toolCallId);
+    const rootState = resolveRootState(ctx) ?? defaultRootState(pi.getActiveTools());
+    const parentRuntime = resolveRuntime(ctx);
+    const workerTools = captureWorkerTools(pi, rootState, parentRuntime);
+    if (workerTools.length === 0) {
+      throw new Error("Cannot start call frame: no worker tools are available after stripping call/return.");
+    }
+
+    const forked = SessionManager.forkFrom(parentSession, targetCwd);
+    const childSessionFile = forked.getSessionFile();
+    if (!childSessionFile) {
+      throw new Error("Could not create a persistent fork session for call frame.");
+    }
+    if (preCallLeafId === null) {
+      forked.resetLeaf();
+    } else {
+      forked.branch(preCallLeafId);
+    }
+
+    const runtime: CallRuntimeState = {
+      id: callId,
+      task: params.task,
+      complex: params.complex === true,
+      resultPath,
+      parentSession,
+      childSession: childSessionFile,
+      parentCwd: ctx.cwd,
+      childCwd: targetCwd,
+      lockName: requestedLockName,
+      workerTools,
+      createdAt: new Date().toISOString(),
+    };
+    forked.appendCustomEntry(CALL_RUNTIME_CUSTOM_TYPE, runtime);
+    flushSessionFile(forked, childSessionFile);
+
+    const promptFile = writePromptFile(callPrompt(params.task, runtime.complex), "pi-ant-call-prompt-");
+    const startResult = await runTmux(
+      pi,
+      ["session-agent", requestedLockName, targetCwd, childSessionFile, "--status-only", "--prompt-file", promptFile],
+      signal,
     );
-    return true;
+    const startText = [startResult.stdout.trim(), startResult.stderr.trim()].filter(Boolean).join("\n");
+    if (startResult.code !== 0) {
+      throw new Error(startText || "Failed to start tmux call frame.");
+    }
+
+    const actualLockName = parseActualLockName(startText, requestedLockName);
+    const result = await waitForCallResult(pi, {
+      id: callId,
+      actualLockName,
+      requestedLockName,
+      resultPath,
+      childSessionFile,
+      task: params.task,
+      complex: runtime.complex,
+      timeoutSeconds,
+      signal,
+      onUpdate,
+    });
+
+    return {
+      result,
+      details: {
+        id: callId,
+        lockName: actualLockName,
+        requestedLockName,
+        resultPath,
+        childSessionFile,
+        task: params.task,
+        complex: runtime.complex,
+        elapsedMs: undefined,
+        status: "returned",
+      },
+    };
+  }
+
+  function returnFromRuntime(ctx: ExtensionContext, runtime: CallRuntimeState, params: ReturnParams): void {
+    writeCallResult(runtime, params.result, ctx.sessionManager.getSessionFile() ?? undefined);
+    ctx.ui.notify("Returned call result; shutting down.", "info");
+    ctx.shutdown();
   }
 
   pi.registerTool({
     name: CALL_TOOL,
     label: "Call",
-    description: "Enter a call frame to do work.",
-    promptSnippet: "Enter a call frame to do work.",
+    description: "Run a delegated task in a forked tmux pi worker and return its result.",
+    promptSnippet: "Run a delegated task in a forked tmux pi worker and return its result.",
+    promptGuidelines: [
+      "Use call for delegated operational work when Bob's mode is active or when the user asks for a separate worker.",
+      "Use call as the only tool call in its assistant turn; sibling tool work is not included in the forked worker context.",
+      "Use call.complex only when the worker may need to delegate substantial subtasks with nested call frames.",
+    ],
     parameters: callParams,
     renderCall: renderCallArgs,
-    renderResult() {
-      return {
-        render: () => [],
-        invalidate: () => {
-          /* no-op */
-        },
-      };
-    },
-    async execute(_toolCallId, params: CallParams, _signal, _onUpdate, ctx) {
-      const state = resolveState(ctx) ?? defaultState(pi.getActiveTools());
-      const parent = topFrame(state);
-      let baseState = state;
-      if (parent && parent.phase === "paused") {
-        baseState = { ...state, stack: [] };
-      } else if (parent && (parent.phase !== "doing" || !parent.complex)) {
-        throw new Error(
-          "A call frame is already active; finish it with return before starting another call frame, or start the parent call with complex: true to allow nested calls.",
-        );
+    async execute(toolCallId, params: CallParams, signal, onUpdate, ctx) {
+      const runtime = resolveRuntime(ctx);
+      if (runtime && !runtime.complex) {
+        throw new Error("This call frame is not complex; nested call is disabled.");
       }
 
-      const activeParent = topFrame(baseState);
-      const rootTools = activeParent
-        ? activeParent.rootTools
-        : baseState.bobsMode
-          ? baseState.rootTools
-          : stripControlTools(pi.getActiveTools());
-      const active: ActiveCallFrame = {
-        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-        task: params.task,
-        complex: params.complex === true,
-        phase: "starting",
-        rootTools,
-        bobsMode: activeParent?.bobsMode ?? baseState.bobsMode,
-        enforcementCount: 0,
-      };
-      setState(ctx, pushFrame(baseState, active));
+      const { result, details } = await startForkedCall(ctx, params, toolCallId, signal, onUpdate);
       return {
-        content: [
-          {
-            type: "text",
-            text: `Entering call frame ${active.id}${active.complex ? " (complex)" : ""}. The call task will run with normal tools and must finish with return.`,
-          },
-        ],
-        details: { id: active.id, task: params.task, complex: active.complex },
-        terminate: true,
+        content: [{ type: "text", text: result.result }],
+        details,
       };
     },
   });
@@ -440,40 +679,19 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: RETURN_TOOL,
     label: "Return",
-    description: "Return exact text from the call frame to the call site.",
-    promptSnippet: "Return exact text from the call frame to the call site",
+    description: "Return exact text from the tmux call frame to the parent call tool.",
+    promptSnippet: "Return exact text from the tmux call frame to the parent call tool",
     parameters: returnParams,
     async execute(_toolCallId, params: ReturnParams, _signal, _onUpdate, ctx) {
-      const state = resolveState(ctx);
-      const active = topFrame(state);
-      if (!state || !active || active.phase !== "doing") {
-        throw new Error("No active call frame is ready to return.");
-      }
-      if (!active.returnPointId) {
-        throw new Error("The active call frame has no return point yet.");
+      const runtime = resolveRuntime(ctx);
+      if (!runtime) {
+        throw new Error("No active tmux call frame is available to return from.");
       }
 
-      const returning: ActiveCallFrame = {
-        ...active,
-        phase: "returning",
-        returnValue: params,
-        callBranchLeafId: ctx.sessionManager.getLeafId() ?? undefined,
-      };
-      const returningState = replaceTopFrame(state, returning);
-      setState(ctx, returningState);
-      ctx.clearQueue();
-      ctx.scheduleAfterAgent(async (commandCtx) => {
-        const latestState = currentState;
-        const latestActive = topFrame(latestState);
-        if (!latestState || !latestActive || latestActive.id !== returning.id || latestActive.phase !== "returning") {
-          return undefined;
-        }
-        const continueAgent = await finishReturn(commandCtx, latestState, latestActive, { triggerTurn: false });
-        return { continueAgent };
-      });
+      returnFromRuntime(ctx, runtime, params);
       return {
-        content: [{ type: "text", text: "Returning to the call site." }],
-        details: params,
+        content: [{ type: "text", text: "Returned result to parent call frame. Shutting down." }],
+        details: { id: runtime.id, resultPath: runtime.resultPath },
         terminate: true,
       };
     },
@@ -490,31 +708,38 @@ export default function (pi: ExtensionAPI) {
     },
     handler: async (args, ctx) => {
       await ctx.waitForIdle();
+      const runtime = resolveRuntime(ctx);
+      if (runtime) {
+        ctx.ui.notify("bobs-mode is controlled by the parent outside this call frame.", "warning");
+        return;
+      }
+
       const rawAction = args?.trim().toLowerCase();
-      const state = resolveState(ctx) ?? defaultState(pi.getActiveTools());
+      const state = resolveRootState(ctx) ?? defaultRootState(pi.getActiveTools());
       const action = !rawAction || rawAction === "toggle" ? (state.bobsMode ? "off" : "on") : rawAction;
 
       if (action === "status") {
-        const active = topFrame(state);
-        const activeText = active ? `, call=${state.stack.length}:${active.phase}` : "";
-        ctx.ui.notify(`bobs-mode: ${state.bobsMode ? "on" : "off"}${activeText}`, "info");
+        ctx.ui.notify(`bobs-mode: ${state.bobsMode ? "on" : "off"}`, "info");
         return;
       }
 
       if (action === "on") {
-        const next: CallState = {
-          ...state,
+        const next: RootCallState = {
           bobsMode: true,
           rootTools: stripControlTools(state.bobsMode ? state.rootTools : pi.getActiveTools()),
         };
-        setState(ctx, next);
+        appendRootState(next);
+        applyTools(next, undefined);
+        updateUi(ctx, next, undefined);
         ctx.ui.notify("bobs-mode on: root tools restricted to call.", "info");
         return;
       }
 
       if (action === "off") {
-        const next: CallState = { ...state, bobsMode: false };
-        setState(ctx, next);
+        const next: RootCallState = { ...state, bobsMode: false };
+        appendRootState(next);
+        applyTools(next, undefined);
+        updateUi(ctx, next, undefined);
         ctx.ui.notify("bobs-mode off: root tools restored.", "info");
         return;
       }
@@ -524,7 +749,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand(RETURN_NOW_COMMAND, {
-    description: "Force-return from the active call frame with an error message. Usage: /return-now \"message\"",
+    description: "Return from the active tmux call frame with a message. Usage: /return-now \"message\"",
     handler: async (args, ctx) => {
       const message = parseReturnNowText(args);
       if (!message) {
@@ -539,119 +764,42 @@ export default function (pi: ExtensionAPI) {
         await ctx.waitForIdle();
       }
 
-      const state = resolveState(ctx);
-      const active = topFrame(state);
-      if (!state || !active) {
-        ctx.ui.notify("No active call frame to return from.", "warning");
-        return;
-      }
-      if (!active.returnPointId) {
-        ctx.ui.notify("The active call frame does not have a return point yet.", "warning");
+      const runtime = resolveRuntime(ctx);
+      if (!runtime) {
+        ctx.ui.notify("No active tmux call frame to return from.", "warning");
         return;
       }
 
-      const returning: ActiveCallFrame = {
-        ...active,
-        phase: "returning",
-        returnValue: { result: message },
-        callBranchLeafId: ctx.sessionManager.getLeafId() ?? undefined,
-      };
-      const returningState = replaceTopFrame(state, returning);
-      setState(ctx, returningState);
-      ctx.clearQueue();
-      ctx.ui.setEditorText?.("");
-      await finishReturn(ctx, returningState, returning, { triggerTurn: true });
+      returnFromRuntime(ctx, runtime, { result: message });
     },
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    currentState = getLatestState(ctx) ?? defaultState(pi.getActiveTools());
-    applyTools(currentState);
-    updateUi(ctx, currentState);
+    refresh(ctx);
   });
 
   pi.on("session_tree", async (_event, ctx) => {
-    currentState = getLatestState(ctx) ?? defaultState(pi.getActiveTools());
-    applyTools(currentState);
-    updateUi(ctx, currentState);
+    refresh(ctx);
   });
 
-  pi.on("tool_execution_start", async (event) => {
-    if (event.toolName === CALL_TOOL) terminateCallTurn = true;
-  });
-
-  pi.on("tool_result", async () => {
-    const active = topFrame(currentState);
-    if (terminateCallTurn && active?.phase === "starting") {
-      return { terminate: true };
-    }
-    return undefined;
-  });
-
-  pi.on("turn_end", async () => {
-    terminateCallTurn = false;
-  });
-
-  pi.on("before_agent_start", async (event) => {
-    const state = currentState;
-    const active = topFrame(state);
-    if (active && active.phase === "doing") {
-      const delegationGuidance = active.complex
+  pi.on("before_agent_start", async (event, ctx) => {
+    const runtime = resolveRuntime(ctx);
+    if (runtime) {
+      const delegationGuidance = runtime.complex
         ? "You may call the call tool for substantial delegated subtasks."
         : "Do not call the call tool.";
       return {
-        systemPrompt: `${event.systemPrompt}\n\nYou are inside a call frame. Complete the delegated task using tools as needed. ${delegationGuidance} End by calling return exactly once with { result: \"...\" }; put the exact text that should be returned to the caller in result.`,
+        systemPrompt: `${event.systemPrompt}\n\nYou are inside a tmux-backed call frame. Complete the delegated task using tools as needed. ${delegationGuidance} End by calling return exactly once with { result: \"...\" }; put the exact text that should be returned to the parent in result. Do not answer normally instead of returning.`,
       };
     }
-    if (state?.bobsMode && state.stack.length === 0) {
+
+    const state = currentRootState;
+    if (state?.bobsMode) {
       return {
-        systemPrompt: `${event.systemPrompt}\n\nBob's mode is active. Treat the root conversation as an orchestration thread, not a work thread. Default to call for any task, continuation, status check, recommendation, or question whose answer is not already fully available from compact root context. Do not give generic next-step options when current project/session state is unknown; call a frame to inspect and return a compact recommendation. Answer directly only for purely conversational/conceptual questions or when recent compact call results already contain all needed facts.`,
+        systemPrompt: `${event.systemPrompt}\n\nBob's mode is active. Treat the root conversation as an orchestration thread, not a work thread. Default to call for any task, continuation, status check, recommendation, or question whose answer is not already fully available from compact root context. Do not give generic next-step options when current project/session state is unknown; call a tmux-backed worker to inspect and return a compact recommendation. Answer directly only for purely conversational/conceptual questions or when recent compact call results already contain all needed facts.`,
       };
     }
+
     return undefined;
-  });
-
-  pi.on("agent_end", async (_event, ctx) => {
-    const state = resolveState(ctx);
-    const active = topFrame(state);
-    if (!state || !active) return;
-
-    if (active.phase === "starting") {
-      const doing: ActiveCallFrame = {
-        ...active,
-        phase: "doing",
-        returnPointId: ctx.sessionManager.getLeafId() ?? undefined,
-      };
-      setState(ctx, replaceTopFrame(state, doing));
-      void pi.sendUserMessage(callPrompt(active.task, active.complex), { deliverAs: "followUp" });
-      return;
-    }
-
-    if (active.phase !== "doing") return;
-
-    const editorText = ctx.ui.getEditorText?.() ?? "";
-    if (editorText.trim().length > 0) {
-      ctx.ui.notify("call frame is still active; call return when finished.", "warning");
-      return;
-    }
-
-    if (active.enforcementCount >= 1) {
-      setState(ctx, {
-        ...replaceTopFrame(state, {
-          ...active,
-          phase: "paused",
-          reason: "call frame stopped without return after reminder",
-        }),
-      });
-      ctx.ui.notify("call paused: worker stopped without calling return.", "warning");
-      return;
-    }
-
-    const reminded: ActiveCallFrame = { ...active, enforcementCount: active.enforcementCount + 1 };
-    setState(ctx, replaceTopFrame(state, reminded));
-    void pi.sendUserMessage(
-      "You are still inside a call frame. Call return now with { result: \"...\" }. Put the exact concise text that should be returned to the caller in result. Do not do more work unless needed to produce an accurate return.",
-      { deliverAs: "followUp" },
-    );
   });
 }
