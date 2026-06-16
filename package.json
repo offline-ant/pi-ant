@@ -43,7 +43,8 @@
       "./extensions/tmux-fork.ts",
       "./extensions/context-explorer.ts",
       "./extensions/browser.ts",
-      "./extensions/prompt-history.ts"
+      "./extensions/prompt-history.ts",
+      "./extensions/agents-d.ts"
     ]
   }
 }
