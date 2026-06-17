@@ -254,7 +254,7 @@ function buildAgentsDContext(cwd: string): AgentsDContext | null {
     "```",
   ].join("\n");
 
-  return { systemPromptBlock, loadedFiles, treeBlock };
+  return { systemPromptBlock, loadedFiles, visibleDirs, treeBlock };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -264,7 +264,7 @@ export default function (pi: ExtensionAPI) {
       return; // no AGENTS.d/ directory
     }
 
-    const { systemPromptBlock, loadedFiles, visibleDirs, treeBlock } = result;
+    const { systemPromptBlock, loadedFiles, visibleDirs } = result;
 
     const loadedList =
       loadedFiles.length > 0

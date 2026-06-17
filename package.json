@@ -25,6 +25,7 @@
     "extensions": [
       "./extensions/nesting.ts",
       "./extensions/semaphore-locks.ts",
+      "./extensions/tool-model.ts",
       "./extensions/call.ts",
       "./extensions/tmux.ts",
       "./extensions/read-complete.ts",

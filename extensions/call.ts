@@ -5,13 +5,13 @@ import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earen
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { flushSessionFile, runTmux, writePromptFile } from "./tmux-helpers.ts";
+import { getToolModelCliArgs } from "./tool-model-state.ts";
 
 const CALL_TOOL = "call";
 const RETURN_TOOL = "return";
 const ROOT_STATE_CUSTOM_TYPE = "pi-ant:call-state";
 const CALL_RUNTIME_CUSTOM_TYPE = "pi-ant:call-runtime";
 const RETURN_NOW_COMMAND = "return-now";
-const DEFAULT_CALL_TIMEOUT_SECONDS = 3600;
 const RESULT_POLL_INTERVAL_MS = 250;
 const PROGRESS_UPDATE_INTERVAL_MS = 5000;
 const LOCK_DIR = "/tmp/pi-semaphores";
@@ -24,12 +24,6 @@ const callParams = Type.Object({
   complex: Type.Optional(
     Type.Boolean({
       description: "Allow this call frame to use call for substantial delegated subtasks.",
-    }),
-  ),
-  timeoutSeconds: Type.Optional(
-    Type.Number({
-      description:
-        "Maximum seconds to wait for the forked call frame to return. Default: 3600. Use <= 0 to wait indefinitely.",
     }),
   ),
 });
@@ -214,15 +208,19 @@ function renderCallArgs(args: CallParams) {
   };
 }
 
-function callPrompt(task: string, complex: boolean): string {
+function renderReturnArgs(args: ReturnParams) {
+  const lines = args.result.split("\n");
+  return {
+    render: (contentWidth: number) => lines.flatMap((line) => wrapTextWithAnsi(line, contentWidth)),
+    invalidate: () => {
+      /* no-op */
+    },
+  };
+}
+
+function callFrameInstructions(task: string): string {
   return [
-    "You are inside a tmux-backed call frame.",
-    "Use the available tools to complete the delegated task in this forked pi session.",
-    complex
-      ? "This is a complex call frame. You may use the call tool for substantial delegated subtasks; otherwise work directly."
-      : "Do not call the call tool or delegate recursively.",
-    "Before finishing, call return exactly once with { result: \"...\" }.",
-    "If you are blocked or the task is already complete, put that concise state directly in result.",
+    "You have stepped inside a call frame. Use the available tools to complete the task below. Do not stop until you call `return({ result: \"...\" })` with the result for the caller, or the cause of failure.",
     "",
     "Task:",
     task,
@@ -320,13 +318,6 @@ function writeCallResult(runtime: CallRuntimeState, result: string, sessionFile:
   }
 }
 
-function getTimeoutSeconds(value: number | undefined): number {
-  if (value === undefined) return DEFAULT_CALL_TIMEOUT_SECONDS;
-  if (!Number.isFinite(value)) throw new Error("timeoutSeconds must be a finite number");
-  if (value <= 0) return 0;
-  return Math.ceil(value);
-}
-
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(new Error("Call frame aborted"));
   return new Promise((resolve, reject) => {
@@ -404,7 +395,6 @@ async function waitForCallResult(
     childSessionFile: string;
     task: string;
     complex: boolean;
-    timeoutSeconds: number;
     signal?: AbortSignal;
     onUpdate?: (partial: { content: Array<{ type: "text"; text: string }>; details: CallToolDetails }) => void;
   },
@@ -423,21 +413,6 @@ async function waitForCallResult(
     }
 
     const elapsedMs = Date.now() - startedAt;
-    if (options.timeoutSeconds > 0 && elapsedMs >= options.timeoutSeconds * 1000) {
-      const output = await captureTmuxOutput(pi, options.actualLockName, 40);
-      throw new Error(
-        [
-          `Call frame timed out after ${options.timeoutSeconds}s.`,
-          `tmux lock: ${options.actualLockName}`,
-          `child session: ${options.childSessionFile}`,
-          `result path: ${options.resultPath}`,
-          "",
-          "Last tmux output:",
-          output,
-        ].join("\n"),
-      );
-    }
-
     if (isLockFinished(options.actualLockName)) {
       if (fs.existsSync(options.resultPath)) {
         return parseCallResult(fs.readFileSync(options.resultPath, "utf8"), options.resultPath, options.id);
@@ -563,7 +538,6 @@ export default function (pi: ExtensionAPI) {
       throw new Error("Current session is not persisted; cannot fork a tmux call frame.");
     }
 
-    const timeoutSeconds = getTimeoutSeconds(params.timeoutSeconds);
     const callId = makeCallId();
     const requestedLockName = sanitizeLockName(`call-${callId}`);
     const resultPath = createResultPath(callId);
@@ -603,10 +577,19 @@ export default function (pi: ExtensionAPI) {
     forked.appendCustomEntry(CALL_RUNTIME_CUSTOM_TYPE, runtime);
     flushSessionFile(forked, childSessionFile);
 
-    const promptFile = writePromptFile(callPrompt(params.task, runtime.complex), "pi-ant-call-prompt-");
+    const promptFile = writePromptFile(callFrameInstructions(params.task), "pi-ant-call-prompt-");
     const startResult = await runTmux(
       pi,
-      ["session-agent", requestedLockName, targetCwd, childSessionFile, "--status-only", "--prompt-file", promptFile],
+      [
+        "session-agent",
+        requestedLockName,
+        targetCwd,
+        childSessionFile,
+        "--status-only",
+        ...getToolModelCliArgs(ctx),
+        "--prompt-file",
+        promptFile,
+      ],
       signal,
     );
     const startText = [startResult.stdout.trim(), startResult.stderr.trim()].filter(Boolean).join("\n");
@@ -623,7 +606,6 @@ export default function (pi: ExtensionAPI) {
       childSessionFile,
       task: params.task,
       complex: runtime.complex,
-      timeoutSeconds,
       signal,
       onUpdate,
     });
@@ -653,7 +635,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: CALL_TOOL,
     label: "Call",
-    description: "Run a delegated task in a forked tmux pi worker and return its result.",
+    description: "Run a delegated task in a forked tmux pi worker and return its result. Uses /tool-model when configured.",
     promptSnippet: "Run a delegated task in a forked tmux pi worker and return its result.",
     promptGuidelines: [
       "Use call for delegated operational work when Bob's mode is active or when the user asks for a separate worker.",
@@ -682,6 +664,7 @@ export default function (pi: ExtensionAPI) {
     description: "Return exact text from the tmux call frame to the parent call tool.",
     promptSnippet: "Return exact text from the tmux call frame to the parent call tool",
     parameters: returnParams,
+    renderCall: renderReturnArgs,
     async execute(_toolCallId, params: ReturnParams, _signal, _onUpdate, ctx) {
       const runtime = resolveRuntime(ctx);
       if (!runtime) {
@@ -785,11 +768,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     const runtime = resolveRuntime(ctx);
     if (runtime) {
-      const delegationGuidance = runtime.complex
-        ? "You may call the call tool for substantial delegated subtasks."
-        : "Do not call the call tool.";
       return {
-        systemPrompt: `${event.systemPrompt}\n\nYou are inside a tmux-backed call frame. Complete the delegated task using tools as needed. ${delegationGuidance} End by calling return exactly once with { result: \"...\" }; put the exact text that should be returned to the parent in result. Do not answer normally instead of returning.`,
+        systemPrompt: `${event.systemPrompt}\n\n${callFrameInstructions(runtime.task)}\n\nDo not answer normally instead of returning.`,
       };
     }
 
