@@ -45,6 +45,7 @@
       "./extensions/context-explorer.ts",
       "./extensions/browser.ts",
       "./extensions/prompt-history.ts",
+      "./extensions/vim.ts",
       "./extensions/agents-d.ts"
     ]
   }

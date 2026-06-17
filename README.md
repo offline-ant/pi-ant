@@ -28,6 +28,7 @@ These are the pi tools registered by this package:
 - SQLite workflow commands: `/sqlite-init`, `/agent-db`.
 - Context explorer commands: `/context-explorer`, `/context-explorer-stop`.
 - Prompt history command: `/prompt-history`.
+- Vim conversation edit command: `/vim` — opens the current conversation transcript in `$VISUAL`/`$EDITOR`/`vim`; changed lines are sent as the next user message.
 - Reflection memory checkpoint command: `/reflect`.
 - Working-directory switch command: `/cwd <path>`.
 - Git worktree creation command: `/worktree <name>`.
