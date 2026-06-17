@@ -38,7 +38,7 @@ function formatArgs(args: Record<string, unknown>): string {
 	return lines.join("\n") || "(no arguments)";
 }
 
-function buildTranscript(messages: AgentMessage[], cwd: string): string {
+function buildTranscript(messages: AgentMessage[], cwd: string): { text: string; lastAssistantLine: number | null } {
 	const header = [
 		`# Pi Session: ${cwd}`,
 		"#",
@@ -48,6 +48,7 @@ function buildTranscript(messages: AgentMessage[], cwd: string): string {
 	];
 
 	const lines: string[] = [...header];
+	let lastAssistantLine: number | null = null;
 
 	for (const msg of messages) {
 		switch (msg.role) {
@@ -66,6 +67,7 @@ function buildTranscript(messages: AgentMessage[], cwd: string): string {
 						if (existingLast === "## Assistant") {
 							lines.push(block.text.trim(), "");
 						} else {
+							lastAssistantLine = lines.length + 1; // 1-based line of "## Assistant"
 							lines.push("## Assistant", block.text.trim(), "");
 						}
 					} else if (block.type === "thinking" && block.thinking.trim()) {
@@ -118,7 +120,7 @@ function buildTranscript(messages: AgentMessage[], cwd: string): string {
 	}
 	lines.push(""); // single trailing newline
 
-	return lines.join("\n");
+	return { text: lines.join("\n"), lastAssistantLine };
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +190,7 @@ async function openInEditor(
 	tui: TUI,
 	transcript: string,
 	editorCmd: string,
+	cursorLine?: number | null,
 ): Promise<string | null> {
 	const tmpFile = path.join(os.tmpdir(), `pi-vim-${Date.now()}.md`);
 
@@ -196,11 +199,18 @@ async function openInEditor(
 		tui.stop();
 
 		const [editor, ...editorArgs] = editorCmd.split(" ");
+		const isVi = /^(vi|vim|nvim|gvim|mvim)$/.test(path.basename(editor));
 
 		process.stdout.write(`Launching external editor: ${editorCmd}\nPi will resume when the editor exits.\n`);
 
+		const args = [...editorArgs];
+		if (cursorLine && isVi) {
+			args.push(`+${cursorLine}`);
+		}
+		args.push(tmpFile);
+
 		const status = await new Promise<number | null>((resolve) => {
-			const child = spawn(editor, [...editorArgs, tmpFile], {
+			const child = spawn(editor, args, {
 				stdio: "inherit",
 				shell: process.platform === "win32",
 			});
@@ -241,7 +251,7 @@ export default function (pi: ExtensionAPI) {
 
 			// Build transcript from the current conversation branch
 			const context = ctx.sessionManager.buildSessionContext();
-			const transcript = buildTranscript(context.messages, ctx.cwd);
+			const { text: transcript, lastAssistantLine } = buildTranscript(context.messages, ctx.cwd);
 
 			// Capture TUI, stop it, spawn editor, restart, diff, send
 			let tui: TUI;
@@ -252,7 +262,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			const edited = await openInEditor(tui, transcript, editorCmd);
+			const edited = await openInEditor(tui, transcript, editorCmd, lastAssistantLine);
 
 			if (edited === null) {
 				ctx.ui.notify("Editor exited with error status", "info");
