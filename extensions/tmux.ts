@@ -9,6 +9,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
+import { getToolModelCliArgs } from "./tool-model-state.ts";
 
 const TMUX_SCRIPT = path.resolve(__dirname, "../bin/pi-tmux");
 
@@ -119,7 +120,7 @@ const minitaskParams = Type.Object({
   simple: Type.Optional(
     Type.Boolean({
       description:
-        "Use for quick rote tasks, like verifying whether a pattern is used in a file. Runs pi with --provider openai-codex --model gpt-5.3-codex-spark, retrying with --thinking off if that exits nonzero, then falling back to deepseek/deepseek-v4-pro if Spark still fails.",
+        "Use for quick rote tasks, like verifying whether a pattern is used in a file. Without /tool-model, runs pi with --provider openai-codex --model gpt-5.3-codex-spark, retrying with --thinking off if that exits nonzero, then falling back to deepseek/deepseek-v4-pro if Spark still fails. When /tool-model is set, that model is used instead.",
     }),
   ),
 });
@@ -890,13 +891,15 @@ export default function (pi: ExtensionAPI) {
       "Spawn a pi coding agent in a tmux pane using the given lock name and folder. " +
       "Send work via tmux-send('<name>'), wait for completion via semaphore_wait('<name>').",
     parameters: tmuxCodingAgentParams,
-    async execute(_toolCallId, params, signal) {
+    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const args = ["coding-agent", params.name, params.folder];
       if (params.contextAlertPercent !== undefined) {
         args.push("--context-alert", String(params.contextAlertPercent));
       }
       if (params.piArgs) {
         args.push(params.piArgs);
+      } else {
+        args.push(...getToolModelCliArgs(ctx));
       }
 
       const result = await runTmux(pi, args, signal);
@@ -918,6 +921,7 @@ export default function (pi: ExtensionAPI) {
     label: "Minitask",
     description:
       "Run one isolated small task or question about this project/environment with an isolated pi RPC process. " +
+      "Uses /tool-model when configured. " +
       "For multiple independent tasks, call this tool multiple times in parallel; do not put dependent followups here because each run has no shared context.",
     parameters: minitaskParams,
     renderCall(args) {
@@ -937,11 +941,12 @@ export default function (pi: ExtensionAPI) {
       };
     },
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const toolModelArgs = getToolModelCliArgs(ctx);
       const result = await runPiRpcTask(
         params.task,
         ctx.cwd,
-        ["--mode", "rpc"],
-        params.simple === true,
+        ["--mode", "rpc", ...toolModelArgs],
+        params.simple === true && toolModelArgs.length === 0,
         signal,
         onUpdate,
         {

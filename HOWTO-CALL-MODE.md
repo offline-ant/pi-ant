@@ -18,8 +18,7 @@ inspection. It is not merged into the root session tree.
 ```json
 {
   "task": "...",
-  "complex": false,
-  "timeoutSeconds": 3600
+  "complex": false
 }
 ```
 
@@ -27,10 +26,11 @@ Starts a tmux-backed call frame using the current conversation context before th
 parent assistant's unresolved `call` tool call. `call` is available in normal mode
 and in Bob's mode. It should be the only tool call in its assistant turn because
 sibling tool work is not included in the forked worker context. The parent blocks
-until the worker returns, exits early, is aborted, or times out.
+until the worker returns, exits early, or is aborted.
 
 Set `complex: true` only when the worker may need nested `call` frames for
-substantial subtasks. `timeoutSeconds <= 0` waits indefinitely.
+substantial subtasks. Calls wait indefinitely by design. If `/tool-model` is set,
+call frames start with that configured pi model/thinking level.
 
 ### `return`
 
@@ -65,7 +65,9 @@ purely conversational/conceptual questions or when recent compact call results
 already contain the needed facts.
 
 Inside a call frame, pi restores the worker tools captured by the parent, adds
-`return`, and adds `call` only for complex frames.
+`return`, and adds `call` only for complex frames. Call frames compact like normal
+pi sessions; the delegated task is injected on every turn so compaction does not
+remove the worker's objective.
 
 `/return-now "message"` is a manual recovery command for a child tmux call frame.
 It aborts/waits for the current worker if needed, writes `message` as the call

@@ -23,6 +23,7 @@ These are the pi tools registered by this package:
 - Semaphore lock commands: `/lock`, `/release`, `/wait`, `/lock-list`.
 - Call-frame commands: `/bobs-mode [on|off|status|toggle]` toggles Bob's mode and can restrict the root tool set to `call`; `/return-now "message"` is a child-frame recovery command that returns `message` and shuts down the worker. See `HOWTO-CALL-MODE.md`.
 - Tmux workflow commands: `/clear-stale`, `/tmux-list`, `/prompt-mini`, `/abort-mini`, `/expand-minitask`, `/tmux-fork`.
+- Tool worker model command: `/tool-model [status|current|off|<provider>/<model> [thinking]]` sets a shared model override used by `call`, `minitask`, and spawned pi workers when no explicit `piArgs` are supplied.
 - Complete context injection commands: `/read-complete`, `/bash-complete`.
 - SQLite workflow commands: `/sqlite-init`, `/agent-db`.
 - Context explorer commands: `/context-explorer`, `/context-explorer-stop`.

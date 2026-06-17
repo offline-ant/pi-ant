@@ -7,6 +7,7 @@ import * as path from "node:path";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { flushSessionFile, runTmux, writePromptFile } from "./tmux-helpers.ts";
+import { getToolModelPiArgsString } from "./tool-model-state.ts";
 
 const FORK_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const PI_FORK = process.env.PI_FORK === "true";
@@ -254,7 +255,10 @@ export default function (pi: ExtensionAPI) {
       await ctx.waitForIdle();
 
       try {
-        const result = await forkIntoTmux(pi, input, ctx.cwd, ctx.sessionManager);
+        const effectiveInput: TmuxForkInput = input.piArgs?.trim()
+          ? input
+          : { ...input, piArgs: getToolModelPiArgsString(ctx) };
+        const result = await forkIntoTmux(pi, effectiveInput, ctx.cwd, ctx.sessionManager);
         ctx.ui.notify(`${result.text}\n\nForked session: ${result.sessionFile}`, "info");
       } catch (error) {
         ctx.ui.notify(`tmux-fork failed: ${errorMessage(error)}`, "error");
@@ -299,7 +303,7 @@ export default function (pi: ExtensionAPI) {
       "Use tmux-fork.prompt when the forked agent should start work immediately; otherwise omit it to leave the forked pane idle.",
     ],
     parameters: tmuxForkParams,
-    async execute(_toolCallId, params) {
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       if (PI_FORK) {
         return {
           content: [{ type: "text", text: FORK_BLOCK_MESSAGE }],
@@ -314,7 +318,10 @@ export default function (pi: ExtensionAPI) {
       }
 
       const id = createPendingId();
-      pendingForks.set(id, params);
+      const effectiveParams: TmuxForkInput = params.piArgs?.trim()
+        ? params
+        : { ...params, piArgs: getToolModelPiArgsString(ctx) };
+      pendingForks.set(id, effectiveParams);
       pi.sendUserMessage(`/tmux-fork-run ${id}`, { deliverAs: "followUp" });
 
       return {
