@@ -156,6 +156,14 @@ function buildPiPrintAttempts(simple: boolean, baseArgs: string[]): string[][] {
   ];
 }
 
+function makeMiniLockName(cwd: string): string {
+  const parentName = process.env.PI_LOCK_NAME?.trim();
+  const baseName = parentName && parentName.length > 0 ? parentName : `minitask-${path.basename(cwd)}`;
+  const safeBaseName = baseName.replace(/[^A-Za-z0-9._:-]/g, "").slice(0, 80) || "minitask";
+  const suffix = Math.random().toString(36).slice(2, 8);
+  return `${safeBaseName}:mini:${process.pid}:${Date.now()}:${suffix}`;
+}
+
 type RpcRecord = Record<string, unknown> & {
   id?: string;
   type?: string;
@@ -387,7 +395,7 @@ class MiniRpcProcess {
   static start(cwd: string, args: string[], onEvent: (record: RpcRecord) => void): MiniRpcProcess {
     const child = spawn("pi", args, {
       cwd,
-      env: process.env,
+      env: { ...process.env, PI_LOCK_NAME: makeMiniLockName(cwd) },
       stdio: ["pipe", "pipe", "pipe"],
     });
     return new MiniRpcProcess(child, onEvent);
