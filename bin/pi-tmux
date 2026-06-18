@@ -1114,19 +1114,33 @@ cmd_clear_stale() {
   require_tmux
   ensure_lock_dir
 
-  # Get all live pane IDs
+  local dead_panes_cleaned=0
+  local pane_id pane_dead
+
+  # First remove tmux panes that remain visible only because remain-on-exit is
+  # enabled. After they are gone, their lock files fall out naturally as stale.
+  while read -r pane_id pane_dead; do
+    [[ -n "$pane_id" ]] || continue
+    [[ "$pane_dead" == "1" ]] || continue
+
+    tmux kill-pane -t "$pane_id" >/dev/null 2>&1 || true
+    echo "Cleaned dead pane: $pane_id"
+    dead_panes_cleaned=$((dead_panes_cleaned + 1))
+  done < <(tmux list-panes -a -F '#{pane_id} #{pane_dead}' 2>/dev/null || true)
+
+  # Get all live pane IDs after dead panes have been removed.
   local live_panes
   live_panes="$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null || true)"
 
-  local cleaned=0
-  local lock_file pane_id name basename_f reason window_name
+  local stale_locks_cleaned=0
+  local lock_file name basename_f reason window_name
 
-  # Scan all lock and idle files in the semaphore dir
+  # Scan all lock and idle files in the semaphore dir.
   for lock_file in "$LOCK_DIR"/*; do
     [[ -e "$lock_file" ]] || continue
     basename_f="$(basename "$lock_file")"
 
-    # Read the pane id stored in the lock file
+    # Read the pane id stored in the lock file.
     pane_id="$(head -n 1 "$lock_file" 2>/dev/null || true)"
     [[ -n "$pane_id" && "$pane_id" == %* ]] || continue
 
@@ -1146,27 +1160,27 @@ cmd_clear_stale() {
       fi
       [[ -n "$reason" ]] || continue
     else
-      reason="pane $pane_id dead"
+      reason="pane $pane_id not live"
     fi
 
-    # Dead or reused pane — clean up
+    # Missing or reused pane — clean up.
     rm -f -- "$lock_file"
 
-    # Clean up associated watch locks, streams, coding-agent state
+    # Clean up associated watch locks, streams, coding-agent state.
     cleanup_watch_state "$name" 2>/dev/null || true
     clear_coding_agent_state "$name" 2>/dev/null || true
 
-    # Clean up context alert lock
+    # Clean up context alert lock.
     rm -f -- "$(lock_path "${name}:context")" 2>/dev/null || true
 
-    echo "Cleaned: $basename_f ($reason)"
-    cleaned=$((cleaned + 1))
+    echo "Cleaned stale lock: $basename_f ($reason)"
+    stale_locks_cleaned=$((stale_locks_cleaned + 1))
   done
 
-  if [[ $cleaned -eq 0 ]]; then
-    echo "No stale locks found."
+  if [[ $dead_panes_cleaned -eq 0 && $stale_locks_cleaned -eq 0 ]]; then
+    echo "No stale tmux panes or locks found."
   else
-    echo "Cleaned $cleaned stale lock(s)."
+    echo "Cleaned $dead_panes_cleaned dead pane(s) and $stale_locks_cleaned stale lock(s)."
   fi
 }
 

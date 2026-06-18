@@ -54,6 +54,17 @@ function resultText(stdout: string, stderr: string): string {
   return text.length > 0 ? text : "(no output)";
 }
 
+function parseLockedName(text: string): string | null {
+  const match = text.match(/Locked:\s+(.+)/);
+  return match?.[1]?.trim() || null;
+}
+
+function defaultWaitLockName(): string {
+  const envName = sanitizeName(process.env.PI_LOCK_NAME ?? "");
+  const base = envName || sanitizeName(path.basename(process.cwd() || ".")) || "session";
+  return `${base}:wait`;
+}
+
 const MAX_RETRIES = 3;
 const DEFAULT_SEMAPHORE_WAIT_TIMEOUT_SECONDS = 600;
 const SEMAPHORE_WAIT_CAPTURE_INTERVAL_MS = 5000;
@@ -108,6 +119,14 @@ interface SemaphoreWaitDetails {
   parentStopped?: string;
   childLock?: string;
   watchLock?: string;
+}
+
+interface ActiveUserWaitState {
+  names: string[];
+  queuedPrompts: string[];
+  abortController: AbortController;
+  waitLockName: string | null;
+  waitLockOwned: boolean;
 }
 
 function getSemaphoreWaitParams(params: SemaphoreWaitParams): { safeNames: string[]; timeoutSeconds: number } {
@@ -329,7 +348,22 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
   // The input event handler aborts this so a user message interrupts the wait.
   let waitAbortController: AbortController | null = null;
 
-  let activeUserWait: { names: string[]; queuedPrompts: string[]; abortController: AbortController } | null = null;
+  let activeUserWait: ActiveUserWaitState | null = null;
+
+  async function releaseOwnedWaitLock(ctx: ExtensionContext, state: ActiveUserWaitState): Promise<void> {
+    if (!state.waitLockOwned || !state.waitLockName || currentLockName !== state.waitLockName) {
+      return;
+    }
+
+    const result = await runSemaphore(pi, ["agent-end", state.waitLockName]);
+    if (result.code !== 0 && ctx.hasUI) {
+      ctx.ui.notify(resultText(result.stdout, result.stderr), "error");
+    }
+    currentLockName = null;
+    if (ctx.hasUI) {
+      ctx.ui.setStatus("locks", undefined);
+    }
+  }
 
   // When the user sends a message while semaphore_wait is blocking,
   // abort the wait subprocess so the steering message is delivered promptly.
@@ -355,11 +389,10 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
   });
 
   pi.on("agent_start", async (_event, ctx) => {
-    const result = await runSemaphore(pi, ["agent-start"]);
+    const result = await runSemaphore(pi, currentLockName ? ["agent-start", currentLockName] : ["agent-start"]);
     const text = resultText(result.stdout, result.stderr);
     if (result.code === 0) {
-      const match = text.match(/Locked:\s+(.+)/);
-      currentLockName = match?.[1]?.trim() || null;
+      currentLockName = parseLockedName(text);
 
       // Track context alert lock (created by tmux-coding-agent before pi started)
       if (contextAlertThreshold && currentLockName && !contextAlertLockName) {
@@ -467,19 +500,39 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
         return;
       }
 
-      const state: { names: string[]; queuedPrompts: string[]; abortController: AbortController } = {
+      const hadLock = currentLockName !== null;
+      let waitLockName = currentLockName;
+      let waitLockOwned = false;
+      if (!waitLockName) {
+        const lockResult = await runSemaphore(pi, ["agent-start", defaultWaitLockName()]);
+        const lockText = resultText(lockResult.stdout, lockResult.stderr);
+        if (lockResult.code === 0) {
+          waitLockName = parseLockedName(lockText);
+          currentLockName = waitLockName;
+          waitLockOwned = waitLockName !== null;
+        } else if (ctx.hasUI) {
+          ctx.ui.notify(lockText, "warning");
+        }
+      }
+
+      const state: ActiveUserWaitState = {
         names,
         queuedPrompts: [],
         abortController: new AbortController(),
+        waitLockName,
+        waitLockOwned: !hadLock && waitLockOwned,
       };
       activeUserWait = state;
       if (ctx.hasUI) {
+        if (waitLockName) {
+          ctx.ui.setStatus("locks", `Locked: ${waitLockName}`);
+        }
         ctx.ui.setStatus("wait", formatUserWaitStatus(names, 0));
         ctx.ui.notify(`Waiting for any lock: ${names.join(" ")}`, "info");
       }
 
       void (async () => {
-        const result = await runSemaphore(pi, ["wait", ...names], state.abortController.signal);
+        const result = await runSemaphore(pi, ["wait", "--timeout", "0", ...names], state.abortController.signal);
         if (state.abortController.signal.aborted) {
           return;
         }
@@ -494,8 +547,10 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
         }
         if (queuedPrompts.length > 0) {
           pi.sendUserMessage(combineQueuedPrompts(queuedPrompts));
+        } else {
+          await releaseOwnedWaitLock(ctx, state);
         }
-      })().catch((error: unknown) => {
+      })().catch(async (error: unknown) => {
         if (state.abortController.signal.aborted) {
           return;
         }
@@ -506,6 +561,7 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
           ctx.ui.setStatus("wait", undefined);
           ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
         }
+        await releaseOwnedWaitLock(ctx, state);
       });
     },
   });

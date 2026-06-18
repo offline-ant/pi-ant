@@ -172,7 +172,7 @@ cmd_list() {
 }
 
 cmd_wait() {
-  local timeout=120
+  local timeout=0
   local names=()
 
   while [[ $# -gt 0 ]]; do
@@ -331,7 +331,7 @@ Usage:
   pi-semaphore lock [name]
   pi-semaphore release [name]
   pi-semaphore idle [name]
-  pi-semaphore wait [--timeout SEC] <name> [name...]  (SEC <= 0 waits indefinitely)
+  pi-semaphore wait [--timeout SEC] <name> [name...]  (default waits indefinitely; SEC <= 0 waits indefinitely)
   pi-semaphore list
   pi-semaphore agent-start [name]
   pi-semaphore agent-end [name]

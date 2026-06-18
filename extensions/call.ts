@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type AgentEndEvent, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { flushSessionFile, runTmux, writePromptFile } from "./tmux-helpers.ts";
@@ -69,6 +69,7 @@ interface CallResultFile {
   result: string;
   timestamp: string;
   sessionFile?: string;
+  isError?: boolean;
 }
 
 interface CallToolDetails {
@@ -288,10 +289,11 @@ function parseCallResult(raw: string, resultPath: string, expectedId: string): C
     result: parsed.result,
     timestamp: parsed.timestamp,
     sessionFile: typeof parsed.sessionFile === "string" ? parsed.sessionFile : undefined,
+    isError: typeof parsed.isError === "boolean" ? parsed.isError : undefined,
   };
 }
 
-function writeCallResult(runtime: CallRuntimeState, result: string, sessionFile: string | undefined): void {
+function writeCallResult(runtime: CallRuntimeState, result: string, sessionFile: string | undefined, isError = false): void {
   fs.mkdirSync(path.dirname(runtime.resultPath), { recursive: true, mode: 0o700 });
   const tmp = `${runtime.resultPath}.${process.pid}.${Date.now()}.tmp`;
   const payload: CallResultFile = {
@@ -299,6 +301,7 @@ function writeCallResult(runtime: CallRuntimeState, result: string, sessionFile:
     result,
     timestamp: new Date().toISOString(),
     sessionFile,
+    isError,
   };
 
   fs.writeFileSync(tmp, `${JSON.stringify(payload)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
@@ -318,18 +321,9 @@ function writeCallResult(runtime: CallRuntimeState, result: string, sessionFile:
   }
 }
 
-function delay(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return Promise.reject(new Error("Call frame aborted"));
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timeout);
-      reject(new Error("Call frame aborted"));
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
   });
 }
 
@@ -377,12 +371,29 @@ async function captureTmuxOutput(pi: ExtensionAPI, lockName: string, lines = 80)
   }
 }
 
-async function killTmuxPane(pi: ExtensionAPI, lockName: string): Promise<void> {
-  try {
-    await runTmux(pi, ["kill", lockName]);
-  } catch {
-    // Best effort on abort.
+function latestAssistantMessage(messages: AgentEndEvent["messages"]): Extract<AgentEndEvent["messages"][number], { role: "assistant" }> | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.role === "assistant") return message;
   }
+  return undefined;
+}
+
+function assistantMessageText(message: Extract<AgentEndEvent["messages"][number], { role: "assistant" }>): string {
+  const text = message.content
+    .filter((item) => item.type === "text")
+    .map((item) => item.text)
+    .join("")
+    .trim();
+  if (text) return text;
+  if (message.errorMessage) return message.errorMessage;
+  return `Assistant stopped with reason '${message.stopReason}' before calling return.`;
+}
+
+function missingReturnFailure(event: AgentEndEvent): string | undefined {
+  const message = latestAssistantMessage(event.messages);
+  if (!message || message.stopReason === "aborted") return undefined;
+  return assistantMessageText(message);
 }
 
 async function waitForCallResult(
@@ -395,7 +406,6 @@ async function waitForCallResult(
     childSessionFile: string;
     task: string;
     complex: boolean;
-    signal?: AbortSignal;
     onUpdate?: (partial: { content: Array<{ type: "text"; text: string }>; details: CallToolDetails }) => void;
   },
 ): Promise<CallResultFile> {
@@ -405,11 +415,6 @@ async function waitForCallResult(
   while (true) {
     if (fs.existsSync(options.resultPath)) {
       return parseCallResult(fs.readFileSync(options.resultPath, "utf8"), options.resultPath, options.id);
-    }
-
-    if (options.signal?.aborted) {
-      await killTmuxPane(pi, options.actualLockName);
-      throw new Error("Call frame aborted");
     }
 
     const elapsedMs = Date.now() - startedAt;
@@ -460,7 +465,7 @@ async function waitForCallResult(
       });
     }
 
-    await delay(RESULT_POLL_INTERVAL_MS, options.signal);
+    await delay(RESULT_POLL_INTERVAL_MS);
   }
 }
 
@@ -526,7 +531,6 @@ export default function (pi: ExtensionAPI) {
     ctx: ExtensionContext,
     params: CallParams,
     toolCallId: string,
-    signal: AbortSignal | undefined,
     onUpdate: ((partial: { content: Array<{ type: "text"; text: string }>; details: CallToolDetails }) => void) | undefined,
   ): Promise<{ result: CallResultFile; details: CallToolDetails }> {
     if (!isTmuxAvailable()) {
@@ -590,7 +594,6 @@ export default function (pi: ExtensionAPI) {
         "--prompt-file",
         promptFile,
       ],
-      signal,
     );
     const startText = [startResult.stdout.trim(), startResult.stderr.trim()].filter(Boolean).join("\n");
     if (startResult.code !== 0) {
@@ -606,7 +609,6 @@ export default function (pi: ExtensionAPI) {
       childSessionFile,
       task: params.task,
       complex: runtime.complex,
-      signal,
       onUpdate,
     });
 
@@ -644,13 +646,16 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: callParams,
     renderCall: renderCallArgs,
-    async execute(toolCallId, params: CallParams, signal, onUpdate, ctx) {
+    async execute(toolCallId, params: CallParams, _signal, onUpdate, ctx) {
       const runtime = resolveRuntime(ctx);
       if (runtime && !runtime.complex) {
         throw new Error("This call frame is not complex; nested call is disabled.");
       }
 
-      const { result, details } = await startForkedCall(ctx, params, toolCallId, signal, onUpdate);
+      const { result, details } = await startForkedCall(ctx, params, toolCallId, onUpdate);
+      if (result.isError) {
+        throw new Error(result.result);
+      }
       return {
         content: [{ type: "text", text: result.result }],
         details,
@@ -763,6 +768,23 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_tree", async (_event, ctx) => {
     refresh(ctx);
+  });
+
+  pi.on("agent_end", async (event, ctx) => {
+    const runtime = resolveRuntime(ctx);
+    if (!runtime || fs.existsSync(runtime.resultPath)) return;
+
+    const failure = missingReturnFailure(event);
+    if (failure === undefined) return;
+
+    try {
+      writeCallResult(runtime, failure, ctx.sessionManager.getSessionFile() ?? undefined, true);
+      ctx.ui.notify("Call frame ended without return; reported failure to parent.", "warning");
+      ctx.shutdown();
+    } catch (error) {
+      if (fs.existsSync(runtime.resultPath)) return;
+      ctx.ui.notify(`Failed to report missing call return: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
