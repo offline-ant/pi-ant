@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 RESULT_RE = re.compile(r"<pi-guidance-result>\s*(\{.*?\})\s*</pi-guidance-result>", re.S)
-DEFAULT_PROMPT = "Investigate the lowest runnable item in workboard.md and call present_guidance with the result."
+DEFAULT_PROMPT = "Inspect workboard.md, choose the next workflow outcome, and call present_guidance with the result."
 LOCK_FILE = ".workboard-guidance.lock"
 
 
@@ -79,14 +79,18 @@ def main():
             return 2
 
         status = guidance.get("status")
-        if status == "STALLED":
-            print("PI guidance stalled; stopping.", flush=True)
+        if status == "EMPTY_WORKBOARD":
+            print("PI guidance found an empty workboard; stopping.", flush=True)
             return 0
 
-        if status == "DONE":
+        if status == "REQUIRE_HUMAN_DECISION":
+            print("PI guidance requires a human decision; stopping.", flush=True)
+            return 0
+
+        if status == "UPDATE_WORK":
             update = guidance.get("workboardUpdate")
             if not isinstance(update, str) or not update.strip():
-                print("DONE guidance did not include workboardUpdate; stopping.", file=sys.stderr)
+                print("UPDATE_WORK guidance did not include workboardUpdate; stopping.", file=sys.stderr)
                 return 2
             print("\n=== applying workboard update ===", flush=True)
             code, output = apply_workboard_update(update)
@@ -96,10 +100,10 @@ def main():
             prompt = DEFAULT_PROMPT
             continue
 
-        if status == "CONTINUE":
+        if status == "CONTINUE_WORK":
             next_prompt = guidance.get("nextPrompt")
             if not isinstance(next_prompt, str) or not next_prompt.strip():
-                print("CONTINUE guidance did not include nextPrompt; stopping.", file=sys.stderr)
+                print("CONTINUE_WORK guidance did not include nextPrompt; stopping.", file=sys.stderr)
                 return 2
             print("\n=== executing guidance nextPrompt ===", flush=True)
             code, output = run_pi(next_prompt, guidance=False)

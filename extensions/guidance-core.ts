@@ -11,7 +11,7 @@ import { DISTILL_SNIPPET, ENRICH_SNIPPET } from "./snippets.ts";
 export const RESULT_OPEN = "<pi-guidance-result>";
 export const RESULT_CLOSE = "</pi-guidance-result>";
 
-export const GUIDANCE_SYSTEM_PROMPT = `Your job is to inspect workboard.md and linked files, then compile the next clean workflow step. You are selecting the next task, not implementing it.
+export const GUIDANCE_SYSTEM_PROMPT = `Your job is to inspect workboard.md and linked files, then choose the next clean workflow outcome. You are selecting the next task or stop condition, not implementing it.
 
 Rules:
 - End by calling present_guidance exactly once.
@@ -21,24 +21,26 @@ Rules:
 - You may read files and inspect the repo.
 - You may write a concise guidance artifact under scratch/ when that helps preserve context for a human or next worker.
 - Prefer clear stopping points over vague autonomy.
-- If human input is needed, write enough context for the human to decide without rereading the whole session. For decision stalls, write a decision artifact under scratch/decisions/<short-slug>.md and include that path in present_guidance.artifact.
+- If human input is needed, write enough context for the human to decide without rereading the whole session. Return REQUIRE_HUMAN_DECISION, write a decision artifact under scratch/decisions/<short-slug>.md, and include that path in present_guidance.artifact.
 - Decision artifacts are human workbench files. Keep them concise but complete enough to decide quickly: question, relevant context/files, options, recommendation, consequences, and a final "Human response" section. Tell the human to write DONE: <decision> when resolved or CLARIFY: <missing context/request> when more enrichment is needed. Do not include an active line starting with DONE or CLARIFY as a placeholder; leave the response blank until the human writes the signal.
+- Never write decision artifacts for empty/no-runnable-work cases, terminal status summaries, or bookkeeping. scratch/decisions/ is only for REQUIRE_HUMAN_DECISION.
 - Do not use ask for substantial decisions; present decision choices through present_guidance.
-- If no workboard.md exists, return STALLED with reason "no workboard.md".
+- If no workboard.md exists, return EMPTY_WORKBOARD with reason "no workboard.md" and do not write artifacts.
 - Treat workboard.md as active workflow state only. Cold ideas/backlog items outside workboard.md are not runnable until a human promotes them into workboard.md.
-- If the user did not name an item, choose the first runnable non-empty workboard item in this order: needs-enrichment, ready, implementing, needs-distill. needs-decision is not runnable without human input. previous-done is never runnable.
-- If an item is obsolete or already completed, return DONE with a precise workboardUpdate that removes it or replaces previous-done with the latest completed item.
+- If the user did not name an item, choose the first runnable non-empty workboard item in this order: needs-enrichment, ready, implementing, needs-distill. needs-decision is not runnable work; if a needs-decision item still needs a human signal, return REQUIRE_HUMAN_DECISION. previous-done is never runnable.
+- If no runnable or human-decision item remains, return EMPTY_WORKBOARD with no artifact, choices, nextPrompt, or workboardUpdate.
+- If an item is obsolete or already completed, return UPDATE_WORK with a precise workboardUpdate that removes it or replaces previous-done with the latest completed item.
 - If durable facts need to be moved into authority docs before more work, prefer a distill nextPrompt.
 - If the item lacks enough context, prefer an enrich nextPrompt.
 - Enrichment or planning prompts that write or materially change a plan must tell the plan writer to ask minitask for a generic plan review before finishing, triage that review in the same pass, move executable work to ready, and move real unresolved questions to needs-decision with a scratch/decisions artifact.
-- Every CONTINUE nextPrompt must tell the next worker exactly how to update workboard.md before finishing. It should say which section to move the item to for likely outcomes such as needs-decision, needs-distill, previous-done, or back to ready.
-- CONTINUE nextPrompt must be a direct worker prompt. Do not tell the worker to use call, create a controller, or delegate the whole task again. Use minitask only for independent fresh review when appropriate.
+- Every CONTINUE_WORK nextPrompt must tell the next worker exactly how to update workboard.md before finishing. It should say which section to move the item to for likely outcomes such as needs-decision, needs-distill, previous-done, or back to ready.
+- For broad items, choose the next small stage instead of the whole effort. If the stage is not yet detailed enough to execute safely, make nextPrompt produce and minitask-review a detailed stage plan; execution should be a later workboard step.
 
 Prompt-selection rules:
 - For needs-enrichment: produce an enrichment prompt.
 - For needs-distill: produce a distill prompt.
 - For implementation: produce a direct worker prompt with enough context, files, constraints, checks, and required workboard.md updates to execute cleanly.
-- For unclear design/API choices: return STALLED with choices.
+- For unclear design/API choices: return REQUIRE_HUMAN_DECISION with choices and a scratch/decisions artifact.
 
 Available prompt primitives you may incorporate into nextPrompt:
 
@@ -51,9 +53,10 @@ ${DISTILL_SNIPPET}
 </distill>
 
 present_guidance status semantics:
-- CONTINUE: there is a concrete next prompt to run. nextPrompt is required and must be directly executable by the next worker.
-- STALLED: do not produce a next prompt. Use for no runnable item, missing context that requires human input, real blockers, or design decisions.
-- DONE: selected item is complete or obsolete. workboardUpdate is required and should say exactly how to remove the item or replace previous-done with the latest completed item.
+- CONTINUE_WORK: there is a concrete next prompt to run. nextPrompt is required and must be directly executable by the next worker.
+- UPDATE_WORK: the selected item is complete, obsolete, or only needs workboard bookkeeping. workboardUpdate is required and should say exactly how to update workboard.md.
+- REQUIRE_HUMAN_DECISION: progress requires human input. choices and a scratch/decisions artifact are required. Do not include nextPrompt or workboardUpdate.
+- EMPTY_WORKBOARD: no runnable work or pending decision remains. Do not write artifacts and do not include choices, nextPrompt, or workboardUpdate.
 
 Keep nextPrompt specific: include relevant files, constraints, what to do, checks/reports expected when relevant, and the required workboard.md update. Do not say only "continue" or "do the next step".`;
 
@@ -69,7 +72,8 @@ const GuidanceChoice = Type.Object({
 
 export const PRESENT_GUIDANCE_PARAMS = Type.Object({
   status: Type.String({
-    description: "Guidance status: CONTINUE, STALLED, or DONE",
+    description:
+      "Guidance status: CONTINUE_WORK, UPDATE_WORK, REQUIRE_HUMAN_DECISION, or EMPTY_WORKBOARD",
   }),
   item: Type.String({
     description: "The workboard item this guidance applies to",
@@ -80,17 +84,17 @@ export const PRESENT_GUIDANCE_PARAMS = Type.Object({
   ),
   nextPrompt: Type.Optional(
     Type.String({
-      description: "Required for CONTINUE; exact prompt to run next",
+      description: "Required for CONTINUE_WORK; exact prompt to run next",
     }),
   ),
   workboardUpdate: Type.Optional(
     Type.String({
-      description: "Required for DONE; suggested workboard update",
+      description: "Required for UPDATE_WORK; suggested workboard update",
     }),
   ),
   choices: Type.Optional(
     Type.Array(GuidanceChoice, {
-      description: "Human choices for STALLED decisions",
+      description: "Human choices for REQUIRE_HUMAN_DECISION",
     }),
   ),
   notes: Type.Optional(
@@ -102,65 +106,76 @@ export const PRESENT_GUIDANCE_PARAMS = Type.Object({
 
 export type PresentGuidanceParams = Static<typeof PRESENT_GUIDANCE_PARAMS>;
 
+const GUIDANCE_STATUSES = [
+  "CONTINUE_WORK",
+  "UPDATE_WORK",
+  "REQUIRE_HUMAN_DECISION",
+  "EMPTY_WORKBOARD",
+];
+
 function nonEmpty(value: string | undefined): boolean {
   return value !== undefined && value.trim().length > 0;
 }
 
 export function validateGuidance(params: PresentGuidanceParams): string[] {
   const errors: string[] = [];
+  const hasChoices = params.choices !== undefined && params.choices.length > 0;
+  const hasArtifact = nonEmpty(params.artifact);
 
   if (!params.item.trim()) errors.push("item must be non-empty");
   if (!params.reason.trim()) errors.push("reason must be non-empty");
-  if (!["CONTINUE", "STALLED", "DONE"].includes(params.status)) {
-    errors.push("status must be CONTINUE, STALLED, or DONE");
+  if (!GUIDANCE_STATUSES.includes(params.status)) {
+    errors.push(
+      "status must be CONTINUE_WORK, UPDATE_WORK, REQUIRE_HUMAN_DECISION, or EMPTY_WORKBOARD",
+    );
   }
 
-  if (params.status === "CONTINUE" && !nonEmpty(params.nextPrompt)) {
-    errors.push("CONTINUE requires a non-empty nextPrompt");
+  if (params.status === "CONTINUE_WORK" && !nonEmpty(params.nextPrompt)) {
+    errors.push("CONTINUE_WORK requires a non-empty nextPrompt");
   }
 
-  if (params.status === "CONTINUE" && nonEmpty(params.nextPrompt)) {
+  if (params.status === "CONTINUE_WORK" && nonEmpty(params.nextPrompt)) {
     const nextPrompt = params.nextPrompt.toLowerCase();
     if (!nextPrompt.includes("workboard.md")) {
       errors.push(
-        "CONTINUE nextPrompt must include an explicit workboard.md update instruction",
+        "CONTINUE_WORK nextPrompt must include an explicit workboard.md update instruction",
       );
     }
   }
 
-  if (params.status !== "CONTINUE" && nonEmpty(params.nextPrompt)) {
-    errors.push("nextPrompt is only allowed for CONTINUE");
+  if (params.status !== "CONTINUE_WORK" && nonEmpty(params.nextPrompt)) {
+    errors.push("nextPrompt is only allowed for CONTINUE_WORK");
   }
 
-  if (params.status === "DONE" && !nonEmpty(params.workboardUpdate)) {
-    errors.push("DONE requires a non-empty workboardUpdate");
+  if (params.status === "UPDATE_WORK" && !nonEmpty(params.workboardUpdate)) {
+    errors.push("UPDATE_WORK requires a non-empty workboardUpdate");
   }
 
-  if (
-    params.status === "STALLED" &&
-    params.reason.toLowerCase().includes("decision") &&
-    (!params.choices || params.choices.length === 0)
-  ) {
-    errors.push("STALLED decision cases require at least one choice");
+  if (params.status !== "UPDATE_WORK" && nonEmpty(params.workboardUpdate)) {
+    errors.push("workboardUpdate is only allowed for UPDATE_WORK");
   }
 
-  if (
-    params.status === "STALLED" &&
-    params.choices &&
-    params.choices.length > 0 &&
-    !nonEmpty(params.artifact)
-  ) {
-    errors.push(
-      "STALLED decision cases with choices require a scratch/decisions artifact",
-    );
-  }
-
-  if (
-    params.status === "STALLED" &&
-    nonEmpty(params.artifact) &&
-    !params.artifact?.startsWith("scratch/decisions/")
-  ) {
-    errors.push("STALLED decision artifacts must be under scratch/decisions/");
+  if (params.status === "REQUIRE_HUMAN_DECISION") {
+    if (!hasChoices) {
+      errors.push("REQUIRE_HUMAN_DECISION requires at least one choice");
+    }
+    if (!hasArtifact) {
+      errors.push(
+        "REQUIRE_HUMAN_DECISION requires a scratch/decisions artifact",
+      );
+    }
+    if (hasArtifact && !params.artifact?.startsWith("scratch/decisions/")) {
+      errors.push(
+        "REQUIRE_HUMAN_DECISION artifacts must be under scratch/decisions/",
+      );
+    }
+  } else {
+    if (hasChoices) {
+      errors.push("choices are only allowed for REQUIRE_HUMAN_DECISION");
+    }
+    if (hasArtifact) {
+      errors.push("artifact is only allowed for REQUIRE_HUMAN_DECISION");
+    }
   }
 
   if (params.choices) {

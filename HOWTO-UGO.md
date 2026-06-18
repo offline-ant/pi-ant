@@ -31,10 +31,10 @@ workboard item, then asks another fresh pi session to do the selected work.
 
 It has two phases:
 
-1. **ugo-guide phase**: read `workboard.md`, choose the next runnable item, and
-   produce the exact ugo-do prompt for that item.
-2. **ugo-do phase**: run that ugo-do prompt, or in manual mode prefill it for
-   the user to edit/submit.
+1. **ugo-guide phase**: read `workboard.md`, choose the next workflow outcome,
+   and produce structured guidance for it.
+2. **ugo-do phase**: run a worker or workboard-update prompt when guidance
+   returns one, or in manual mode prefill it for the user to edit/submit.
 
 Personally, i used the /pi-prompt to reflect on how i was using my LLM in a loop.
 
@@ -85,15 +85,15 @@ while true; do
       needs-enrichment, ready, implementing, needs-distill.
     Based on the item section and current context, write the exact next prompt
     that another pi -p run should execute.
-    Return STALLED if there is no runnable item or a decision is needed.
+    Return EMPTY_WORKBOARD if there is nothing to do, or REQUIRE_HUMAN_DECISION if a decision is needed.
   ')
 
   status=$(extract_status "$guide_result")
-  if [ "$status" = STALLED ]; then
+  if [ "$status" = "EMPTY_WORKBOARD" ] || [ "$status" = "REQUIRE_HUMAN_DECISION" ]; then
     break
   fi
 
-  if [ "$status" = DONE ]; then
+  if [ "$status" = "UPDATE_WORK" ]; then
     do_prompt=$(make_workboard_update_prompt "$guide_result")
   else
     do_prompt=$(extract_next_prompt "$guide_result")
@@ -109,10 +109,12 @@ user visibility and control: each ugo-guide/ugo-do phase is a normal pi session,
 manual mode lets the user edit the ugo-do prompt before submitting, Escape
 aborts the active turn, and `/ugo-disable` prevents the next phase.
 
-## How ugo-guide chooses the ugo-do prompt
+## How ugo-guide chooses the next workflow outcome
 
-The ugo-guide phase is responsible for converting workboard state into a ugo-do prompt.
-It sees `workboard.md` and uses this runnable section order:
+The ugo-guide phase is responsible for converting workboard state into one of
+four guidance outcomes: `CONTINUE_WORK`, `UPDATE_WORK`,
+`REQUIRE_HUMAN_DECISION`, or `EMPTY_WORKBOARD`. When it needs runnable work, it
+uses this section order:
 
 ```text
 needs-enrichment -> ready -> implementing -> needs-distill
@@ -157,7 +159,7 @@ Submitting it starts the next ugo-guide phase.
 
 ### auto
 
-Runs continuously until `STALLED`, `max=N`, commit failure, Escape, or disable:
+Runs continuously until `REQUIRE_HUMAN_DECISION`, `EMPTY_WORKBOARD`, `max=N`, commit failure, Escape, or disable:
 
 ```text
 ugo-guide -> ugo-do -> ugo-guide -> ugo-do -> ...
@@ -177,13 +179,13 @@ present_guidance enabled
 Prompt sent to the LLM:
 
 ```text
-Investigate the lowest runnable item in workboard.md and call present_guidance with the result.
+Inspect workboard.md, choose the next workflow outcome, and call present_guidance with the result.
 ```
 
 If there was a previous guidance result, the prompt becomes:
 
 ```text
-Investigate the lowest runnable item in workboard.md and call present_guidance with the result.
+Inspect workboard.md, choose the next workflow outcome, and call present_guidance with the result.
 
 Previous guidance result for context:
 <pi-guidance-result>
@@ -191,13 +193,13 @@ Previous guidance result for context:
 </pi-guidance-result>
 ```
 
-### `present_guidance`: CONTINUE
+### `present_guidance`: CONTINUE_WORK
 
 Tool input:
 
 ```json
 {
-  "status": "CONTINUE",
+  "status": "CONTINUE_WORK",
   "item": "workboard item title",
   "reason": "why this is the next step",
   "nextPrompt": "exact ugo-do prompt; must include how to update workboard.md"
@@ -217,15 +219,15 @@ ugo-do prompt sent or prefilled:
 ${guidance.nextPrompt}
 ```
 
-### `present_guidance`: DONE
+### `present_guidance`: UPDATE_WORK
 
 Tool input:
 
 ```json
 {
-  "status": "DONE",
+  "status": "UPDATE_WORK",
   "item": "workboard item title",
-  "reason": "why the item is complete or obsolete",
+  "reason": "why only workboard bookkeeping is needed",
   "workboardUpdate": "exact requested workboard.md update"
 }
 ```
@@ -250,15 +252,15 @@ Requested update:
 ${guidance.workboardUpdate}
 ```
 
-### `present_guidance`: STALLED
+### `present_guidance`: REQUIRE_HUMAN_DECISION
 
 Tool input:
 
 ```json
 {
-  "status": "STALLED",
-  "item": "blocked item or no runnable item",
-  "reason": "why automation should stop",
+  "status": "REQUIRE_HUMAN_DECISION",
+  "item": "blocked item",
+  "reason": "why a human decision is required",
   "artifact": "scratch/decisions/<short-slug>.md",
   "choices": [
     {
@@ -270,7 +272,7 @@ Tool input:
 }
 ```
 
-For decision stalls, ugo-guide should write a concise decision artifact under
+For human decisions, ugo-guide should write a concise decision artifact under
 `scratch/decisions/` with the question, relevant context/files, options,
 recommendation, consequences, and a human response section. The human can write
 one of these lines in `workboard.md` or any `scratch/decisions/*` file:
@@ -281,12 +283,14 @@ CLARIFY: <missing context or request>
 ```
 
 Decision artifacts must not include active `DONE:` or `CLARIFY:` placeholder
-lines; leave the response blank until the human writes the signal.
+lines; leave the response blank until the human writes the signal. Decision
+artifacts must never be used for no-work, empty-workboard, terminal status, or
+bookkeeping notes.
 
 Transition:
 
 ```text
-ugo-guide -> stalled -> watch workboard.md and scratch/decisions/*
+ugo-guide -> awaiting_decision -> watch workboard.md and scratch/decisions/*
 ```
 
 When ugo sees `DONE:`, it runs a workboard-only ugo-do phase that moves the
@@ -296,6 +300,32 @@ runnable section. When it sees `CLARIFY:`, it moves the matching item to
 
 If you manually edit `workboard.md` instead, submit `/ugo-continue` to run the
 next ugo-guide phase.
+
+### `present_guidance`: EMPTY_WORKBOARD
+
+Tool input:
+
+```json
+{
+  "status": "EMPTY_WORKBOARD",
+  "item": "workboard.md",
+  "reason": "no runnable work or pending human decision remains"
+}
+```
+
+`EMPTY_WORKBOARD` means there is simply nothing for ugo to do. It must not
+include `artifact`, `choices`, `nextPrompt`, or `workboardUpdate`, and ugo-guide
+must not write a `scratch/decisions/` artifact for it.
+
+Transition:
+
+```text
+ugo-guide -> empty -> watch workboard.md
+```
+
+Ugo remains active while empty. When `workboard.md` changes and only
+`workboard.md`/`scratch/` paths are dirty, ugo starts the next ugo-guide phase.
+You can also submit `/ugo-continue` after editing `workboard.md`.
 
 ### ugo-do phase finishes
 
@@ -344,7 +374,7 @@ ugo-guide phase calls:
 
 ```json
 {
-  "status": "CONTINUE",
+  "status": "CONTINUE_WORK",
   "item": "Add hello file",
   "reason": "The ready item is concrete and has enough context.",
   "nextPrompt": "Implement the ready workboard.md item \"Add hello file\". Create `hello.txt` containing exactly `hello` followed by a newline. Then update workboard.md by moving \"Add hello file\" from ready to previous-done with a concise note, replacing any existing previous-done entry. Finish by reporting changed files."
@@ -365,7 +395,7 @@ ugo mode: auto
 Session: <session file>
 
 ugo-guide result:
-Status: CONTINUE
+Status: CONTINUE_WORK
 Item: Add hello file
 Reason: The ready item is concrete and has enough context.
 
@@ -376,5 +406,6 @@ ugo-do result:
 <last assistant response>
 ```
 
-The next ugo-guide phase sees the updated workboard. If nothing runnable
-remains, it calls `STALLED` and ugo stops.
+The next ugo-guide phase sees the updated workboard. If nothing runnable or
+pending decision remains, it calls `EMPTY_WORKBOARD` and stays active while
+watching `workboard.md` for new work.

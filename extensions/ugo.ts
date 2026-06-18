@@ -35,7 +35,13 @@ const DECISIONS_DIR = join("scratch", "decisions");
 const DEFAULT_MAX_ITERATIONS = 20;
 const execFileAsync = promisify(execFile);
 
-type UgoPhase = "guide" | "do" | "paused" | "stalled" | "disabled";
+type UgoPhase =
+  | "guide"
+  | "do"
+  | "paused"
+  | "awaiting_decision"
+  | "empty"
+  | "disabled";
 type UgoMode = "auto" | "manual";
 
 interface UgoState {
@@ -88,7 +94,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isGuidanceStatus(
   value: unknown,
 ): value is PresentGuidanceParams["status"] {
-  return value === "CONTINUE" || value === "STALLED" || value === "DONE";
+  return (
+    value === "CONTINUE_WORK" ||
+    value === "UPDATE_WORK" ||
+    value === "REQUIRE_HUMAN_DECISION" ||
+    value === "EMPTY_WORKBOARD"
+  );
 }
 
 function isPresentGuidanceParams(
@@ -110,7 +121,8 @@ function normalizePhase(value: unknown): UgoPhase | undefined {
     value === "guide" ||
     value === "do" ||
     value === "paused" ||
-    value === "stalled" ||
+    value === "awaiting_decision" ||
+    value === "empty" ||
     value === "disabled"
   ) {
     return value;
@@ -205,7 +217,7 @@ function guidePrompt(state: UgoState): string {
   const previous = state.previousGuidance
     ? `\n\nPrevious guidance result for context:\n${formatGuidanceResult(state.previousGuidance)}`
     : "";
-  return `Investigate the lowest runnable item in workboard.md and call present_guidance with the result.${previous}`;
+  return `Inspect workboard.md, choose the next workflow outcome, and call present_guidance with the result.${previous}`;
 }
 
 function workboardUpdatePrompt(update: string): string {
@@ -331,7 +343,8 @@ function phaseActor(phase: "guide" | "do"): "ugo-guide" | "ugo-do" {
 function stateActor(state: UgoState): string {
   if (state.phase === "guide" || state.phase === "do")
     return phaseActor(state.phase);
-  if (state.phase === "stalled") return "ugo-guide";
+  if (state.phase === "awaiting_decision" || state.phase === "empty")
+    return "ugo-guide";
   return "ugo";
 }
 
@@ -634,6 +647,39 @@ function statusOnlyTouchesWorkboardOrScratch(status: string): boolean {
     .every((line) => isWorkboardOrScratchPath(statusPath(line)));
 }
 
+function isScratchDecisionPath(path: string): boolean {
+  const normalized = path.startsWith("./") ? path.slice(2) : path;
+  return normalized.startsWith(`${DECISIONS_DIR}/`);
+}
+
+function statusTouchesDecisionArtifacts(status: string): boolean {
+  if (!status.trim()) return false;
+  return status
+    .split(/\r?\n/)
+    .some((line) => isScratchDecisionPath(statusPath(line)));
+}
+
+function isStaleContextError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.includes(
+      "This extension ctx is stale after session replacement or reload",
+    )
+  );
+}
+
+function notifyIfContextActive(
+  ctx: ExtensionContext | ReplacedSessionContext,
+  message: string,
+  level: "info" | "warning" | "error",
+): void {
+  try {
+    ctx.ui.notify(message, level);
+  } catch (error) {
+    if (!isStaleContextError(error)) throw error;
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   let currentState: UgoState | undefined;
   let presentGuidanceRegistered = false;
@@ -641,6 +687,7 @@ export default function (pi: ExtensionAPI) {
   let decisionWatchTimer: ReturnType<typeof setTimeout> | undefined;
   let decisionWatcherBusy = false;
   let decisionWatcherBlocked = false;
+  let decisionWatcherGeneration = 0;
 
   function registerPresentGuidanceTool(): void {
     if (presentGuidanceRegistered) return;
@@ -754,6 +801,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function closeDecisionWatchers(): void {
+    decisionWatcherGeneration++;
     for (const watcher of decisionWatchers) watcher.close();
     decisionWatchers = [];
     if (decisionWatchTimer) clearTimeout(decisionWatchTimer);
@@ -825,21 +873,28 @@ export default function (pi: ExtensionAPI) {
     state: UgoState,
   ): void {
     if (decisionWatchTimer) clearTimeout(decisionWatchTimer);
+    const generation = decisionWatcherGeneration;
     decisionWatchTimer = setTimeout(() => {
       decisionWatchTimer = undefined;
       void (async () => {
+        if (generation !== decisionWatcherGeneration) return;
         if (decisionWatcherBusy) return;
         decisionWatcherBusy = true;
         try {
+          const cwd = ctx.cwd;
           const latestState = getLatestState(ctx) ?? currentState ?? state;
-          if (!latestState.active || latestState.phase !== "stalled") return;
-          const signal = await scanDecisionSignals(ctx.cwd);
+          if (!latestState.active || latestState.phase !== "awaiting_decision")
+            return;
+          const signal = await scanDecisionSignals(cwd);
+          if (generation !== decisionWatcherGeneration) return;
           if (!signal) return;
-          const status = await gitStatus(ctx.cwd);
+          const status = await gitStatus(cwd);
+          if (generation !== decisionWatcherGeneration) return;
           if (!statusOnlyTouchesWorkboardOrScratch(status)) {
             if (!decisionWatcherBlocked) {
               decisionWatcherBlocked = true;
-              ctx.ui.notify(
+              notifyIfContextActive(
+                ctx,
                 "ugo-guide saw a DONE/CLARIFY signal but non-scratch files are dirty. Clean or commit them, then save the signal file again or run /ugo-continue.",
                 "warning",
               );
@@ -850,7 +905,8 @@ export default function (pi: ExtensionAPI) {
         } catch (error) {
           const message =
             error instanceof Error ? error.message : String(error);
-          ctx.ui.notify(
+          notifyIfContextActive(
+            ctx,
             `ugo-guide decision watcher failed: ${message}`,
             "error",
           );
@@ -866,24 +922,96 @@ export default function (pi: ExtensionAPI) {
     state: UgoState,
   ): Promise<void> {
     closeDecisionWatchers();
+    const cwd = ctx.cwd;
     const watchPaths = [WORKBOARD_FILE, DECISIONS_DIR];
     for (const path of watchPaths) {
       try {
-        await access(join(ctx.cwd, path));
+        await access(join(cwd, path));
         decisionWatchers.push(
-          watch(join(ctx.cwd, path), () =>
-            scheduleDecisionSignalScan(ctx, state),
-          ),
+          watch(join(cwd, path), () => scheduleDecisionSignalScan(ctx, state)),
         );
       } catch {
         // Missing watched paths are fine; guidance may not have produced a decision artifact.
       }
     }
-    ctx.ui.notify(
+    notifyIfContextActive(
+      ctx,
       "ugo-guide is watching workboard.md and scratch/decisions for DONE:/CLARIFY:.",
       "info",
     );
     scheduleDecisionSignalScan(ctx, state);
+  }
+
+  function scheduleEmptyWorkboardScan(
+    ctx: ExtensionCommandContext | ReplacedSessionContext,
+    state: UgoState,
+  ): void {
+    if (decisionWatchTimer) clearTimeout(decisionWatchTimer);
+    const generation = decisionWatcherGeneration;
+    decisionWatchTimer = setTimeout(() => {
+      decisionWatchTimer = undefined;
+      void (async () => {
+        if (generation !== decisionWatcherGeneration) return;
+        if (decisionWatcherBusy) return;
+        decisionWatcherBusy = true;
+        try {
+          const cwd = ctx.cwd;
+          const latestState = getLatestState(ctx) ?? currentState ?? state;
+          if (!latestState.active || latestState.phase !== "empty") return;
+          const status = await gitStatus(cwd);
+          if (generation !== decisionWatcherGeneration) return;
+          if (!statusOnlyTouchesWorkboardOrScratch(status)) {
+            if (!decisionWatcherBlocked) {
+              decisionWatcherBlocked = true;
+              notifyIfContextActive(
+                ctx,
+                "ugo-guide saw a workboard.md edit but non-scratch files are dirty. Clean or commit them, then save workboard.md again or run /ugo-continue.",
+                "warning",
+              );
+            }
+            return;
+          }
+          await runGuideSession(ctx, {
+            ...latestState,
+            phase: "guide",
+            doPrompt: undefined,
+            doCompleted: true,
+          });
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          notifyIfContextActive(
+            ctx,
+            `ugo-guide empty-workboard watcher failed: ${message}`,
+            "error",
+          );
+        } finally {
+          decisionWatcherBusy = false;
+        }
+      })();
+    }, 250);
+  }
+
+  async function startEmptyWorkboardWatcher(
+    ctx: ExtensionCommandContext | ReplacedSessionContext,
+    state: UgoState,
+  ): Promise<void> {
+    closeDecisionWatchers();
+    try {
+      await access(join(ctx.cwd, WORKBOARD_FILE));
+      decisionWatchers.push(
+        watch(join(ctx.cwd, WORKBOARD_FILE), () =>
+          scheduleEmptyWorkboardScan(ctx, state),
+        ),
+      );
+    } catch {
+      // If workboard.md does not exist, /ugo-continue can retry after creation.
+    }
+    notifyIfContextActive(
+      ctx,
+      "ugo-guide found an empty workboard and is watching workboard.md for new work.",
+      "info",
+    );
   }
 
   async function startDoSession(
@@ -959,23 +1087,41 @@ export default function (pi: ExtensionAPI) {
     state: UgoState,
     guidance: PresentGuidanceParams,
   ): Promise<void> {
-    if (guidance.status === "STALLED") {
-      const stalledState: UgoState = {
+    if (guidance.status === "REQUIRE_HUMAN_DECISION") {
+      const decisionState: UgoState = {
         ...state,
         active: true,
-        phase: "stalled",
+        phase: "awaiting_decision",
         lastGuidance: guidance,
         reason: guidance.reason,
       };
-      await persistCurrentState(ctx, stalledState);
-      updateUi(ctx, stalledState);
-      ctx.ui.notify(`ugo-guide stalled: ${guidance.reason}`, "warning");
-      await startDecisionWatcher(ctx, stalledState);
+      await persistCurrentState(ctx, decisionState);
+      updateUi(ctx, decisionState);
+      ctx.ui.notify(
+        `ugo-guide awaiting human decision: ${guidance.reason}`,
+        "warning",
+      );
+      await startDecisionWatcher(ctx, decisionState);
+      return;
+    }
+
+    if (guidance.status === "EMPTY_WORKBOARD") {
+      const emptyState: UgoState = {
+        ...state,
+        active: true,
+        phase: "empty",
+        lastGuidance: guidance,
+        reason: guidance.reason,
+      };
+      await persistCurrentState(ctx, emptyState);
+      updateUi(ctx, emptyState);
+      ctx.ui.notify(`ugo-guide empty workboard: ${guidance.reason}`, "info");
+      await startEmptyWorkboardWatcher(ctx, emptyState);
       return;
     }
 
     const doPrompt =
-      guidance.status === "DONE"
+      guidance.status === "UPDATE_WORK"
         ? workboardUpdatePrompt(guidance.workboardUpdate ?? "")
         : guidance.nextPrompt;
 
@@ -1066,11 +1212,50 @@ export default function (pi: ExtensionAPI) {
           );
           return;
         }
+        const guideResultState = { ...guideState, lastGuidance: guidance };
+        if (guidance.status === "REQUIRE_HUMAN_DECISION") {
+          try {
+            if (!guidance.artifact?.trim()) throw new Error("missing artifact");
+            await access(join(guideCtx.cwd, guidance.artifact));
+          } catch {
+            const pausedState: UgoState = {
+              ...guideResultState,
+              phase: "paused",
+              reason:
+                "REQUIRE_HUMAN_DECISION did not create its scratch/decisions artifact",
+            };
+            await persistCurrentState(guideCtx, pausedState);
+            updateUi(guideCtx, pausedState);
+            guideCtx.ui.notify(
+              "ugo-guide paused: REQUIRE_HUMAN_DECISION must create its scratch/decisions artifact.",
+              "error",
+            );
+            return;
+          }
+        }
+        if (
+          guidance.status !== "REQUIRE_HUMAN_DECISION" &&
+          statusTouchesDecisionArtifacts(await gitStatus(guideCtx.cwd))
+        ) {
+          const pausedState: UgoState = {
+            ...guideResultState,
+            phase: "paused",
+            reason:
+              "guidance wrote scratch/decisions artifacts without REQUIRE_HUMAN_DECISION",
+          };
+          await persistCurrentState(guideCtx, pausedState);
+          updateUi(guideCtx, pausedState);
+          guideCtx.ui.notify(
+            "ugo-guide paused: scratch/decisions artifacts are only allowed for REQUIRE_HUMAN_DECISION.",
+            "error",
+          );
+          return;
+        }
         const committed = await commitStepOrPause(guideCtx, {
           phase: "guide",
           prompt,
           response: formatGuidanceResult(guidance),
-          state: { ...guideState, lastGuidance: guidance },
+          state: guideResultState,
           guidance,
         });
         if (!committed) return;
@@ -1148,7 +1333,8 @@ export default function (pi: ExtensionAPI) {
       if (
         state.phase === "do" ||
         state.phase === "paused" ||
-        state.phase === "stalled"
+        state.phase === "awaiting_decision" ||
+        state.phase === "empty"
       ) {
         await runGuideSession(ctx, {
           ...state,
@@ -1203,9 +1389,17 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  pi.on("session_shutdown", async () => {
+    closeDecisionWatchers();
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     currentState = getLatestState(ctx);
-    if (!currentState?.active || currentState.phase !== "stalled")
+    if (
+      !currentState?.active ||
+      (currentState.phase !== "awaiting_decision" &&
+        currentState.phase !== "empty")
+    )
       closeDecisionWatchers();
     activateToolsForState(currentState);
     if (currentState?.active)
