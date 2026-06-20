@@ -1,7 +1,11 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export const TOOL_MODEL_STATE_CUSTOM_TYPE = "pi-ant:tool-model";
+const TOOL_MODEL_FAVORITE_PATH = path.join(os.homedir(), ".pi", "agent", "tool-model-favorite.json");
 
 export const TOOL_MODEL_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
 export type ToolModelThinkingLevel = (typeof TOOL_MODEL_THINKING_LEVELS)[number];
@@ -65,7 +69,17 @@ function parseStoredState(value: unknown): ToolModelStoredState | undefined {
   };
 }
 
-export function getToolModelState(ctx: ExtensionContext): ToolModelState | undefined {
+function toToolModelState(state: ToolModelStoredState): ToolModelState | undefined {
+  if (!state.provider || !state.modelId) return undefined;
+  return {
+    provider: state.provider,
+    modelId: state.modelId,
+    thinkingLevel: state.thinkingLevel,
+    updatedAt: state.updatedAt,
+  };
+}
+
+function getBranchToolModelState(ctx: ExtensionContext): ToolModelState | undefined {
   const entries = getCustomStateEntries(ctx);
   for (let index = entries.length - 1; index >= 0; index--) {
     const entry = entries[index];
@@ -73,16 +87,42 @@ export function getToolModelState(ctx: ExtensionContext): ToolModelState | undef
     const state = parseStoredState(entry.data);
     if (!state) continue;
     if (state.cleared) return undefined;
-    if (state.provider && state.modelId) {
-      return {
-        provider: state.provider,
-        modelId: state.modelId,
-        thinkingLevel: state.thinkingLevel,
-        updatedAt: state.updatedAt,
-      };
-    }
+    const toolModelState = toToolModelState(state);
+    if (toolModelState) return toolModelState;
   }
   return undefined;
+}
+
+function getSavedFavoriteToolModelState(): ToolModelState | undefined {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(TOOL_MODEL_FAVORITE_PATH, "utf8");
+  } catch {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const state = parseStoredState(parsed);
+    return state && !state.cleared ? toToolModelState(state) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function getToolModelState(ctx: ExtensionContext): ToolModelState | undefined {
+  return getBranchToolModelState(ctx);
+}
+
+export function getFavoriteToolModelState(_ctx: ExtensionContext): ToolModelState | undefined {
+  return getSavedFavoriteToolModelState();
+}
+
+export function saveFavoriteToolModelState(state: ToolModelState): void {
+  fs.mkdirSync(path.dirname(TOOL_MODEL_FAVORITE_PATH), { recursive: true, mode: 0o700 });
+  const tmp = `${TOOL_MODEL_FAVORITE_PATH}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(tmp, TOOL_MODEL_FAVORITE_PATH);
 }
 
 export function createToolModelState(model: Model<Api>, thinkingLevel?: ToolModelThinkingLevel): ToolModelState {
