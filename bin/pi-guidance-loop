@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 RESULT_RE = re.compile(r"<pi-guidance-result>\s*(\{.*?\})\s*</pi-guidance-result>", re.S)
-DEFAULT_PROMPT = "Inspect workboard.md, choose the next workflow outcome, and call present_guidance with the result."
+DEFAULT_PROMPT = "Inspect workboard.md, follow workflow.md, choose the next workflow outcome, and call present_guidance with the result."
 LOCK_FILE = ".workboard-guidance.lock"
 
 
@@ -50,7 +50,7 @@ def parse_guidance(output):
 def apply_workboard_update(update):
     prompt = "\n".join([
         "Apply this workboard.md update only.",
-        "Do not change source code or authority docs.",
+        "Do not change source code, authority docs, or workflow.md.",
         "Edit workboard.md so it reflects the requested state change.",
         "If workboard.md does not exist, report that and stop.",
         "",

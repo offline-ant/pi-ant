@@ -295,7 +295,8 @@ export default function (pi: ExtensionAPI) {
     renderResult(result, options, theme, context) {
       const state = context.state as LintRenderState;
       const baseContext = { ...context, lastComponent: state.baseResultComponent };
-      const baseComponent = editTool.renderResult?.(result, options, theme, baseContext);
+      type EditRenderResult = Parameters<NonNullable<typeof editTool.renderResult>>[0];
+      const baseComponent = editTool.renderResult?.(result as EditRenderResult, options, theme, baseContext);
       state.baseResultComponent = baseComponent;
 
       const warnings = getLintWarnings(result.details);
@@ -322,7 +323,8 @@ export default function (pi: ExtensionAPI) {
     renderResult(result, options, theme, context) {
       const state = context.state as LintRenderState;
       const baseContext = { ...context, lastComponent: state.baseResultComponent };
-      const baseComponent = writeTool.renderResult?.(result, options, theme, baseContext);
+      type WriteRenderResult = Parameters<NonNullable<typeof writeTool.renderResult>>[0];
+      const baseComponent = writeTool.renderResult?.(result as WriteRenderResult, options, theme, baseContext);
       state.baseResultComponent = baseComponent;
 
       const warnings = getLintWarnings(result.details);

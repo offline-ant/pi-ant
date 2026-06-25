@@ -1,10 +1,10 @@
-import {
-	type Api,
-	type Context,
-	completeSimple,
-	type Model,
-	type SimpleStreamOptions,
+import type {
+	Api,
+	Context,
+	Model,
+	SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
 	buildSessionContext,
 	type ContextEvent,
@@ -431,7 +431,7 @@ async function generateReflectionPlan(
 	}
 
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-	if (!auth.ok) {
+	if (auth.ok === false) {
 		throw new Error(auth.error);
 	}
 

@@ -15,6 +15,12 @@ import {
 } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 
+declare module "@earendil-works/pi-tui" {
+	interface Keybindings {
+		"tui.select.edit": true;
+	}
+}
+
 const OTHER_OPTION = "Other (type your own)";
 const DONE_OPTION = "Done selecting";
 const BACK_OPTION = "← Go back";

@@ -3,8 +3,9 @@
  * Changed lines are sent as the next user message.
  */
 
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import type { AgentMessage } from "@earendil-works/pi-ai";
+import { buildSessionContext, type ContextEvent, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+
+type AgentMessage = ContextEvent["messages"][number];
 import type { TUI } from "@earendil-works/pi-tui";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -250,7 +251,10 @@ export default function (pi: ExtensionAPI) {
 			const editorCmd = process.env.VISUAL || process.env.EDITOR || "vim";
 
 			// Build transcript from the current conversation branch
-			const context = ctx.sessionManager.buildSessionContext();
+			const context = buildSessionContext(
+				ctx.sessionManager.getEntries(),
+				ctx.sessionManager.getLeafId(),
+			);
 			const { text: transcript, lastAssistantLine } = buildTranscript(context.messages, ctx.cwd);
 
 			// Capture TUI, stop it, spawn editor, restart, diff, send

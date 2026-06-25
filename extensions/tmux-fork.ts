@@ -40,6 +40,10 @@ export type TmuxForkInput = Static<typeof tmuxForkParams>;
 
 type PendingFork = TmuxForkInput;
 
+interface SessionFileProvider {
+  getSessionFile(): string | undefined;
+}
+
 const pendingForks = new Map<string, PendingFork>();
 
 function validateForkName(name: string): string | undefined {
@@ -167,7 +171,7 @@ function validateInput(input: TmuxForkInput): string | undefined {
   return undefined;
 }
 
-async function forkIntoTmux(pi: ExtensionAPI, input: TmuxForkInput, cwd: string, sessionManager: SessionManager, signal?: AbortSignal) {
+async function forkIntoTmux(pi: ExtensionAPI, input: TmuxForkInput, cwd: string, sessionManager: SessionFileProvider, signal?: AbortSignal) {
   const validationError = validateInput(input);
   if (validationError) {
     throw new Error(validationError);

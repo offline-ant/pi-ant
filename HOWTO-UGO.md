@@ -26,13 +26,15 @@ A project workboard is a `workboard.md` file with sections like `ready`,
 state, not a cold idea backlog. Put unpromoted ideas in a project `backlog.md`,
 `ideas.md`, or equivalent file outside `workboard.md`; promote them into
 `needs-enrichment` when you want investigation/planning or `ready` when you want
-execution. Ugo repeatedly asks a fresh pi session to choose the next runnable
-workboard item, then asks another fresh pi session to do the selected work.
+execution. The editable guidance policy lives in `workflow.md`; `/ugo` creates
+it with the default policy when missing. Ugo repeatedly asks a fresh pi session
+to choose the next runnable workboard item, then asks another fresh pi session
+to do the selected work.
 
 It has two phases:
 
-1. **ugo-guide phase**: read `workboard.md`, choose the next workflow outcome,
-   and produce structured guidance for it.
+1. **ugo-guide phase**: read `workboard.md`, load editable `workflow.md`, choose
+   the next workflow outcome, and produce structured guidance for it.
 2. **ugo-do phase**: run a worker or workboard-update prompt when guidance
    returns one, or in manual mode prefill it for the user to edit/submit.
 
@@ -62,7 +64,8 @@ Starting ugo requires:
 
 - `workboard.md` exists;
 - current directory is a git repository;
-- the git worktree has no dirty files except root `workboard.md` and files under root `scratch/`.
+- `workflow.md` exists or can be created from the default policy;
+- the git worktree has no dirty files except root `workboard.md`, root `workflow.md`, and files under root `scratch/`.
 
 Ugo always commits after each ugo-guide or ugo-do phase if files changed. The
 diff is the repo change; the commit message records the ugo-guide item/reason,
@@ -79,13 +82,9 @@ Without ugo, the same workflow is roughly this shell loop:
 
 ```bash
 while true; do
-  guide_result=$(pi -p '
-    Read workboard.md.
-    Choose the first runnable non-empty item from:
-      needs-enrichment, ready, implementing, needs-distill.
-    Based on the item section and current context, write the exact next prompt
-    that another pi -p run should execute.
-    Return EMPTY_WORKBOARD if there is nothing to do, or REQUIRE_HUMAN_DECISION if a decision is needed.
+  guide_result=$(PI_GUIDANCE=true pi -p '
+    Read workboard.md, follow workflow.md, choose the next workflow outcome,
+    and call present_guidance with the result.
   ')
 
   status=$(extract_status "$guide_result")
@@ -113,8 +112,8 @@ aborts the active turn, and `/ugo-disable` prevents the next phase.
 
 The ugo-guide phase is responsible for converting workboard state into one of
 four guidance outcomes: `CONTINUE_WORK`, `UPDATE_WORK`,
-`REQUIRE_HUMAN_DECISION`, or `EMPTY_WORKBOARD`. When it needs runnable work, it
-uses this section order:
+`REQUIRE_HUMAN_DECISION`, or `EMPTY_WORKBOARD`. It follows the editable policy in
+`workflow.md`. The default policy uses this section order:
 
 ```text
 needs-enrichment -> ready -> implementing -> needs-distill
@@ -130,7 +129,7 @@ The selected section shapes the prompt it emits:
   `needs-decision` with a `scratch/decisions/` artifact.
 - `ready`: produce an implementation/execution prompt; for substantial tool work,
   use the call-progress primitive so the ugo-do controller resumes from compact
-  `return` results.
+  call results.
 - `implementing`: produce a continuation prompt using the current handoff/status;
   prefer call-progress when more tool-heavy progress is needed.
 - `needs-distill`: produce a durable-facts cleanup/distillation prompt; use
@@ -179,13 +178,13 @@ present_guidance enabled
 Prompt sent to the LLM:
 
 ```text
-Inspect workboard.md, choose the next workflow outcome, and call present_guidance with the result.
+Inspect workboard.md, follow workflow.md, choose the next workflow outcome, and call present_guidance with the result.
 ```
 
 If there was a previous guidance result, the prompt becomes:
 
 ```text
-Inspect workboard.md, choose the next workflow outcome, and call present_guidance with the result.
+Inspect workboard.md, follow workflow.md, choose the next workflow outcome, and call present_guidance with the result.
 
 Previous guidance result for context:
 <pi-guidance-result>
@@ -243,7 +242,7 @@ ugo-do prompt:
 
 ```text
 Apply this workboard.md update only.
-Do not change source code or authority docs.
+Do not change source code, authority docs, or workflow.md.
 Edit workboard.md so it reflects the requested state change.
 If workboard.md does not exist, report that and stop.
 Before finishing, say exactly what changed in workboard.md.
@@ -324,8 +323,9 @@ ugo-guide -> empty -> watch workboard.md
 ```
 
 Ugo remains active while empty. When `workboard.md` changes and only
-`workboard.md`/`scratch/` paths are dirty, ugo starts the next ugo-guide phase.
-You can also submit `/ugo-continue` after editing `workboard.md`.
+`workboard.md`/`workflow.md`/`scratch/` paths are dirty, ugo starts the next
+ugo-guide phase. You can also submit `/ugo-continue` after editing
+`workboard.md` or `workflow.md`.
 
 ### ugo-do phase finishes
 

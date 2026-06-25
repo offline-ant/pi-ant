@@ -15,16 +15,21 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
-  ReplacedSessionContext,
+  SessionEntry,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import {
   formatGuidanceResult,
-  GUIDANCE_SYSTEM_PROMPT,
   PRESENT_GUIDANCE_PARAMS,
   type PresentGuidanceParams,
   validateGuidance,
 } from "./guidance-core.ts";
+import {
+  ensureAndReadWorkflowFile,
+  ensureWorkflowFile,
+  formatGuidanceSystemPrompt,
+  WORKFLOW_FILE,
+} from "./workflow-core.ts";
 
 const STATE_CUSTOM_TYPE = "pi-ant:ugo-state";
 const RESULT_CUSTOM_TYPE = "pi-ant:ugo-guidance";
@@ -65,17 +70,14 @@ interface DecisionSignal {
   content: string;
 }
 
-interface CustomStateEntryLike {
-  type: string;
-  customType?: string;
-  data?: unknown;
-  details?: unknown;
-}
+type ReplacementSessionContext = ExtensionCommandContext & {
+  sendMessage: (...args: Parameters<ExtensionAPI["sendMessage"]>) => Promise<void>;
+  sendUserMessage: (...args: Parameters<ExtensionAPI["sendUserMessage"]>) => Promise<void>;
+};
 
-interface TextBlockLike {
-  type: string;
-  text?: unknown;
-}
+type CustomStateEntryLike =
+  | Extract<SessionEntry, { type: "custom" }>
+  | Extract<SessionEntry, { type: "custom_message" }>;
 
 interface MessageLike {
   role?: unknown;
@@ -146,12 +148,10 @@ function isUgoState(value: unknown): value is UgoState {
 function getCustomStateEntries(ctx: ExtensionContext): CustomStateEntryLike[] {
   return ctx.sessionManager
     .getBranch()
-    .filter((entry): entry is CustomStateEntryLike => {
-      if (!isRecord(entry)) return false;
-      return (
-        typeof entry.type === "string" && typeof entry.customType === "string"
-      );
-    });
+    .filter(
+      (entry): entry is CustomStateEntryLike =>
+        entry.type === "custom" || entry.type === "custom_message",
+    );
 }
 
 function getStateFromDetails(details: unknown): UgoState | undefined {
@@ -163,9 +163,13 @@ function getLatestState(ctx: ExtensionContext): UgoState | undefined {
   const entries = getCustomStateEntries(ctx);
   for (let index = entries.length - 1; index >= 0; index--) {
     const entry = entries[index];
-    if (entry.customType === STATE_CUSTOM_TYPE && isUgoState(entry.data))
+    if (
+      entry.type === "custom" &&
+      entry.customType === STATE_CUSTOM_TYPE &&
+      isUgoState(entry.data)
+    )
       return entry.data;
-    if (entry.customType === MESSAGE_CUSTOM_TYPE) {
+    if (entry.type === "custom_message" && entry.customType === MESSAGE_CUSTOM_TYPE) {
       const state = getStateFromDetails(entry.details);
       if (state) return state;
     }
@@ -180,6 +184,7 @@ function getLatestGuidance(
   for (let index = entries.length - 1; index >= 0; index--) {
     const entry = entries[index];
     if (
+      entry.type === "custom" &&
       entry.customType === RESULT_CUSTOM_TYPE &&
       isPresentGuidanceParams(entry.data)
     )
@@ -217,13 +222,13 @@ function guidePrompt(state: UgoState): string {
   const previous = state.previousGuidance
     ? `\n\nPrevious guidance result for context:\n${formatGuidanceResult(state.previousGuidance)}`
     : "";
-  return `Inspect workboard.md, choose the next workflow outcome, and call present_guidance with the result.${previous}`;
+  return `Inspect workboard.md, follow workflow.md, choose the next workflow outcome, and call present_guidance with the result.${previous}`;
 }
 
 function workboardUpdatePrompt(update: string): string {
   return [
     "Apply this workboard.md update only.",
-    "Do not change source code or authority docs.",
+    "Do not change source code, authority docs, or workflow.md.",
     "Edit workboard.md so it reflects the requested state change.",
     "If workboard.md does not exist, report that and stop.",
     "Before finishing, say exactly what changed in workboard.md.",
@@ -256,7 +261,7 @@ function decisionSignalPrompt(
 
   return [
     "Apply this human decision signal only.",
-    "Do not change source code or authority docs.",
+    "Do not change source code, authority docs, or workflow.md.",
     "Read workboard.md and the signal file, then update workboard.md to reflect the signal.",
     "Keep the decision artifact if it is useful, but remove or mark the DONE/CLARIFY sentinel as consumed so it does not trigger again.",
     "Before finishing, say exactly which files changed.",
@@ -314,13 +319,13 @@ function formatDisplaySessionMessage(state: UgoState): string {
 }
 
 function hasReplacementMessageMethods(
-  ctx: ExtensionContext | ReplacedSessionContext,
-): ctx is ReplacedSessionContext {
+  ctx: ExtensionContext | ReplacementSessionContext,
+): ctx is ReplacementSessionContext {
   return "sendMessage" in ctx;
 }
 
 async function recordState(
-  ctx: ExtensionContext | ReplacedSessionContext,
+  ctx: ExtensionContext | ReplacementSessionContext,
   state: UgoState,
 ): Promise<void> {
   if (!hasReplacementMessageMethods(ctx)) return;
@@ -422,9 +427,8 @@ function textFromContent(content: unknown): string {
   return content
     .map((block: unknown) => {
       if (!isRecord(block)) return "";
-      const textBlock = block as TextBlockLike;
-      return textBlock.type === "text" && typeof textBlock.text === "string"
-        ? textBlock.text
+      return block.type === "text" && typeof block.text === "string"
+        ? block.text
         : "";
     })
     .filter((text) => text.length > 0)
@@ -635,16 +639,20 @@ function statusPath(line: string): string {
     : rawPath;
 }
 
-function isWorkboardOrScratchPath(path: string): boolean {
+function isWorkflowStatePath(path: string): boolean {
   const normalized = path.startsWith("./") ? path.slice(2) : path;
-  return normalized === WORKBOARD_FILE || normalized.startsWith("scratch/");
+  return (
+    normalized === WORKBOARD_FILE ||
+    normalized === WORKFLOW_FILE ||
+    normalized.startsWith("scratch/")
+  );
 }
 
-function statusOnlyTouchesWorkboardOrScratch(status: string): boolean {
+function statusOnlyTouchesWorkflowState(status: string): boolean {
   if (!status.trim()) return true;
   return status
     .split(/\r?\n/)
-    .every((line) => isWorkboardOrScratchPath(statusPath(line)));
+    .every((line) => isWorkflowStatePath(statusPath(line)));
 }
 
 function isScratchDecisionPath(path: string): boolean {
@@ -669,7 +677,7 @@ function isStaleContextError(error: unknown): boolean {
 }
 
 function notifyIfContextActive(
-  ctx: ExtensionContext | ReplacedSessionContext,
+  ctx: ExtensionContext | ReplacementSessionContext,
   message: string,
   level: "info" | "warning" | "error",
 ): void {
@@ -753,7 +761,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function persistCurrentState(
-    ctx: ExtensionContext | ReplacedSessionContext,
+    ctx: ExtensionContext | ReplacementSessionContext,
     state: UgoState,
   ): Promise<void> {
     currentState = state;
@@ -765,7 +773,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function commitStepOrPause(
-    ctx: ExtensionContext | ReplacedSessionContext,
+    ctx: ExtensionContext | ReplacementSessionContext,
     params: {
       phase: "guide" | "do";
       prompt: string;
@@ -811,7 +819,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function runDecisionSignalSession(
-    ctx: ExtensionCommandContext | ReplacedSessionContext,
+    ctx: ExtensionCommandContext | ReplacementSessionContext,
     state: UgoState,
     signal: DecisionSignal,
   ): Promise<void> {
@@ -869,7 +877,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function scheduleDecisionSignalScan(
-    ctx: ExtensionCommandContext | ReplacedSessionContext,
+    ctx: ExtensionCommandContext | ReplacementSessionContext,
     state: UgoState,
   ): void {
     if (decisionWatchTimer) clearTimeout(decisionWatchTimer);
@@ -890,12 +898,12 @@ export default function (pi: ExtensionAPI) {
           if (!signal) return;
           const status = await gitStatus(cwd);
           if (generation !== decisionWatcherGeneration) return;
-          if (!statusOnlyTouchesWorkboardOrScratch(status)) {
+          if (!statusOnlyTouchesWorkflowState(status)) {
             if (!decisionWatcherBlocked) {
               decisionWatcherBlocked = true;
               notifyIfContextActive(
                 ctx,
-                "ugo-guide saw a DONE/CLARIFY signal but non-scratch files are dirty. Clean or commit them, then save the signal file again or run /ugo-continue.",
+                "ugo-guide saw a DONE/CLARIFY signal but files outside workboard.md, workflow.md, or scratch/ are dirty. Clean or commit them, then save the signal file again or run /ugo-continue.",
                 "warning",
               );
             }
@@ -918,7 +926,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function startDecisionWatcher(
-    ctx: ExtensionCommandContext | ReplacedSessionContext,
+    ctx: ExtensionCommandContext | ReplacementSessionContext,
     state: UgoState,
   ): Promise<void> {
     closeDecisionWatchers();
@@ -943,7 +951,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   function scheduleEmptyWorkboardScan(
-    ctx: ExtensionCommandContext | ReplacedSessionContext,
+    ctx: ExtensionCommandContext | ReplacementSessionContext,
     state: UgoState,
   ): void {
     if (decisionWatchTimer) clearTimeout(decisionWatchTimer);
@@ -960,12 +968,12 @@ export default function (pi: ExtensionAPI) {
           if (!latestState.active || latestState.phase !== "empty") return;
           const status = await gitStatus(cwd);
           if (generation !== decisionWatcherGeneration) return;
-          if (!statusOnlyTouchesWorkboardOrScratch(status)) {
+          if (!statusOnlyTouchesWorkflowState(status)) {
             if (!decisionWatcherBlocked) {
               decisionWatcherBlocked = true;
               notifyIfContextActive(
                 ctx,
-                "ugo-guide saw a workboard.md edit but non-scratch files are dirty. Clean or commit them, then save workboard.md again or run /ugo-continue.",
+                "ugo-guide saw a workboard.md edit but files outside workboard.md, workflow.md, or scratch/ are dirty. Clean or commit them, then save workboard.md again or run /ugo-continue.",
                 "warning",
               );
             }
@@ -993,7 +1001,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function startEmptyWorkboardWatcher(
-    ctx: ExtensionCommandContext | ReplacedSessionContext,
+    ctx: ExtensionCommandContext | ReplacementSessionContext,
     state: UgoState,
   ): Promise<void> {
     closeDecisionWatchers();
@@ -1015,7 +1023,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function startDoSession(
-    ctx: ExtensionCommandContext | ReplacedSessionContext,
+    ctx: ExtensionCommandContext | ReplacementSessionContext,
     state: UgoState,
   ): Promise<void> {
     closeDecisionWatchers();
@@ -1083,7 +1091,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function continueAfterGuidance(
-    ctx: ExtensionCommandContext | ReplacedSessionContext,
+    ctx: ExtensionCommandContext | ReplacementSessionContext,
     state: UgoState,
     guidance: PresentGuidanceParams,
   ): Promise<void> {
@@ -1155,7 +1163,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function runGuideSession(
-    ctx: ExtensionCommandContext | ReplacedSessionContext,
+    ctx: ExtensionCommandContext | ReplacementSessionContext,
     state: UgoState,
   ): Promise<void> {
     closeDecisionWatchers();
@@ -1272,13 +1280,6 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       await ctx.waitForIdle();
       const parsed = parseStartArgs(args);
-      if (!(await hasWorkboard(ctx.cwd))) {
-        ctx.ui.notify(
-          "ugo-guide needs workboard.md. Run /new-workboard first or create workboard.md.",
-          "warning",
-        );
-        return;
-      }
       let status: string;
       try {
         status = await gitStatus(ctx.cwd);
@@ -1287,10 +1288,40 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`ugo requires a git repository: ${message}`, "error");
         return;
       }
-      if (!statusOnlyTouchesWorkboardOrScratch(status)) {
+      if (!statusOnlyTouchesWorkflowState(status)) {
         ctx.ui.notify(
-          "ugo requires a clean worktree before starting except for workboard.md and scratch/ changes because ugo-guide/ugo-do commit after each phase.",
+          "ugo requires a clean worktree before starting except for workboard.md, workflow.md, and scratch/ changes because ugo-guide/ugo-do commit after each phase.",
           "error",
+        );
+        return;
+      }
+      try {
+        if (await ensureWorkflowFile(ctx.cwd)) {
+          ctx.ui.notify(
+            `Created ${WORKFLOW_FILE}. Edit it to customize ugo guidance.`,
+            "info",
+          );
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(
+          `ugo could not create ${WORKFLOW_FILE}: ${message}`,
+          "error",
+        );
+        return;
+      }
+      status = await gitStatus(ctx.cwd);
+      if (!statusOnlyTouchesWorkflowState(status)) {
+        ctx.ui.notify(
+          "ugo requires a clean worktree before starting except for workboard.md, workflow.md, and scratch/ changes because ugo-guide/ugo-do commit after each phase.",
+          "error",
+        );
+        return;
+      }
+      if (!(await hasWorkboard(ctx.cwd))) {
+        ctx.ui.notify(
+          "ugo-guide needs workboard.md. Run /new-workboard first or create workboard.md.",
+          "warning",
         );
         return;
       }
@@ -1409,11 +1440,23 @@ export default function (pi: ExtensionAPI) {
     updateUi(ctx, currentState);
   });
 
-  pi.on("before_agent_start", async (event) => {
+  pi.on("before_agent_start", async (event, ctx) => {
     if (currentState?.active && currentState.phase === "guide") {
-      return {
-        systemPrompt: `${event.systemPrompt}\n\n${GUIDANCE_SYSTEM_PROMPT}`,
-      };
+      try {
+        const workflow = await ensureAndReadWorkflowFile(ctx.cwd);
+        if (workflow.created) {
+          ctx.ui.notify(
+            `Created ${WORKFLOW_FILE}. Edit it to customize ugo guidance.`,
+            "info",
+          );
+        }
+        return {
+          systemPrompt: `${event.systemPrompt}\n\n${formatGuidanceSystemPrompt(workflow.content)}`,
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`ugo-guide could not load ${WORKFLOW_FILE}: ${message}`, "error");
+      }
     }
     return undefined;
   });

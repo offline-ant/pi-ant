@@ -15,7 +15,7 @@ export const MINI_REVIEW_SUFFIX =
 
 export const CALL_PROGRESS_SNIPPET = `Use call to execute the plan we just discussed. Your task as controller:
 
-Important: call opens a call frame in the current session context with tools enabled. The call frame must finish by calling return. The tool-heavy call branch stays inspectable in the session tree, while the controller resumes from only the compact return result.
+Important: call opens a call frame in the current session context with tools enabled. The call frame's final assistant message is returned as the compact result. The tool-heavy call branch stays inspectable in the session tree, while the controller resumes from only the compact result.
 
 Start with a single call assigned to execute the entire feasible plan as far as possible. Do not split the work into phases by default. Use additional calls only after the prior call returns with completed work, blockers, remaining scope, or a clear handoff. For dependent tasks or tasks that may edit the same files, run calls serially and include the latest returned state/results in each new call task.
 
@@ -26,9 +26,9 @@ Tell each call frame to:
 3. Run focused relevant checks when practical.
 4. If the work writes or materially changes a plan, ask minitask for a generic review of the plan before returning. Triage the review in the same call frame: apply clearly good suggestions, ignore bad ones, and move real unresolved questions to needs-decision with a scratch/decisions artifact.
 5. Update workboard.md as required before returning, when this work came from a workboard item.
-6. Call return with { result: "..." }, where result is the exact concise text to return to the caller. Include changed files, checks, remaining work, and blockers in that text only when relevant.
+6. Finish with a final assistant message containing the exact concise text to return to the caller. Include changed files, checks, remaining work, and blockers in that text only when relevant.
 
-After each return, inspect the result, verify or clean up as needed, and decide whether another call should continue with updated context. You may pause when a major unexpected blocker or design choice is uncovered.
+After each call returns, inspect the result, verify or clean up as needed, and decide whether another call should continue with updated context. You may pause when a major unexpected blocker or design choice is uncovered.
 
 You are done when all feasible parts of the plan have been implemented, relevant specs and documents updated, relevant checks completed or clearly reported, and you have returned a final summary of what was done plus any remaining obstacles.`;
 
