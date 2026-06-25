@@ -1,19 +1,32 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   formatGuidanceResult,
-  GUIDANCE_SYSTEM_PROMPT,
   PRESENT_GUIDANCE_PARAMS,
   validateGuidance,
 } from "./guidance-core.ts";
+import {
+  ensureAndReadWorkflowFile,
+  formatGuidanceSystemPrompt,
+  WORKFLOW_FILE,
+} from "./workflow-core.ts";
 
 const GUIDANCE_ENABLED = process.env.PI_GUIDANCE === "true";
 
 export default function (pi: ExtensionAPI) {
   if (!GUIDANCE_ENABLED) return;
 
-  pi.on("before_agent_start", async (event) => ({
-    systemPrompt: `${event.systemPrompt}\n\n${GUIDANCE_SYSTEM_PROMPT}`,
-  }));
+  pi.on("before_agent_start", async (event, ctx) => {
+    const workflow = await ensureAndReadWorkflowFile(ctx.cwd);
+    if (workflow.created) {
+      ctx.ui.notify(
+        `Created ${WORKFLOW_FILE}. Edit it to customize guidance.`,
+        "info",
+      );
+    }
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${formatGuidanceSystemPrompt(workflow.content)}`,
+    };
+  });
 
   pi.on("session_start", async () => {
     let active = pi.getActiveTools();

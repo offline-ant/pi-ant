@@ -4,6 +4,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { ensureWorkflowFile, WORKFLOW_FILE } from "./workflow-core.ts";
 
 const WORKBOARD_FILE = "workboard.md";
 const MAX_CONTEXT_CHARS = 30_000;
@@ -19,6 +20,10 @@ working directory. Agents do not need to be told to read it separately. Use the
 up to date when task state changes, when blockers or decisions appear, and when
 handoffs or plans change. Keep entries concise. Link to files instead of copying
 long context.
+
+Guidance workflow policy lives in \`workflow.md\`. \`/ugo\` creates that file when
+missing; edit it to change how guidance chooses and prepares work from this
+workboard.
 
 This is not design authority or a cold idea backlog. Durable facts belong in
 AGENTS.md, spec/, required-reading/, or equivalent project authority docs. Ideas
@@ -114,7 +119,7 @@ function formatWorkboardContext(
     ? `\n\n[workboard.md truncated in context: showing first ${MAX_CONTEXT_CHARS} of ${originalChars} characters. Keep workboard.md concise.]`
     : "";
 
-  return `A workboard.md file exists in the current working directory and is autoloaded as active operational state. Use it to understand runnable queues, blockers, active work, handoffs, and items needing distillation. Keep it up to date when task state changes. It is not design authority or a cold idea backlog; durable facts belong in AGENTS.md, spec/, required-reading/, or equivalent authority docs, and unpromoted ideas belong in project backlog/ideas files outside workboard.md.\n\n<workboard.md>\n${text}${truncationNotice}\n</workboard.md>`;
+  return `A workboard.md file exists in the current working directory and is autoloaded as active operational state. Use it to understand runnable queues, blockers, active work, handoffs, and items needing distillation. Keep it up to date when task state changes. Guidance workflow policy lives in workflow.md. It is not design authority or a cold idea backlog; durable facts belong in AGENTS.md, spec/, required-reading/, or equivalent authority docs, and unpromoted ideas belong in project backlog/ideas files outside workboard.md.\n\n<workboard.md>\n${text}${truncationNotice}\n</workboard.md>`;
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -145,6 +150,21 @@ export default function (pi: ExtensionAPI) {
         flag: "wx",
       });
       ctx.ui.notify(`Created ${WORKBOARD_FILE}.`, "info");
+    },
+  });
+
+  pi.registerCommand("new-workflow", {
+    description: "Create workflow.md with editable guidance policy",
+    handler: async (_args, ctx) => {
+      if (await ensureWorkflowFile(ctx.cwd)) {
+        ctx.ui.notify(`Created ${WORKFLOW_FILE}.`, "info");
+        return;
+      }
+
+      ctx.ui.notify(
+        `${WORKFLOW_FILE} already exists; not overwriting.`,
+        "warning",
+      );
     },
   });
 

@@ -1,64 +1,10 @@
-// CRITICAL: Strings in this file are injected into model context for the
-// workboard-selection pass and into prompts generated for the next worker.
-// Those model-facing strings must never reveal the wrapper/orchestration model:
-// do not mention "ugo", "ugo-guide", "ugo-do", automated loops, or controller
-// delegation. Describe only the immediate task: select the next workboard step
-// or perform the generated worker prompt. User-facing UI may still use ugo names.
+// CRITICAL: Strings in this file describe the structured guidance protocol.
+// Editable workflow policy lives in workflow.md and is loaded by workflow-core.
 
 import { Type, type Static } from "typebox";
-import { DISTILL_SNIPPET, ENRICH_SNIPPET } from "./snippets.ts";
 
 export const RESULT_OPEN = "<pi-guidance-result>";
 export const RESULT_CLOSE = "</pi-guidance-result>";
-
-export const GUIDANCE_SYSTEM_PROMPT = `Your job is to inspect workboard.md and linked files, then choose the next clean workflow outcome. You are selecting the next task or stop condition, not implementing it.
-
-Rules:
-- End by calling present_guidance exactly once.
-- After present_guidance succeeds, copy the exact <pi-guidance-result> block from the tool result as your final answer and add no other prose.
-- Do not return free-form final prose instead of present_guidance.
-- Do not implement source changes during guidance.
-- You may read files and inspect the repo.
-- You may write a concise guidance artifact under scratch/ when that helps preserve context for a human or next worker.
-- Prefer clear stopping points over vague autonomy.
-- If human input is needed, write enough context for the human to decide without rereading the whole session. Return REQUIRE_HUMAN_DECISION, write a decision artifact under scratch/decisions/<short-slug>.md, and include that path in present_guidance.artifact.
-- Decision artifacts are human workbench files. Keep them concise but complete enough to decide quickly: question, relevant context/files, options, recommendation, consequences, and a final "Human response" section. Tell the human to write DONE: <decision> when resolved or CLARIFY: <missing context/request> when more enrichment is needed. Do not include an active line starting with DONE or CLARIFY as a placeholder; leave the response blank until the human writes the signal.
-- Never write decision artifacts for empty/no-runnable-work cases, terminal status summaries, or bookkeeping. scratch/decisions/ is only for REQUIRE_HUMAN_DECISION.
-- Do not use ask for substantial decisions; present decision choices through present_guidance.
-- If no workboard.md exists, return EMPTY_WORKBOARD with reason "no workboard.md" and do not write artifacts.
-- Treat workboard.md as active workflow state only. Cold ideas/backlog items outside workboard.md are not runnable until a human promotes them into workboard.md.
-- If the user did not name an item, choose the first runnable non-empty workboard item in this order: needs-enrichment, ready, implementing, needs-distill. needs-decision is not runnable work; if a needs-decision item still needs a human signal, return REQUIRE_HUMAN_DECISION. previous-done is never runnable.
-- If no runnable or human-decision item remains, return EMPTY_WORKBOARD with no artifact, choices, nextPrompt, or workboardUpdate.
-- If an item is obsolete or already completed, return UPDATE_WORK with a precise workboardUpdate that removes it or replaces previous-done with the latest completed item.
-- If durable facts need to be moved into authority docs before more work, prefer a distill nextPrompt.
-- If the item lacks enough context, prefer an enrich nextPrompt.
-- Enrichment or planning prompts that write or materially change a plan must tell the plan writer to ask minitask for a generic plan review before finishing, triage that review in the same pass, move executable work to ready, and move real unresolved questions to needs-decision with a scratch/decisions artifact.
-- Every CONTINUE_WORK nextPrompt must tell the next worker exactly how to update workboard.md before finishing. It should say which section to move the item to for likely outcomes such as needs-decision, needs-distill, previous-done, or back to ready.
-- For broad items, choose the next small stage instead of the whole effort. If the stage is not yet detailed enough to execute safely, make nextPrompt produce and minitask-review a detailed stage plan; execution should be a later workboard step.
-
-Prompt-selection rules:
-- For needs-enrichment: produce an enrichment prompt.
-- For needs-distill: produce a distill prompt.
-- For implementation: produce a direct worker prompt with enough context, files, constraints, checks, and required workboard.md updates to execute cleanly.
-- For unclear design/API choices: return REQUIRE_HUMAN_DECISION with choices and a scratch/decisions artifact.
-
-Available prompt primitives you may incorporate into nextPrompt:
-
-<enrich>
-${ENRICH_SNIPPET}
-</enrich>
-
-<distill>
-${DISTILL_SNIPPET}
-</distill>
-
-present_guidance status semantics:
-- CONTINUE_WORK: there is a concrete next prompt to run. nextPrompt is required and must be directly executable by the next worker.
-- UPDATE_WORK: the selected item is complete, obsolete, or only needs workboard bookkeeping. workboardUpdate is required and should say exactly how to update workboard.md.
-- REQUIRE_HUMAN_DECISION: progress requires human input. choices and a scratch/decisions artifact are required. Do not include nextPrompt or workboardUpdate.
-- EMPTY_WORKBOARD: no runnable work or pending decision remains. Do not write artifacts and do not include choices, nextPrompt, or workboardUpdate.
-
-Keep nextPrompt specific: include relevant files, constraints, what to do, checks/reports expected when relevant, and the required workboard.md update. Do not say only "continue" or "do the next step".`;
 
 const GuidanceChoice = Type.Object({
   label: Type.String({ description: "Short option label" }),

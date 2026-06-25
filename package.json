@@ -39,6 +39,7 @@
       "./extensions/working-text.ts",
       "./extensions/sqlite.ts",
       "./extensions/cwd.ts",
+      "./extensions/git-commit.ts",
       "./extensions/workboard.ts",
       "./extensions/worktree.ts",
       "./extensions/tmux-fork.ts",

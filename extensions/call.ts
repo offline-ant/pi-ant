@@ -1,5 +1,4 @@
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { SessionManager, type AgentEndEvent, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
@@ -8,13 +7,28 @@ import { flushSessionFile, runTmux, writePromptFile } from "./tmux-helpers.ts";
 import { getToolModelCliArgs } from "./tool-model-state.ts";
 
 const CALL_TOOL = "call";
-const RETURN_TOOL = "return";
+const ASK_TOOL = "ask";
+const REMOVED_CALL_CONTROL_TOOLS = new Set(["finish_call", "return"]);
 const ROOT_STATE_CUSTOM_TYPE = "pi-ant:call-state";
 const CALL_RUNTIME_CUSTOM_TYPE = "pi-ant:call-runtime";
-const RETURN_NOW_COMMAND = "return-now";
+const RETROSPECTIVE_PENDING_CUSTOM_TYPE = "pi-ant:call-retrospective-pending";
+const FINISH_CALL_NOW_COMMAND = "finish-call-now";
 const RESULT_POLL_INTERVAL_MS = 250;
 const PROGRESS_UPDATE_INTERVAL_MS = 5000;
+const UNFINISHED_CALL_ERROR_QUIET_PERIOD_MS = 30_000;
+const UNFINISHED_CALL_ERROR_RECHECK_MS = 5_000;
 const LOCK_DIR = "/tmp/pi-semaphores";
+const DESIGN_PRINCIPLES_PROMPT = [
+  "Note our design principles: Do the hard part first, clean up as you go, leave no dead code or overcomplicated abstractions behind,",
+  "being broken between phases is fine, cost of change is 0, avoid quick fixes / hacks, the well-designed long-term architecture end state is critical.",
+  "Clear, consistent names are important; immediately refactor and rename things to best describe reality.",
+].join(" ");
+const RETROSPECTIVE_PROMPT = [
+  "The main call result has already been saved for the parent. Do not repeat it, do not continue the task, and do not call tools.",
+  "Return only substantial observations you noticed outside of the given task, or substantial things you did not mention regarding it, that are worth taking into account or fixing in the long run.",
+  "Design principles to apply: do the hard part first; clean up as you go; leave no dead code or overcomplicated abstractions behind; being broken between phases is fine; cost of change is zero; avoid quick fixes and hacks; the well-designed long-term architecture end state is critical; clear, consistent names are important; immediately refactor and rename things to best describe reality.",
+  "If there is nothing substantial, return exactly: everything was ok",
+].join("\n");
 
 const callParams = Type.Object({
   task: Type.String({
@@ -26,18 +40,15 @@ const callParams = Type.Object({
       description: "Allow this call frame to use call for substantial delegated subtasks.",
     }),
   ),
+  retrospective: Type.Optional(
+    Type.Boolean({
+      description:
+        "After the main result is ready, ask the call frame for no-tools long-term observations and append them to the result. Choose true mainly when the call is likely to read or inspect more than about 5 files, perform a deep code dive, or uncover design/naming/architecture cleanup opportunities; choose false for small, narrow, or mechanical tasks.",
+    }),
+  ),
 });
 
 type CallParams = Static<typeof callParams>;
-
-const returnParams = Type.Object({
-  result: Type.String({
-    minLength: 1,
-    description: "Exact text result to return to the parent call frame.",
-  }),
-});
-
-type ReturnParams = Static<typeof returnParams>;
 
 interface RootCallState {
   bobsMode: boolean;
@@ -48,6 +59,7 @@ interface CallRuntimeState {
   id: string;
   task: string;
   complex: boolean;
+  retrospective: boolean;
   resultPath: string;
   parentSession: string;
   childSession: string;
@@ -56,6 +68,18 @@ interface CallRuntimeState {
   lockName: string;
   workerTools: string[];
   createdAt: string;
+}
+
+interface RetrospectivePendingState {
+  id: string;
+  result: string;
+  requestedAt: string;
+}
+
+interface DeferredCallFinalization {
+  runtimeId: string;
+  timer: ReturnType<typeof setTimeout>;
+  finalize: () => void;
 }
 
 interface CustomStateEntryLike {
@@ -77,9 +101,14 @@ interface CallToolDetails {
   lockName: string;
   requestedLockName: string;
   resultPath: string;
+  artifactDir: string;
+  promptPath: string;
+  resultMarkdownPath: string;
+  reflectMarkdownPath?: string;
   childSessionFile: string;
   task: string;
   complex: boolean;
+  retrospective: boolean;
   elapsedMs?: number;
   status?: string;
 }
@@ -144,6 +173,7 @@ function parseCallRuntime(value: unknown): CallRuntimeState | undefined {
     id: value.id,
     task: value.task,
     complex: value.complex,
+    retrospective: value.retrospective === true,
     resultPath: value.resultPath,
     parentSession: value.parentSession,
     childSession: value.childSession,
@@ -166,12 +196,30 @@ function getLatestCallRuntime(ctx: ExtensionContext): CallRuntimeState | undefin
   return undefined;
 }
 
+function parseRetrospectivePending(value: unknown): RetrospectivePendingState | undefined {
+  if (!isRecord(value) || typeof value.id !== "string" || typeof value.result !== "string" || typeof value.requestedAt !== "string") {
+    return undefined;
+  }
+  return { id: value.id, result: value.result, requestedAt: value.requestedAt };
+}
+
+function getLatestRetrospectivePending(ctx: ExtensionContext, runtime: CallRuntimeState): RetrospectivePendingState | undefined {
+  const entries = getCustomStateEntries(ctx);
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry.customType !== RETROSPECTIVE_PENDING_CUSTOM_TYPE) continue;
+    const pending = parseRetrospectivePending(entry.data);
+    if (pending?.id === runtime.id) return pending;
+  }
+  return undefined;
+}
+
 function defaultRootState(activeTools: string[]): RootCallState {
   return { bobsMode: false, rootTools: stripControlTools(activeTools) };
 }
 
 function stripControlTools(tools: string[]): string[] {
-  return tools.filter((tool) => tool !== CALL_TOOL && tool !== RETURN_TOOL);
+  return tools.filter((tool) => tool !== CALL_TOOL && !REMOVED_CALL_CONTROL_TOOLS.has(tool));
 }
 
 function uniqueTools(tools: string[]): string[] {
@@ -179,15 +227,15 @@ function uniqueTools(tools: string[]): string[] {
 }
 
 function rootActiveTools(state: RootCallState): string[] {
-  if (state.bobsMode) return [CALL_TOOL];
-  return uniqueTools([...state.rootTools, CALL_TOOL]).filter((tool) => tool !== RETURN_TOOL);
+  if (state.bobsMode) return [CALL_TOOL, ASK_TOOL];
+  return uniqueTools([...state.rootTools, CALL_TOOL]);
 }
 
 function runtimeActiveTools(runtime: CallRuntimeState): string[] {
-  return uniqueTools([...runtime.workerTools, RETURN_TOOL, ...(runtime.complex ? [CALL_TOOL] : [])]);
+  return uniqueTools([...runtime.workerTools, ...(runtime.complex ? [CALL_TOOL] : [])]);
 }
 
-function parseReturnNowText(args: string | undefined): string {
+function parseFinishCallNowText(args: string | undefined): string {
   const trimmed = (args ?? "").trim();
   if (trimmed.length < 2) return trimmed;
   const first = trimmed[0];
@@ -209,19 +257,10 @@ function renderCallArgs(args: CallParams) {
   };
 }
 
-function renderReturnArgs(args: ReturnParams) {
-  const lines = args.result.split("\n");
-  return {
-    render: (contentWidth: number) => lines.flatMap((line) => wrapTextWithAnsi(line, contentWidth)),
-    invalidate: () => {
-      /* no-op */
-    },
-  };
-}
-
-function callFrameInstructions(task: string): string {
+function callFrameInstructions(task: string, includeDesignPrinciples: boolean): string {
   return [
-    "You have stepped inside a call frame. Use the available tools to complete the task below. Do not stop until you call `return({ result: \"...\" })` with the result for the caller, or the cause of failure.",
+    "You have stepped inside a call frame. Use the available tools to complete the task below. When the task is complete, answer with only the exact result text for the caller, or the cause of failure. That final assistant message is returned to the parent call frame.",
+    ...(includeDesignPrinciples ? ["", DESIGN_PRINCIPLES_PROMPT] : []),
     "",
     "Task:",
     task,
@@ -258,14 +297,46 @@ function isLockFinished(name: string): boolean {
   return !fs.existsSync(activeLockPath(name));
 }
 
-function createResultPath(callId: string): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-ant-call-${callId}-`));
-  try {
-    fs.chmodSync(dir, 0o700);
-  } catch {
-    // Best effort; mkdtemp already respects the process umask.
-  }
-  return path.join(dir, "result.json");
+interface CallArtifactPaths {
+  artifactDir: string;
+  promptPath: string;
+  resultPath: string;
+  resultMarkdownPath: string;
+  reflectMarkdownPath: string;
+}
+
+function callArtifactPathsFromResultPath(resultPath: string): CallArtifactPaths {
+  const artifactDir = path.dirname(resultPath);
+  return {
+    artifactDir,
+    promptPath: path.join(artifactDir, "prompt.md"),
+    resultPath,
+    resultMarkdownPath: path.join(artifactDir, "result.md"),
+    reflectMarkdownPath: path.join(artifactDir, "reflect.md"),
+  };
+}
+
+function callDetailsArtifactFields(
+  resultPath: string,
+  retrospective: boolean,
+): Pick<CallToolDetails, "artifactDir" | "promptPath" | "resultMarkdownPath" | "reflectMarkdownPath"> {
+  const paths = callArtifactPathsFromResultPath(resultPath);
+  return {
+    artifactDir: paths.artifactDir,
+    promptPath: paths.promptPath,
+    resultMarkdownPath: paths.resultMarkdownPath,
+    ...(retrospective ? { reflectMarkdownPath: paths.reflectMarkdownPath } : {}),
+  };
+}
+
+function createCallArtifacts(callId: string, prompt: string): CallArtifactPaths {
+  const promptPath = writePromptFile(prompt, `pi-ant-call-${callId}-`);
+  return callArtifactPathsFromResultPath(path.join(path.dirname(promptPath), "result.json"));
+}
+
+function writeTextArtifact(filePath: string, content: string): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(filePath, content, { encoding: "utf8", mode: 0o600 });
 }
 
 function parseCallResult(raw: string, resultPath: string, expectedId: string): CallResultFile {
@@ -293,8 +364,20 @@ function parseCallResult(raw: string, resultPath: string, expectedId: string): C
   };
 }
 
-function writeCallResult(runtime: CallRuntimeState, result: string, sessionFile: string | undefined, isError = false): void {
+function writeCallResult(
+  runtime: CallRuntimeState,
+  result: string,
+  sessionFile: string | undefined,
+  isError = false,
+  artifacts?: { resultMarkdown?: string; reflectMarkdown?: string },
+): void {
   fs.mkdirSync(path.dirname(runtime.resultPath), { recursive: true, mode: 0o700 });
+  const artifactPaths = callArtifactPathsFromResultPath(runtime.resultPath);
+  writeTextArtifact(artifactPaths.resultMarkdownPath, artifacts?.resultMarkdown ?? result);
+  if (artifacts?.reflectMarkdown !== undefined) {
+    writeTextArtifact(artifactPaths.reflectMarkdownPath, artifacts.reflectMarkdown);
+  }
+
   const tmp = `${runtime.resultPath}.${process.pid}.${Date.now()}.tmp`;
   const payload: CallResultFile = {
     id: runtime.id,
@@ -309,7 +392,7 @@ function writeCallResult(runtime: CallRuntimeState, result: string, sessionFile:
     fs.linkSync(tmp, runtime.resultPath);
   } catch (error) {
     if (isRecord(error) && error.code === "EEXIST") {
-      throw new Error(`Call result already exists; duplicate return refused: ${runtime.resultPath}`);
+      throw new Error(`Call result already exists; duplicate final result refused: ${runtime.resultPath}`);
     }
     throw error;
   } finally {
@@ -379,20 +462,26 @@ function latestAssistantMessage(messages: AgentEndEvent["messages"]): Extract<Ag
   return undefined;
 }
 
-function assistantMessageText(message: Extract<AgentEndEvent["messages"][number], { role: "assistant" }>): string {
+function assistantTextContent(message: Extract<AgentEndEvent["messages"][number], { role: "assistant" }>): string | undefined {
   const text = message.content
     .filter((item) => item.type === "text")
     .map((item) => item.text)
     .join("")
     .trim();
   if (text) return text;
-  if (message.errorMessage) return message.errorMessage;
-  return `Assistant stopped with reason '${message.stopReason}' before calling return.`;
+  return undefined;
 }
 
-function missingReturnFailure(event: AgentEndEvent): string | undefined {
-  const message = latestAssistantMessage(event.messages);
-  if (!message || message.stopReason === "aborted") return undefined;
+function assistantMessageText(message: Extract<AgentEndEvent["messages"][number], { role: "assistant" }>): string {
+  return assistantTextContent(message) ?? message.errorMessage ?? `Assistant stopped with reason '${message.stopReason}' before returning a final call result.`;
+}
+
+function appendRetrospective(result: string, retrospective: string): string {
+  return [result.trimEnd(), "", "---", "", "Call-frame retrospective:", retrospective.trim()].join("\n");
+}
+
+function callFrameFailure(message: Extract<AgentEndEvent["messages"][number], { role: "assistant" }>): string | undefined {
+  if (message.stopReason === "aborted") return undefined;
   return assistantMessageText(message);
 }
 
@@ -406,6 +495,7 @@ async function waitForCallResult(
     childSessionFile: string;
     task: string;
     complex: boolean;
+    retrospective: boolean;
     onUpdate?: (partial: { content: Array<{ type: "text"; text: string }>; details: CallToolDetails }) => void;
   },
 ): Promise<CallResultFile> {
@@ -425,7 +515,7 @@ async function waitForCallResult(
       const output = await captureTmuxOutput(pi, options.actualLockName);
       throw new Error(
         [
-          "Call frame exited before writing a return result.",
+          "Call frame exited before writing a final result.",
           `tmux lock: ${options.actualLockName}`,
           `child session: ${options.childSessionFile}`,
           `result path: ${options.resultPath}`,
@@ -456,9 +546,11 @@ async function waitForCallResult(
           lockName: options.actualLockName,
           requestedLockName: options.requestedLockName,
           resultPath: options.resultPath,
+          ...callDetailsArtifactFields(options.resultPath, options.retrospective),
           childSessionFile: options.childSessionFile,
           task: options.task,
           complex: options.complex,
+          retrospective: options.retrospective,
           elapsedMs,
           status: "waiting",
         },
@@ -472,6 +564,7 @@ async function waitForCallResult(
 export default function (pi: ExtensionAPI) {
   let currentRootState: RootCallState | undefined;
   let currentRuntime: CallRuntimeState | undefined;
+  let deferredCallFinalization: DeferredCallFinalization | undefined;
 
   function resolveRootState(ctx: ExtensionContext): RootCallState | undefined {
     const persisted = getLatestRootState(ctx);
@@ -490,29 +583,84 @@ export default function (pi: ExtensionAPI) {
     pi.appendEntry(ROOT_STATE_CUSTOM_TYPE, state);
   }
 
-  function applyTools(rootState: RootCallState | undefined, runtime: CallRuntimeState | undefined): void {
+  function applyTools(rootState: RootCallState | undefined, runtime: CallRuntimeState | undefined, retrospectivePending: boolean): void {
     if (runtime) {
-      pi.setActiveTools(runtimeActiveTools(runtime));
+      pi.setActiveTools(retrospectivePending ? [] : runtimeActiveTools(runtime));
       return;
     }
     pi.setActiveTools(rootActiveTools(rootState ?? defaultRootState(pi.getActiveTools())));
   }
 
-  function updateUi(ctx: ExtensionContext, rootState: RootCallState | undefined, runtime: CallRuntimeState | undefined): void {
+  function clearDeferredCallFinalization(runtime?: CallRuntimeState): void {
+    if (!deferredCallFinalization) return;
+    if (runtime && deferredCallFinalization.runtimeId !== runtime.id) return;
+    clearTimeout(deferredCallFinalization.timer);
+    deferredCallFinalization = undefined;
+  }
+
+  function scheduleDeferredCallFinalization(ctx: ExtensionContext, runtime: CallRuntimeState, finalize: () => void): void {
+    clearDeferredCallFinalization(runtime);
+
+    const deferred: DeferredCallFinalization = {
+      runtimeId: runtime.id,
+      timer: setTimeout(check, UNFINISHED_CALL_ERROR_QUIET_PERIOD_MS),
+      finalize,
+    };
+    deferredCallFinalization = deferred;
+
+    function check(): void {
+      if (deferredCallFinalization !== deferred) return;
+      if (fs.existsSync(runtime.resultPath)) {
+        clearDeferredCallFinalization(runtime);
+        return;
+      }
+
+      const activeRuntime = resolveRuntime(ctx);
+      if (!activeRuntime || activeRuntime.id !== runtime.id) {
+        clearDeferredCallFinalization(runtime);
+        return;
+      }
+
+      if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+        deferred.timer = setTimeout(check, UNFINISHED_CALL_ERROR_RECHECK_MS);
+        return;
+      }
+
+      try {
+        deferred.finalize();
+        clearDeferredCallFinalization(runtime);
+      } catch (error) {
+        if (fs.existsSync(runtime.resultPath)) {
+          clearDeferredCallFinalization(runtime);
+          return;
+        }
+        const reason = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`Failed to finalize deferred call error: ${reason}`, "error");
+      }
+    }
+  }
+
+  function updateUi(
+    ctx: ExtensionContext,
+    rootState: RootCallState | undefined,
+    runtime: CallRuntimeState | undefined,
+    retrospectivePending: boolean,
+  ): void {
     const status = statusText(rootState, runtime);
-    ctx.ui.setStatus("call", status ? ctx.ui.theme.fg("accent", status) : undefined);
+    ctx.ui.setStatus("call", status ? ctx.ui.theme.fg("accent", retrospectivePending ? `${status}:retrospective` : status) : undefined);
 
     if (runtime) {
       ctx.ui.setWidget("call", [
-        `tmux call frame${runtime.complex ? " (complex)" : ""}`,
+        `tmux call frame${runtime.complex ? " (complex)" : ""}${runtime.retrospective ? " (retrospective)" : ""}`,
         `task: ${runtime.task.slice(0, 160)}${runtime.task.length > 160 ? "…" : ""}`,
-        `return target: ${runtime.resultPath}`,
+        `artifacts: ${path.dirname(runtime.resultPath)}`,
+        ...(retrospectivePending ? ["retrospective: collecting no-tools long-term observations"] : []),
       ]);
       return;
     }
 
     if (rootState?.bobsMode) {
-      ctx.ui.setWidget("call", ["bobs-mode: root tools restricted to call"]);
+      ctx.ui.setWidget("call", ["bobs-mode: root tools restricted to call and ask"]);
       return;
     }
 
@@ -522,9 +670,10 @@ export default function (pi: ExtensionAPI) {
   function refresh(ctx: ExtensionContext): void {
     const rootState = resolveRootState(ctx) ?? defaultRootState(pi.getActiveTools());
     const runtime = resolveRuntime(ctx);
+    const retrospectivePending = runtime ? getLatestRetrospectivePending(ctx, runtime) !== undefined && !fs.existsSync(runtime.resultPath) : false;
     currentRootState = rootState;
-    applyTools(rootState, runtime);
-    updateUi(ctx, rootState, runtime);
+    applyTools(rootState, runtime, retrospectivePending);
+    updateUi(ctx, rootState, runtime, retrospectivePending);
   }
 
   async function startForkedCall(
@@ -544,14 +693,18 @@ export default function (pi: ExtensionAPI) {
 
     const callId = makeCallId();
     const requestedLockName = sanitizeLockName(`call-${callId}`);
-    const resultPath = createResultPath(callId);
+    const artifactPaths = createCallArtifacts(
+      callId,
+      callFrameInstructions(params.task, params.complex === true || params.retrospective === true),
+    );
+    const resultPath = artifactPaths.resultPath;
     const targetCwd = ctx.cwd;
     const preCallLeafId = getPreCallLeafId(ctx, toolCallId);
     const rootState = resolveRootState(ctx) ?? defaultRootState(pi.getActiveTools());
     const parentRuntime = resolveRuntime(ctx);
     const workerTools = captureWorkerTools(pi, rootState, parentRuntime);
     if (workerTools.length === 0) {
-      throw new Error("Cannot start call frame: no worker tools are available after stripping call/return.");
+      throw new Error("Cannot start call frame: no worker tools are available after stripping call control tools.");
     }
 
     const forked = SessionManager.forkFrom(parentSession, targetCwd);
@@ -569,6 +722,7 @@ export default function (pi: ExtensionAPI) {
       id: callId,
       task: params.task,
       complex: params.complex === true,
+      retrospective: params.retrospective === true,
       resultPath,
       parentSession,
       childSession: childSessionFile,
@@ -581,7 +735,6 @@ export default function (pi: ExtensionAPI) {
     forked.appendCustomEntry(CALL_RUNTIME_CUSTOM_TYPE, runtime);
     flushSessionFile(forked, childSessionFile);
 
-    const promptFile = writePromptFile(callFrameInstructions(params.task), "pi-ant-call-prompt-");
     const startResult = await runTmux(
       pi,
       [
@@ -592,7 +745,7 @@ export default function (pi: ExtensionAPI) {
         "--status-only",
         ...getToolModelCliArgs(ctx),
         "--prompt-file",
-        promptFile,
+        artifactPaths.promptPath,
       ],
     );
     const startText = [startResult.stdout.trim(), startResult.stderr.trim()].filter(Boolean).join("\n");
@@ -609,6 +762,7 @@ export default function (pi: ExtensionAPI) {
       childSessionFile,
       task: params.task,
       complex: runtime.complex,
+      retrospective: runtime.retrospective,
       onUpdate,
     });
 
@@ -619,30 +773,76 @@ export default function (pi: ExtensionAPI) {
         lockName: actualLockName,
         requestedLockName,
         resultPath,
+        ...callDetailsArtifactFields(resultPath, runtime.retrospective),
         childSessionFile,
         task: params.task,
         complex: runtime.complex,
+        retrospective: runtime.retrospective,
         elapsedMs: undefined,
-        status: "returned",
+        status: "finished",
       },
     };
   }
 
-  function returnFromRuntime(ctx: ExtensionContext, runtime: CallRuntimeState, params: ReturnParams): void {
-    writeCallResult(runtime, params.result, ctx.sessionManager.getSessionFile() ?? undefined);
-    ctx.ui.notify("Returned call result; shutting down.", "info");
+  function finishCallResultFromText(
+    ctx: ExtensionContext,
+    runtime: CallRuntimeState,
+    result: string,
+    skipRetrospective = false,
+  ): "finished" | "retrospective" {
+    clearDeferredCallFinalization(runtime);
+
+    if (runtime.retrospective && !skipRetrospective && !getLatestRetrospectivePending(ctx, runtime)) {
+      pi.appendEntry(RETROSPECTIVE_PENDING_CUSTOM_TYPE, {
+        id: runtime.id,
+        result,
+        requestedAt: new Date().toISOString(),
+      });
+      pi.setActiveTools([]);
+      updateUi(ctx, currentRootState, runtime, true);
+      writeTextArtifact(callArtifactPathsFromResultPath(runtime.resultPath).resultMarkdownPath, result);
+
+      try {
+        pi.sendUserMessage(RETROSPECTIVE_PROMPT, { deliverAs: "followUp" });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        const retrospective = `retrospective unavailable: ${reason}`;
+        writeCallResult(
+          runtime,
+          appendRetrospective(result, retrospective),
+          ctx.sessionManager.getSessionFile() ?? undefined,
+          false,
+          { resultMarkdown: result, reflectMarkdown: retrospective },
+        );
+        ctx.ui.notify("Finished call frame; retrospective prompt failed, so returned result with failure note.", "warning");
+        ctx.shutdown();
+        return "finished";
+      }
+
+      ctx.ui.notify("Saved call result; collecting retrospective before returning to parent.", "info");
+      return "retrospective";
+    }
+
+    const reflectMarkdown = runtime.retrospective && skipRetrospective ? "retrospective bypassed by /finish-call-now." : undefined;
+    const artifacts = reflectMarkdown === undefined
+      ? { resultMarkdown: result }
+      : { resultMarkdown: result, reflectMarkdown };
+    writeCallResult(runtime, result, ctx.sessionManager.getSessionFile() ?? undefined, false, artifacts);
+    ctx.ui.notify("Finished call frame with result; shutting down.", "info");
     ctx.shutdown();
+    return "finished";
   }
 
   pi.registerTool({
     name: CALL_TOOL,
     label: "Call",
-    description: "Run a delegated task in a forked tmux pi worker and return its result. Uses /tool-model when configured.",
+    description: "Run a delegated task in a forked tmux pi worker and return its result. Uses /tool-model when configured. Set retrospective when the task is likely to inspect more than about 5 files or do a deep design/code dive.",
     promptSnippet: "Run a delegated task in a forked tmux pi worker and return its result.",
     promptGuidelines: [
-      "Use call for delegated operational work when Bob's mode is active or when the user asks for a separate worker.",
+      "Use call for delegated operational work when the user asks for a separate worker.",
       "Use call as the only tool call in its assistant turn; sibling tool work is not included in the forked worker context.",
       "Use call.complex only when the worker may need to delegate substantial subtasks with nested call frames.",
+      "Use call.retrospective when the delegated task is likely to inspect more than about 5 files, perform a deep code/design dive, or expose long-term architecture/naming cleanup observations; leave it off for small, narrow tasks.",
     ],
     parameters: callParams,
     renderCall: renderCallArgs,
@@ -659,28 +859,6 @@ export default function (pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: result.result }],
         details,
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: RETURN_TOOL,
-    label: "Return",
-    description: "Return exact text from the tmux call frame to the parent call tool.",
-    promptSnippet: "Return exact text from the tmux call frame to the parent call tool",
-    parameters: returnParams,
-    renderCall: renderReturnArgs,
-    async execute(_toolCallId, params: ReturnParams, _signal, _onUpdate, ctx) {
-      const runtime = resolveRuntime(ctx);
-      if (!runtime) {
-        throw new Error("No active tmux call frame is available to return from.");
-      }
-
-      returnFromRuntime(ctx, runtime, params);
-      return {
-        content: [{ type: "text", text: "Returned result to parent call frame. Shutting down." }],
-        details: { id: runtime.id, resultPath: runtime.resultPath },
-        terminate: true,
       };
     },
   });
@@ -717,17 +895,17 @@ export default function (pi: ExtensionAPI) {
           rootTools: stripControlTools(state.bobsMode ? state.rootTools : pi.getActiveTools()),
         };
         appendRootState(next);
-        applyTools(next, undefined);
-        updateUi(ctx, next, undefined);
-        ctx.ui.notify("bobs-mode on: root tools restricted to call.", "info");
+        applyTools(next, undefined, false);
+        updateUi(ctx, next, undefined, false);
+        ctx.ui.notify("bobs-mode on: root tools restricted to call and ask.", "info");
         return;
       }
 
       if (action === "off") {
         const next: RootCallState = { ...state, bobsMode: false };
         appendRootState(next);
-        applyTools(next, undefined);
-        updateUi(ctx, next, undefined);
+        applyTools(next, undefined, false);
+        updateUi(ctx, next, undefined, false);
         ctx.ui.notify("bobs-mode off: root tools restored.", "info");
         return;
       }
@@ -736,12 +914,12 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand(RETURN_NOW_COMMAND, {
-    description: "Return from the active tmux call frame with a message. Usage: /return-now \"message\"",
+  pi.registerCommand(FINISH_CALL_NOW_COMMAND, {
+    description: "Immediately finish the active tmux call frame with a message, bypassing retrospective. Usage: /finish-call-now \"message\"",
     handler: async (args, ctx) => {
-      const message = parseReturnNowText(args);
+      const message = parseFinishCallNowText(args);
       if (!message) {
-        ctx.ui.notify("Usage: /return-now \"message\"", "warning");
+        ctx.ui.notify("Usage: /finish-call-now \"message\"", "warning");
         return;
       }
 
@@ -754,11 +932,11 @@ export default function (pi: ExtensionAPI) {
 
       const runtime = resolveRuntime(ctx);
       if (!runtime) {
-        ctx.ui.notify("No active tmux call frame to return from.", "warning");
+        ctx.ui.notify("No active tmux call frame to finish.", "warning");
         return;
       }
 
-      returnFromRuntime(ctx, runtime, { result: message });
+      finishCallResultFromText(ctx, runtime, message, true);
     },
   });
 
@@ -774,31 +952,140 @@ export default function (pi: ExtensionAPI) {
     const runtime = resolveRuntime(ctx);
     if (!runtime || fs.existsSync(runtime.resultPath)) return;
 
-    const failure = missingReturnFailure(event);
+    const message = latestAssistantMessage(event.messages);
+    if (!message) return;
+
+    const pendingRetrospective = getLatestRetrospectivePending(ctx, runtime);
+    if (pendingRetrospective) {
+      if (message.stopReason === "aborted" || message.stopReason === "toolUse") return;
+
+      const finishRetrospective = () => {
+        const retrospectiveText = assistantTextContent(message) ?? message.errorMessage;
+        const retrospective = message.stopReason === "stop"
+          ? (retrospectiveText ?? "retrospective unavailable: assistant returned no retrospective text.")
+          : `retrospective unavailable: assistant stopped with reason '${message.stopReason}'. ${retrospectiveText ?? "No retrospective text was returned."}`;
+        writeCallResult(
+          runtime,
+          appendRetrospective(pendingRetrospective.result, retrospective),
+          ctx.sessionManager.getSessionFile() ?? undefined,
+          false,
+          { resultMarkdown: pendingRetrospective.result, reflectMarkdown: retrospective },
+        );
+        ctx.ui.notify("Finished call frame with result and retrospective; shutting down.", "info");
+        ctx.shutdown();
+      };
+
+      if (message.stopReason === "error") {
+        scheduleDeferredCallFinalization(ctx, runtime, finishRetrospective);
+        ctx.ui.notify("Call-frame retrospective hit a provider error; waiting for Pi retry before finalizing.", "warning");
+        return;
+      }
+
+      try {
+        finishRetrospective();
+      } catch (error) {
+        if (fs.existsSync(runtime.resultPath)) return;
+        ctx.ui.notify(`Failed to write retrospective call result: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+      return;
+    }
+
+    if (message.stopReason === "stop") {
+      const resultText = assistantTextContent(message);
+      if (resultText) {
+        try {
+          finishCallResultFromText(ctx, runtime, resultText);
+        } catch (error) {
+          if (fs.existsSync(runtime.resultPath)) return;
+          ctx.ui.notify(`Failed to write final call result: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+        return;
+      }
+
+      const reportEmptyResult = () => {
+        writeCallResult(runtime, "Call frame stopped without final result text.", ctx.sessionManager.getSessionFile() ?? undefined, true);
+        ctx.ui.notify("Call frame stopped without final result text; reported failure to parent.", "warning");
+        ctx.shutdown();
+      };
+
+      try {
+        reportEmptyResult();
+      } catch (error) {
+        if (fs.existsSync(runtime.resultPath)) return;
+        ctx.ui.notify(`Failed to report empty call result: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+      return;
+    }
+
+    const failure = callFrameFailure(message);
     if (failure === undefined) return;
 
-    try {
+    const reportFailure = () => {
       writeCallResult(runtime, failure, ctx.sessionManager.getSessionFile() ?? undefined, true);
-      ctx.ui.notify("Call frame ended without return; reported failure to parent.", "warning");
+      ctx.ui.notify("Call frame ended without a final result; reported failure to parent.", "warning");
       ctx.shutdown();
+    };
+
+    if (message.stopReason === "error") {
+      scheduleDeferredCallFinalization(ctx, runtime, reportFailure);
+      ctx.ui.notify("Call frame hit a provider error before returning a final result; waiting for Pi retry before reporting failure.", "warning");
+      return;
+    }
+
+    try {
+      reportFailure();
     } catch (error) {
       if (fs.existsSync(runtime.resultPath)) return;
-      ctx.ui.notify(`Failed to report missing call return: ${error instanceof Error ? error.message : String(error)}`, "error");
+      ctx.ui.notify(`Failed to report missing call result: ${error instanceof Error ? error.message : String(error)}`, "error");
     }
+  });
+
+  pi.on("agent_start", async (_event, ctx) => {
+    const runtime = resolveRuntime(ctx);
+    if (runtime) clearDeferredCallFinalization(runtime);
+  });
+
+  pi.on("turn_start", async (_event, ctx) => {
+    const runtime = resolveRuntime(ctx);
+    if (runtime) clearDeferredCallFinalization(runtime);
+  });
+
+  pi.on("message_start", async (event, ctx) => {
+    if (event.message.role !== "assistant") return;
+    const runtime = resolveRuntime(ctx);
+    if (runtime) clearDeferredCallFinalization(runtime);
+  });
+
+  pi.on("session_shutdown", async () => {
+    clearDeferredCallFinalization();
   });
 
   pi.on("before_agent_start", async (event, ctx) => {
     const runtime = resolveRuntime(ctx);
     if (runtime) {
+      const pendingRetrospective = getLatestRetrospectivePending(ctx, runtime);
+      if (pendingRetrospective) {
+        return {
+          systemPrompt: `${event.systemPrompt}\n\nYou are in the retrospective phase of a call frame. The main result is already saved for the parent. Do not call tools and do not continue the original task. Answer only the retrospective prompt.`,
+        };
+      }
+
       return {
-        systemPrompt: `${event.systemPrompt}\n\n${callFrameInstructions(runtime.task)}\n\nDo not answer normally instead of returning.`,
+        systemPrompt: [
+          event.systemPrompt,
+          callFrameInstructions(runtime.task, runtime.complex || runtime.retrospective),
+          "When you are done, return the parent-facing result as your final assistant message.",
+        ].join("\n\n"),
       };
     }
 
     const state = currentRootState;
     if (state?.bobsMode) {
+      const workerTools = state.rootTools.length > 0
+        ? ` A call frame will have access to these tools: ${state.rootTools.map((tool) => `\`${tool}\``).join(", ")}.`
+        : "";
       return {
-        systemPrompt: `${event.systemPrompt}\n\nBob's mode is active. Treat the root conversation as an orchestration thread, not a work thread. Default to call for any task, continuation, status check, recommendation, or question whose answer is not already fully available from compact root context. Do not give generic next-step options when current project/session state is unknown; call a tmux-backed worker to inspect and return a compact recommendation. Answer directly only for purely conversational/conceptual questions or when recent compact call results already contain all needed facts.`,
+        systemPrompt: `${event.systemPrompt}\n\nTreat the root conversation as an orchestration thread, not a work thread. Default to call for any task, continuation, status check, recommendation, or question whose answer is not already fully available from compact root context. Use ask directly when a user decision or clarification is needed.${workerTools} Do not give generic next-step options when current project/session state is unknown; call a tmux-backed worker to inspect and return a compact recommendation. Answer directly only for purely conversational/conceptual questions or when recent compact call results already contain all needed facts.`,
       };
     }
 
