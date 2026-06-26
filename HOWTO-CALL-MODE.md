@@ -35,8 +35,8 @@ call frames start with that configured pi model/thinking level.
 
 A call frame finishes when it returns a final assistant message. That message is
 written for the parent, and the worker pi process shuts down gracefully. The call
-artifact directory contains `prompt.md`, `result.json`, and `result.md`; calls
-with `retrospective: true` also write `reflect.md`.
+artifact directory contains `request.json`, `prompt.md`, `result.json`, and
+`result.md`; calls with `retrospective: true` also write `retrospective.md`.
 
 ## Commands
 
@@ -49,21 +49,21 @@ with `retrospective: true` also write `reflect.md`.
 /finish-call-now "message" # child-frame recovery: override result with message and shut down
 ```
 
-When Bob's mode is on, root active tools are restricted to `call`, `ask`, and
-`minitask`. The root is an orchestration thread, not a work thread: default to
-`call` for tasks, continuation, status checks, recommendations, and questions
-whose answers are not already fully available from compact root context. Use
-`minitask` for isolated fresh-context review or small independent questions that
-do not need this session's context. In particular, do not offer generic next-step
-options when current project/session state is unknown; call a frame to inspect
-and return a compact recommendation. Answer directly only for purely
-conversational/conceptual questions or when recent compact call results already
-contain the needed facts.
+When Bob's mode is on, root active tools are restricted to `call`,
+`coding-agent`, `ask`, and `minitask`. The root is an orchestration thread, not a
+work thread: default to `call` for tasks, continuation, status checks,
+recommendations, and questions whose answers are not already fully available from
+compact root context. Use `coding-agent` for fresh-context persistent worker
+work. Use `minitask` for isolated fresh-context review or small independent
+questions that do not need this session's context. In particular, do not offer
+generic next-step options when current project/session state is unknown; call a
+frame to inspect and return a compact recommendation. Answer directly only for
+purely conversational/conceptual questions or when recent compact worker results
+already contain the needed facts.
 
 Inside a call frame, pi restores the worker tools captured by the parent and adds
 `call` only for complex frames. Call frames compact like normal pi sessions; the
-delegated task is injected on every turn so compaction does not remove the
-worker's objective.
+worker request remains the active objective until a structured result is written.
 
 `/finish-call-now "message"` is a manual recovery command for a child tmux call frame.
 It aborts/waits for the current worker if needed, overrides the call result with

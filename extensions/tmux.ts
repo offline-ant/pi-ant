@@ -1,43 +1,19 @@
-/**
- * Tmux Extension (script-backed)
- *
- * Delegates tmux operations to ../bin/pi-tmux.
- */
-
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
-import { getToolModelCliArgs } from "./tool-model-state.ts";
+import { runTmux } from "./tmux-helpers.ts";
 
-const TMUX_SCRIPT = path.resolve(__dirname, "../bin/pi-tmux");
-
-/** Per-pane state for new-only capture */
-const captureState = new Map<string, number>(); // target:paneId -> totalLines at last capture
-
+const captureState = new Map<string, number>();
 const DEFAULT_MAX_NEW = 500;
-const MINI_LIVE_LINE_LIMIT = 15;
 
 function clearCaptureStateForTarget(target: string): void {
   captureState.delete(target);
   for (const key of [...captureState.keys()]) {
-    if (key.startsWith(`${target}:`)) {
-      captureState.delete(key);
-    }
+    if (key.startsWith(`${target}:`)) captureState.delete(key);
   }
 }
 
 function isTmuxAvailable(): boolean {
   return !!process.env.TMUX;
-}
-
-async function runTmux(
-  pi: ExtensionAPI,
-  args: string[],
-  signal?: AbortSignal,
-): Promise<{ code: number; stdout: string; stderr: string }> {
-  return pi.exec("bash", [TMUX_SCRIPT, ...args], { signal });
 }
 
 function outputText(stdout: string, stderr: string): string {
@@ -46,41 +22,24 @@ function outputText(stdout: string, stderr: string): string {
 }
 
 const tmuxBashParams = Type.Object({
-  name: Type.String({
-    description: "Lock name for the spawned tmux pane",
-  }),
-  command: Type.String({
-    description: "Command to execute in the tmux pane",
-  }),
+  name: Type.String({ description: "Lock name for the spawned tmux pane" }),
+  command: Type.String({ description: "Command to execute in the tmux pane" }),
 });
 export type TmuxBashInput = Static<typeof tmuxBashParams>;
 
 const tmuxCaptureParams = Type.Object({
-  name: Type.String({
-    description: "Lock name or pane id (e.g., worker or %12)",
-  }),
-  lines: Type.Optional(
-    Type.Number({ description: "Number of lines to capture (default: 500)" }),
-  ),
+  name: Type.String({ description: "Lock name or pane id (e.g., worker or %12)" }),
+  lines: Type.Optional(Type.Number({ description: "Number of lines to capture (default: 500)" })),
   watch: Type.Optional(
-    Type.String({
-      description: "Regex pattern — sets up a semaphore_wait lock that releases when the pattern appears in new pane output.",
-    }),
+    Type.String({ description: "Regex pattern — sets up a semaphore_wait lock that releases when the pattern appears in new pane output." }),
   ),
 });
 export type TmuxCaptureInput = Static<typeof tmuxCaptureParams>;
 
 const tmuxSendParams = Type.Object({
   name: Type.String({ description: "Lock name or pane id" }),
-  text: Type.String({
-    description:
-      "Text or keys to send (e.g., 'ls -la', 'Enter', 'C-c' for Ctrl+C)",
-  }),
-  enter: Type.Optional(
-    Type.Boolean({
-      description: "Whether to press Enter after sending text (default: true)",
-    }),
-  ),
+  text: Type.String({ description: "Text or keys to send (e.g., 'ls -la', 'Enter', 'C-c' for Ctrl+C)" }),
+  enter: Type.Optional(Type.Boolean({ description: "Whether to press Enter after sending text (default: true)" })),
 });
 export type TmuxSendInput = Static<typeof tmuxSendParams>;
 
@@ -89,610 +48,31 @@ const tmuxKillParams = Type.Object({
 });
 export type TmuxKillInput = Static<typeof tmuxKillParams>;
 
-const tmuxCodingAgentParams = Type.Object({
-  name: Type.String({
-    description: "Lock name for the coding agent",
-  }),
-  folder: Type.String({
-    description: "Working directory for the pi instance (e.g., '../hppr')",
-  }),
-  piArgs: Type.Optional(
-    Type.String({
-      description:
-        "Additional pi CLI arguments. Omit this to use pi's saved last active model; pass --provider/--model only to override.",
-    }),
-  ),
-  contextAlertPercent: Type.Optional(
-    Type.Number({
-      description:
-        "Context usage percentage (1-100) at which to release a <name>:context lock. " +
-        "Use semaphore_wait with the context lock name to be notified when the agent's context is filling up.",
-    }),
-  ),
-});
-export type TmuxCodingAgentInput = Static<typeof tmuxCodingAgentParams>;
-
-const minitaskParams = Type.Object({
-  task: Type.String({
-    minLength: 1,
-    description: "One question or small task to answer with a single isolated pi RPC run.",
-  }),
-  simple: Type.Optional(
-    Type.Boolean({
-      description:
-        "Use for quick rote tasks, like verifying whether a pattern is used in a file. Without /tool-model, runs pi with --provider openai-codex --model gpt-5.3-codex-spark, retrying with --thinking off if that exits nonzero, then falling back to deepseek/deepseek-v4-pro if Spark still fails. When /tool-model is set, that model is used instead.",
-    }),
-  ),
-});
-export type MinitaskInput = Static<typeof minitaskParams>;
-
-type MinitaskResult = {
-  task: string;
-  answer: string;
-  exitCode: number;
-};
-
-type PiPrintTaskRun = MinitaskResult & {
-  args: string[];
-};
-
-function formatMinitaskResult(result: MinitaskResult): string {
-  const exitLabel = result.exitCode === 0 ? "" : ` (exit code ${result.exitCode})`;
-  return [
-    "## Task",
-    result.task,
-    "",
-    `## Answer${exitLabel}`,
-    result.answer || "(no output)",
-  ].join("\n");
-}
-
-function buildPiPrintAttempts(simple: boolean, baseArgs: string[]): string[][] {
-  if (!simple) return [baseArgs];
-  return [
-    ["--provider", "openai-codex", "--model", "gpt-5.3-codex-spark", ...baseArgs],
-    ["--provider", "openai-codex", "--model", "gpt-5.3-codex-spark", "--thinking", "off", ...baseArgs],
-    ["--provider", "deepseek", "--model", "deepseek-v4-pro", ...baseArgs],
-  ];
-}
-
-function makeMiniLockName(cwd: string): string {
-  const parentName = process.env.PI_LOCK_NAME?.trim();
-  const baseName = parentName && parentName.length > 0 ? parentName : `minitask-${path.basename(cwd)}`;
-  const safeBaseName = baseName.replace(/[^A-Za-z0-9._:-]/g, "").slice(0, 80) || "minitask";
-  const suffix = Math.random().toString(36).slice(2, 8);
-  return `${safeBaseName}:mini:${process.pid}:${Date.now()}:${suffix}`;
-}
-
-type RpcRecord = Record<string, unknown> & {
-  id?: string;
-  type?: string;
-  command?: string;
-  success?: boolean;
-  error?: string;
-};
-
-type PendingRpcRequest = {
-  resolve: (response: RpcRecord) => void;
-  reject: (error: Error) => void;
-};
-
-type ActiveMiniTask = {
-  id: string;
-  task: string;
-  prompt: (message: string) => Promise<RpcRecord>;
-  abort: () => Promise<RpcRecord>;
-  publish: () => void;
-};
-
-type MiniRpcRunCallbacks = {
-  isExpanded?: () => boolean;
-  onStart?: (task: ActiveMiniTask) => void;
-  onDone?: (task: ActiveMiniTask) => void;
-};
-
-type MiniToolState = {
-  id: string;
-  name: string;
-  status: "running" | "finished" | "failed";
-  args?: unknown;
-  result?: unknown;
-};
-
-type MiniLiveState = {
-  assistantPreview?: string;
-  tools: Map<string, MiniToolState>;
-  events: string[];
-};
-
-function makeAbortError(): Error {
-  const error = new Error("Aborted");
-  error.name = "AbortError";
-  return error;
-}
-
-function delay(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return Promise.reject(makeAbortError());
-
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-
-    const onAbort = () => {
-      clearTimeout(timeout);
-      reject(makeAbortError());
-    };
-
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function getRpcData(response: RpcRecord): Record<string, unknown> | undefined {
-  return isRecord(response.data) ? response.data : undefined;
-}
-
-function getMessageText(message: unknown): string | undefined {
-  if (!isRecord(message) || !Array.isArray(message.content)) return undefined;
-
-  const parts: string[] = [];
-  for (const block of message.content) {
-    if (isRecord(block) && block.type === "text" && typeof block.text === "string") {
-      parts.push(block.text);
-    }
-  }
-
-  const text = parts.join("\n").trim();
-  return text.length > 0 ? text : undefined;
-}
-
-function getAssistantStatus(message: unknown): { stopReason?: string; errorMessage?: string } {
-  if (!isRecord(message)) return {};
-  return {
-    stopReason: typeof message.stopReason === "string" ? message.stopReason : undefined,
-    errorMessage: typeof message.errorMessage === "string" ? message.errorMessage : undefined,
-  };
-}
-
-function getLastAssistantMessage(messages: unknown): unknown {
-  if (!Array.isArray(messages)) return undefined;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (isRecord(message) && message.role === "assistant") return message;
-  }
-  return undefined;
-}
-
-function truncateLiveLine(text: string): string {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  return normalized.length > 180 ? `${normalized.slice(0, 177)}...` : normalized;
-}
-
-function stringifyMiniValue(value: unknown, maxLength: number): string | undefined {
-  if (value === undefined) return undefined;
-
-  let text: string;
-  if (typeof value === "string") {
-    text = value;
-  } else {
-    try {
-      text = JSON.stringify(value);
-    } catch {
-      text = String(value);
-    }
-  }
-
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (normalized.length === 0) return undefined;
-  return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 3)}...` : normalized;
-}
-
-function getToolArgSummary(tool: MiniToolState): string | undefined {
-  if (!isRecord(tool.args)) return stringifyMiniValue(tool.args, 180);
-
-  for (const key of ["command", "path", "name", "task", "query", "pattern"] as const) {
-    const value = tool.args[key];
-    if (typeof value === "string" && value.trim().length > 0) {
-      return `${key}: ${truncateLiveLine(value)}`;
-    }
-  }
-
-  return stringifyMiniValue(tool.args, 180);
-}
-
-function getToolResultSummary(result: unknown): string | undefined {
-  if (!isRecord(result)) return stringifyMiniValue(result, 240);
-
-  if (Array.isArray(result.content)) {
-    const parts: string[] = [];
-    for (const block of result.content) {
-      if (isRecord(block) && block.type === "text" && typeof block.text === "string") {
-        parts.push(block.text);
-      }
-    }
-    const text = parts.join("\n").trim();
-    if (text.length > 0) return truncateLiveLine(text);
-  }
-
-  return stringifyMiniValue(result, 240);
-}
-
-function formatLiveMiniTask(state: MiniLiveState, expanded: boolean): string {
-  const lines = ["## Live minitask"];
-  const tools = [...state.tools.values()];
-
-  if (tools.length > 0) {
-    lines.push("tools:");
-    for (const tool of tools.slice(-MINI_LIVE_LINE_LIMIT)) {
-      lines.push(`  - ${tool.name} ${tool.status}`);
-      const args = getToolArgSummary(tool);
-      if (args) lines.push(`    ${args}`);
-
-      if (expanded) {
-        const fullArgs = stringifyMiniValue(tool.args, 1000);
-        if (fullArgs && fullArgs !== args) lines.push(`    args: ${fullArgs}`);
-        const result = getToolResultSummary(tool.result);
-        if (result) lines.push(`    result: ${result}`);
-      }
-    }
-  }
-
-  if (state.assistantPreview) {
-    lines.push(`assistant: ${truncateLiveLine(state.assistantPreview)}`);
-  }
-
-  const remaining = MINI_LIVE_LINE_LIMIT - (lines.length - 1);
-  if (remaining > 0 && state.events.length > 0) {
-    lines.push(...state.events.slice(-remaining));
-  }
-
-  return lines.join("\n");
-}
-
-class MiniRpcProcess {
-  private child: ChildProcessWithoutNullStreams;
-  private onEvent: (record: RpcRecord) => void;
-  private stdoutBuffer = "";
-  private stderr = "";
-  private nextRequestId = 1;
-  private pending = new Map<string, PendingRpcRequest>();
-  isStreaming = false;
-  wasAborted = false;
-
-  constructor(child: ChildProcessWithoutNullStreams, onEvent: (record: RpcRecord) => void) {
-    this.child = child;
-    this.onEvent = onEvent;
-
-    this.child.stdout.on("data", (chunk: Buffer) => {
-      this.handleStdout(chunk.toString("utf8"));
-    });
-
-    this.child.stderr.on("data", (chunk: Buffer) => {
-      this.stderr += chunk.toString("utf8");
-    });
-
-    this.child.once("error", (error) => {
-      for (const pending of this.pending.values()) {
-        pending.reject(error);
-      }
-      this.pending.clear();
-    });
-
-    this.child.once("exit", (code, signal) => {
-      const error = new Error(`mini pi exited (code=${code ?? "null"} signal=${signal ?? "null"}). ${this.stderr.trim()}`.trim());
-      for (const pending of this.pending.values()) {
-        pending.reject(error);
-      }
-      this.pending.clear();
-    });
-  }
-
-  static start(cwd: string, args: string[], onEvent: (record: RpcRecord) => void): MiniRpcProcess {
-    const child = spawn("pi", args, {
-      cwd,
-      env: { ...process.env, PI_LOCK_NAME: makeMiniLockName(cwd) },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    return new MiniRpcProcess(child, onEvent);
-  }
-
-  send(command: RpcRecord): Promise<RpcRecord> {
-    if (this.child.exitCode !== null) {
-      return Promise.reject(new Error(`mini pi is not running. ${this.stderr.trim()}`.trim()));
-    }
-
-    const id = `mini-${this.nextRequestId++}`;
-    const payload = { ...command, id };
-
-    return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.child.stdin.write(`${JSON.stringify(payload)}\n`, (error) => {
-        if (!error) return;
-        this.pending.delete(id);
-        reject(error);
-      });
-    });
-  }
-
-  async prompt(message: string): Promise<RpcRecord> {
-    const response = await this.send(
-      this.isStreaming
-        ? { type: "prompt", message, streamingBehavior: "followUp" }
-        : { type: "prompt", message },
-    );
-    if (response.success !== true) {
-      throw new Error(response.error ?? "mini prompt failed");
-    }
-    return response;
-  }
-
-  async abort(): Promise<RpcRecord> {
-    this.wasAborted = true;
-    const response = await this.send({ type: "abort" });
-    if (response.success !== true) {
-      throw new Error(response.error ?? "mini abort failed");
-    }
-    return response;
-  }
-
-  async getState(): Promise<RpcRecord> {
-    return this.send({ type: "get_state" });
-  }
-
-  async dispose(): Promise<void> {
-    if (this.child.exitCode !== null) return;
-
-    this.child.stdin.end();
-    await Promise.race([
-      new Promise<void>((resolve) => this.child.once("exit", () => resolve())),
-      delay(1000).then(() => {
-        if (this.child.exitCode === null) {
-          this.child.kill("SIGTERM");
-        }
-      }),
-    ]);
-  }
-
-  private handleStdout(chunk: string): void {
-    this.stdoutBuffer += chunk;
-
-    while (true) {
-      const newlineIndex = this.stdoutBuffer.indexOf("\n");
-      if (newlineIndex === -1) break;
-
-      const line = this.stdoutBuffer.slice(0, newlineIndex).replace(/\r$/, "");
-      this.stdoutBuffer = this.stdoutBuffer.slice(newlineIndex + 1);
-      if (line.trim().length === 0) continue;
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      if (!isRecord(parsed)) continue;
-
-      const record = parsed as RpcRecord;
-      if (record.type === "response" && typeof record.id === "string") {
-        const pending = this.pending.get(record.id);
-        if (pending) {
-          this.pending.delete(record.id);
-          pending.resolve(record);
-        }
-        continue;
-      }
-
-      if (record.type === "agent_start") this.isStreaming = true;
-      if (record.type === "agent_end") this.isStreaming = false;
-      this.onEvent(record);
-    }
-  }
-}
-
-async function waitForMiniIdle(mini: MiniRpcProcess, signal?: AbortSignal): Promise<void> {
-  while (true) {
-    if (signal?.aborted) throw makeAbortError();
-
-    const response = await mini.getState();
-    if (response.success === true) {
-      const data = getRpcData(response);
-      const isStreaming = data?.isStreaming === true;
-      const pendingMessageCount = typeof data?.pendingMessageCount === "number" ? data.pendingMessageCount : 0;
-      mini.isStreaming = isStreaming;
-      if (!isStreaming && pendingMessageCount === 0) return;
-    }
-
-    await delay(300, signal);
-  }
-}
-
-async function runPiRpcTask(
-  task: string,
-  cwd: string,
-  baseArgs: string[],
-  simple: boolean,
-  signal: AbortSignal | undefined,
-  onUpdate: ((update: { content: Array<{ type: "text"; text: string }>; details: unknown }) => void) | undefined,
-  callbacks: MiniRpcRunCallbacks,
-): Promise<PiPrintTaskRun> {
-  let answer = "(no output)";
-  let exitCode = 0;
-  let usedArgs = baseArgs;
-
-  for (const args of buildPiPrintAttempts(simple, baseArgs)) {
-    usedArgs = args;
-    const liveState: MiniLiveState = { tools: new Map(), events: [] };
-    let lastAssistantText = "";
-    let finalStopReason: string | undefined;
-    let finalErrorMessage: string | undefined;
-
-    const publishLiveState = () => {
-      onUpdate?.({
-        content: [{ type: "text", text: formatLiveMiniTask(liveState, callbacks.isExpanded?.() === true) }],
-        details: {
-          args,
-          expanded: callbacks.isExpanded?.() === true,
-          tools: [...liveState.tools.values()],
-          events: liveState.events.slice(-MINI_LIVE_LINE_LIMIT),
-        },
-      });
-    };
-
-    const addLiveEvent = (line: string) => {
-      liveState.events.push(line);
-      publishLiveState();
-    };
-
-    const setAssistantPreview = (text: string) => {
-      liveState.assistantPreview = text;
-      publishLiveState();
-    };
-
-    const mini = MiniRpcProcess.start(cwd, args, (record) => {
-      if (record.type === "tool_execution_start") {
-        const toolCallId = typeof record.toolCallId === "string" ? record.toolCallId : `tool-${liveState.tools.size + 1}`;
-        liveState.tools.set(toolCallId, {
-          id: toolCallId,
-          name: typeof record.toolName === "string" ? record.toolName : "unknown",
-          status: "running",
-          args: record.args,
-        });
-        publishLiveState();
-        return;
-      }
-
-      if (record.type === "tool_execution_end") {
-        const toolCallId = typeof record.toolCallId === "string" ? record.toolCallId : `tool-${liveState.tools.size + 1}`;
-        const existing = liveState.tools.get(toolCallId);
-        liveState.tools.set(toolCallId, {
-          id: toolCallId,
-          name: typeof record.toolName === "string" ? record.toolName : existing?.name ?? "unknown",
-          status: record.isError === true ? "failed" : "finished",
-          args: record.args ?? existing?.args,
-          result: record.result,
-        });
-        publishLiveState();
-        return;
-      }
-
-      if (record.type === "queue_update") {
-        const followUpCount = Array.isArray(record.followUp) ? record.followUp.length : 0;
-        if (followUpCount > 0) addLiveEvent(`follow-up queue: ${followUpCount}`);
-        return;
-      }
-
-      if (record.type === "message_update") {
-        const text = getMessageText(record.message);
-        if (text) setAssistantPreview(text);
-        return;
-      }
-
-      if (record.type === "message_end") {
-        const text = getMessageText(record.message);
-        if (text) lastAssistantText = text;
-        const status = getAssistantStatus(record.message);
-        finalStopReason = status.stopReason ?? finalStopReason;
-        finalErrorMessage = status.errorMessage ?? finalErrorMessage;
-        return;
-      }
-
-      if (record.type === "agent_end") {
-        const assistant = getLastAssistantMessage(record.messages);
-        const text = getMessageText(assistant);
-        if (text) lastAssistantText = text;
-        const status = getAssistantStatus(assistant);
-        finalStopReason = status.stopReason ?? finalStopReason;
-        finalErrorMessage = status.errorMessage ?? finalErrorMessage;
-        publishLiveState();
-      }
-    });
-
-    const activeTask: ActiveMiniTask = {
-      id: `mini-${Date.now()}`,
-      task,
-      prompt: (message) => mini.prompt(message),
-      abort: () => mini.abort(),
-      publish: publishLiveState,
-    };
-
-    callbacks.onStart?.(activeTask);
-
-    try {
-      publishLiveState();
-      const response = await mini.prompt(task);
-      if (response.success !== true) {
-        throw new Error(response.error ?? "mini prompt failed");
-      }
-
-      await delay(100, signal);
-      await waitForMiniIdle(mini, signal);
-
-      answer = finalErrorMessage ?? (lastAssistantText || "(no output)");
-      exitCode = finalStopReason === "error" || finalStopReason === "aborted" || mini.wasAborted ? 1 : 0;
-    } catch (err) {
-      if (err instanceof Error && err.name === "AbortError") {
-        throw err;
-      }
-      answer = err instanceof Error ? err.message : String(err);
-      exitCode = 1;
-    } finally {
-      callbacks.onDone?.(activeTask);
-      await mini.dispose();
-    }
-
-    if (mini.wasAborted || !simple || exitCode === 0) break;
-  }
-
-  return { task, answer, exitCode, args: usedArgs };
-}
-
 export default function (pi: ExtensionAPI) {
-  let activeMiniTask: ActiveMiniTask | undefined;
-  let miniTaskExpanded = false;
-
   pi.on("session_start", async (_event, ctx) => {
     if (!isTmuxAvailable()) {
-      ctx.ui.notify(
-        "tmux extension: Not running in tmux session (TMUX env not set)",
-        "warning",
-      );
+      ctx.ui.notify("tmux extension: Not running in tmux session (TMUX env not set)", "warning");
     }
   });
 
   pi.registerTool({
     name: "tmux-bash",
     label: "Tmux Bash",
-    description:
-      "Create a new tmux pane with the given lock name and execute a command. Use ONLY for long-running processes (servers, watch commands, builds >30s).",
+    description: "Create a new tmux pane with the given lock name and execute a command. Use ONLY for long-running processes (servers, watch commands, builds >30s).",
     parameters: tmuxBashParams,
     async execute(_toolCallId, params, signal) {
-      const args = params.command
-        ? ["bash", params.name, params.command]
-        : ["bash", params.name];
+      const args = params.command ? ["bash", params.name, params.command] : ["bash", params.name];
       const result = await runTmux(pi, args, signal);
       const text = outputText(result.stdout, result.stderr);
-
-      if (result.code !== 0) {
-        throw new Error(text);
-      }
-
-      return {
-        content: [{ type: "text", text }],
-        details: { code: result.code, args },
-      };
+      if (result.code !== 0) throw new Error(text);
+      return { content: [{ type: "text", text }], details: { code: result.code, args } };
     },
   });
 
   pi.registerTool({
     name: "tmux-capture",
     label: "Tmux Capture",
-    description:
-      "Capture output from a tmux pane by lock name or pane id. By default, returns only new lines since the last capture (up to 500). Pass lines: <number> to get the last N lines regardless.",
+    description: "Capture output from a tmux pane by lock name or pane id. By default, returns only new lines since the last capture (up to 500). Pass lines: <number> to get the last N lines regardless.",
     parameters: tmuxCaptureParams,
     async execute(_toolCallId, params, signal) {
       const explicitLines = params.lines;
@@ -705,168 +85,96 @@ export default function (pi: ExtensionAPI) {
       let resultCode: number;
       let resultArgs: string[];
 
-      /** Helper: get current line count from tmux */
       const getLineCount = async () => {
-        const r = await runTmux(pi, ["line-count", params.name], signal);
-        if (r.code !== 0) return undefined;
-        const n = parseInt(r.stdout.trim(), 10);
-        return isNaN(n) ? undefined : n;
+        const result = await runTmux(pi, ["line-count", params.name], signal);
+        if (result.code !== 0) return undefined;
+        const count = parseInt(result.stdout.trim(), 10);
+        return Number.isNaN(count) ? undefined : count;
       };
 
-      /** Helper: do a normal capture of N lines */
-      const doCapture = async (n: number) => {
-        const args = ["capture", params.name, String(n)];
-        const r = await runTmux(pi, args, signal);
-        return { args, result: r };
+      const doCapture = async (lines: number) => {
+        const args = ["capture", params.name, String(lines)];
+        const result = await runTmux(pi, args, signal);
+        return { args, result };
       };
 
-      /** Helper: update stored line count */
       const updateState = async () => {
-        const lc = await getLineCount();
-        if (lc !== undefined) captureState.set(stateKey, lc);
+        const lineCount = await getLineCount();
+        if (lineCount !== undefined) captureState.set(stateKey, lineCount);
       };
 
       if (explicitLines !== undefined) {
-        // Explicit lines: old behavior, return last N lines
-        const { args, result } = await doCapture(explicitLines);
-        resultArgs = args;
-        text = outputText(result.stdout, result.stderr);
-        resultCode = result.code;
-
-        if (resultCode !== 0) {
-          throw new Error(text);
-        }
-
+        const captured = await doCapture(explicitLines);
+        resultArgs = captured.args;
+        text = outputText(captured.result.stdout, captured.result.stderr);
+        resultCode = captured.result.code;
+        if (resultCode !== 0) throw new Error(text);
         await updateState();
       } else {
-        // New-only mode (default)
         const currentTotal = await getLineCount();
-
         if (currentTotal === undefined) {
-          // Can't get line count — fallback to normal capture
-          const { args, result } = await doCapture(maxLines);
-          resultArgs = args;
-          text = outputText(result.stdout, result.stderr);
-          resultCode = result.code;
-
-          if (resultCode !== 0) {
-            throw new Error(text);
-          }
+          const captured = await doCapture(maxLines);
+          resultArgs = captured.args;
+          text = outputText(captured.result.stdout, captured.result.stderr);
+          resultCode = captured.result.code;
+          if (resultCode !== 0) throw new Error(text);
         } else {
-          const prev = captureState.get(stateKey);
-
-          if (prev === undefined || currentTotal < prev) {
-            // No prior state or pane was reset — full capture
-            const { args, result } = await doCapture(maxLines);
-            resultArgs = args;
-            text = outputText(result.stdout, result.stderr);
-            resultCode = result.code;
-
-            if (resultCode !== 0) {
-              throw new Error(text);
-            }
+          const previous = captureState.get(stateKey);
+          if (previous === undefined || currentTotal < previous) {
+            const captured = await doCapture(maxLines);
+            resultArgs = captured.args;
+            text = outputText(captured.result.stdout, captured.result.stderr);
+            resultCode = captured.result.code;
+            if (resultCode !== 0) throw new Error(text);
           } else {
-            const delta = currentTotal - prev;
-
+            const delta = currentTotal - previous;
             if (delta === 0) {
               text = "(no new output)";
               resultCode = 0;
               resultArgs = ["line-count", params.name];
-
-              // Still set up watch if requested, then return
-              let watchLock: string | undefined;
-              if (params.watch) {
-                const watchArgs = ["watch", params.name, params.watch];
-                const watchResult = await runTmux(pi, watchArgs, signal);
-                const watchText = watchResult.stdout.trim();
-                if (watchResult.code !== 0) {
-                  text += `\n\n⚠️ Watch setup failed: ${outputText(watchResult.stdout, watchResult.stderr)}`;
-                } else {
-                  const match = watchText.match(/lock '([^']+)'/);
-                  watchLock = match?.[1];
-                  text += `\n\n${watchText}`;
-                }
-              }
-
-              return {
-                content: [{ type: "text", text }],
-                details: { code: resultCode, args: resultArgs, watchLock },
-              };
-            }
-
-            // Capture exactly the new lines (capped at maxLines)
-            const captureLines = Math.min(delta, maxLines);
-            const { args, result } = await doCapture(captureLines);
-            resultArgs = args;
-            resultCode = result.code;
-
-            if (resultCode !== 0) {
-              text = outputText(result.stdout, result.stderr);
-              throw new Error(text);
-            }
-
-            if (delta > maxLines) {
-              text = `⚠️ ${delta} new lines, showing last ${maxLines}. Use lines: ${delta} to see all.\n\n${outputText(result.stdout, result.stderr)}`;
             } else {
-              text = outputText(result.stdout, result.stderr);
+              const captureLines = Math.min(delta, maxLines);
+              const captured = await doCapture(captureLines);
+              resultArgs = captured.args;
+              resultCode = captured.result.code;
+              if (resultCode !== 0) throw new Error(outputText(captured.result.stdout, captured.result.stderr));
+              text = delta > maxLines
+                ? `⚠️ ${delta} new lines, showing last ${maxLines}. Use lines: ${delta} to see all.\n\n${outputText(captured.result.stdout, captured.result.stderr)}`
+                : outputText(captured.result.stdout, captured.result.stderr);
             }
-
-            if (!text) text = "(no new output)";
-            resultCode = 0;
           }
         }
-
         await updateState();
       }
 
-      // Set up a watch if requested
       let watchLock: string | undefined;
       if (params.watch) {
         const watchArgs = ["watch", params.name, params.watch];
         const watchResult = await runTmux(pi, watchArgs, signal);
         const watchText = watchResult.stdout.trim();
-
         if (watchResult.code !== 0) {
           text += `\n\n⚠️ Watch setup failed: ${outputText(watchResult.stdout, watchResult.stderr)}`;
         } else {
-          // Extract the lock name from the watch output
-          const match = watchText.match(/lock '([^']+)'/);
-          watchLock = match?.[1];
+          watchLock = watchText.match(/lock '([^']+)'/)?.[1];
           text += `\n\n${watchText}`;
         }
       }
 
-      return {
-        content: [{ type: "text", text }],
-        details: { code: resultCode, args: resultArgs!, watchLock },
-      };
+      return { content: [{ type: "text", text }], details: { code: resultCode, args: resultArgs, watchLock } };
     },
   });
 
   pi.registerTool({
     name: "tmux-send",
     label: "Tmux Send",
-    description:
-      "Send text or keys to a tmux pane by lock name or pane id. For workflows that wait on completion, pair with semaphore_wait on the same lock name.",
+    description: "Send text or keys to a tmux pane by lock name or pane id. For workflows that wait on completion, pair with semaphore_wait on the same lock name.",
     parameters: tmuxSendParams,
     async execute(_toolCallId, params, signal) {
-      const args = [
-        "send",
-        params.name,
-        ...(params.enter === false ? ["--no-enter"] : []),
-        params.text,
-      ];
+      const args = ["send", params.name, ...(params.enter === false ? ["--no-enter"] : []), params.text];
       const result = await runTmux(pi, args, signal);
       const text = outputText(result.stdout, result.stderr);
-
-      if (result.code !== 0) {
-        throw new Error(text);
-      }
-
-      return {
-        content: [{ type: "text", text }],
-        details: { code: result.code, args },
-      };
+      if (result.code !== 0) throw new Error(text);
+      return { content: [{ type: "text", text }], details: { code: result.code, args } };
     },
   });
 
@@ -880,154 +188,8 @@ export default function (pi: ExtensionAPI) {
       const args = ["kill", params.name];
       const result = await runTmux(pi, args, signal);
       const text = outputText(result.stdout, result.stderr);
-
-      if (result.code !== 0) {
-        throw new Error(text);
-      }
-
-      return {
-        content: [{ type: "text", text }],
-        details: { code: result.code, args },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "tmux-coding-agent",
-    label: "Tmux Coding Agent",
-    description:
-      "Spawn a pi coding agent in a tmux pane using the given lock name and folder. " +
-      "Send work via tmux-send('<name>'), wait for completion via semaphore_wait('<name>').",
-    parameters: tmuxCodingAgentParams,
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-      const args = ["coding-agent", params.name, params.folder];
-      if (params.contextAlertPercent !== undefined) {
-        args.push("--context-alert", String(params.contextAlertPercent));
-      }
-      if (params.piArgs) {
-        args.push(params.piArgs);
-      } else {
-        args.push(...getToolModelCliArgs(ctx));
-      }
-
-      const result = await runTmux(pi, args, signal);
-      const text = outputText(result.stdout, result.stderr);
-
-      if (result.code !== 0) {
-        throw new Error(text);
-      }
-
-      return {
-        content: [{ type: "text", text }],
-        details: { code: result.code, args },
-      };
-    },
-  });
-
-  pi.registerTool({
-    name: "minitask",
-    label: "Minitask",
-    description:
-      "Run one isolated small task or question about this project/environment with an isolated pi RPC process. " +
-      "Uses /tool-model when configured. " +
-      "For multiple independent tasks, call this tool multiple times in parallel; do not put dependent followups here because each run has no shared context.",
-    parameters: minitaskParams,
-    renderCall(args) {
-      const payloadValue = args.task === undefined
-        ? args
-        : args.simple === true
-          ? { task: args.task, simple: true }
-          : args.task;
-      const payload = JSON.stringify(payloadValue, null, 2) ?? String(payloadValue);
-      const lines = ["minitask(", ...payload.split("\n").map((line) => `  ${line}`), ")"];
-
-      return {
-        render: (contentWidth: number) => lines.flatMap((line) => wrapTextWithAnsi(line, contentWidth)),
-        invalidate: () => {
-          /* no-op */
-        },
-      };
-    },
-    async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const toolModelArgs = getToolModelCliArgs(ctx);
-      const result = await runPiRpcTask(
-        params.task,
-        ctx.cwd,
-        ["--mode", "rpc", ...toolModelArgs],
-        params.simple === true && toolModelArgs.length === 0,
-        signal,
-        onUpdate,
-        {
-          isExpanded: () => miniTaskExpanded,
-          onStart(task) {
-            activeMiniTask = task;
-          },
-          onDone(task) {
-            if (activeMiniTask?.id === task.id) {
-              activeMiniTask = undefined;
-            }
-          },
-        },
-      );
-      const text = formatMinitaskResult(result);
-
-      return {
-        content: [{ type: "text", text }],
-        details: {
-          simple: params.simple === true,
-          result,
-          args: result.args,
-        },
-      };
-    },
-  });
-
-  pi.registerCommand("expand-minitask", {
-    description: "Toggle expanded live rendering for active minitask tools.",
-    handler: async (_args, ctx) => {
-      miniTaskExpanded = !miniTaskExpanded;
-      activeMiniTask?.publish();
-      ctx.ui.notify(`Minitask expanded: ${miniTaskExpanded ? "on" : "off"}`, "info");
-    },
-  });
-
-  pi.registerCommand("prompt-mini", {
-    description: "Send a prompt to the active minitask RPC process. Usage: /prompt-mini <message>",
-    handler: async (args, ctx) => {
-      const message = (args ?? "").trim();
-      if (!message) {
-        ctx.ui.notify("Usage: /prompt-mini <message>", "warning");
-        return;
-      }
-
-      if (!activeMiniTask) {
-        ctx.ui.notify("No active minitask", "warning");
-        return;
-      }
-
-      try {
-        await activeMiniTask.prompt(message);
-        ctx.ui.notify("Sent prompt to active minitask", "info");
-      } catch (err) {
-        ctx.ui.notify(err instanceof Error ? err.message : String(err), "error");
-      }
-    },
-  });
-
-  pi.registerCommand("abort-mini", {
-    description: "Abort the active minitask RPC process.",
-    handler: async (_args, ctx) => {
-      if (!activeMiniTask) {
-        ctx.ui.notify("No active minitask", "warning");
-        return;
-      }
-
-      try {
-        await activeMiniTask.abort();
-        ctx.ui.notify("Aborted active minitask", "info");
-      } catch (err) {
-        ctx.ui.notify(err instanceof Error ? err.message : String(err), "error");
-      }
+      if (result.code !== 0) throw new Error(text);
+      return { content: [{ type: "text", text }], details: { code: result.code, args } };
     },
   });
 
@@ -1035,8 +197,7 @@ export default function (pi: ExtensionAPI) {
     description: "Clean up semaphore lock files and state for dead tmux panes",
     handler: async (_args, ctx) => {
       const result = await runTmux(pi, ["clear-stale"]);
-      const text = outputText(result.stdout, result.stderr);
-      ctx.ui.notify(text, result.code === 0 ? "info" : "error");
+      ctx.ui.notify(outputText(result.stdout, result.stderr), result.code === 0 ? "info" : "error");
     },
   });
 
@@ -1044,8 +205,8 @@ export default function (pi: ExtensionAPI) {
     description: "List active tmux panes",
     handler: async (_args, ctx) => {
       const result = await runTmux(pi, ["list"]);
-      const text = outputText(result.stdout, result.stderr);
-      ctx.ui.notify(text, result.code === 0 ? "info" : "error");
+      ctx.ui.notify(outputText(result.stdout, result.stderr), result.code === 0 ? "info" : "error");
     },
   });
+
 }

@@ -1,0 +1,615 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { runTmux } from "./tmux-helpers.ts";
+
+const WORKER_ROOT_PREFIX = "pi-ant-worker-";
+const WORKER_RUN_COMMAND = "worker-run";
+const FINISH_CALL_NOW_COMMAND = "finish-call-now";
+const RESULT_POLL_INTERVAL_MS = 250;
+const PROGRESS_UPDATE_INTERVAL_MS = 5000;
+const LOCK_DIR = "/tmp/pi-semaphores";
+const MAX_RETRYABLE_ERRORS = 3;
+
+const RETROSPECTIVE_PROMPT = [
+  "The main result has already been saved for the parent. Do not repeat it, do not continue the task, and do not call tools.",
+  "Return only substantial observations you noticed outside of the given task, or substantial things you did not mention regarding it, that are worth taking into account or fixing in the long run.",
+  "If there is nothing substantial, return exactly: everything was ok",
+].join("\n");
+
+const RETRYABLE_ERROR_PATTERN =
+  /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|connection.?error|connection.?refused|websocket|other side closed|fetch failed|upstream.?connect|reset before headers|terminated|retry delay/i;
+
+export interface WorkerRequestFile {
+  id: string;
+  task: string;
+  resultPath: string;
+  retrospective?: boolean;
+  closeWhenDone: boolean;
+  statusPath?: string;
+}
+
+export interface WorkerResultFile {
+  id: string;
+  result: string;
+  retrospective?: string;
+  isError?: boolean;
+  sessionFile?: string;
+  timestamp: string;
+  contextPercent?: number | null;
+}
+
+export interface WorkerStatusFile {
+  id?: string;
+  state: "idle" | "running" | "retrospective" | "error" | "closed";
+  resultPath?: string;
+  sessionFile?: string;
+  contextPercent?: number | null;
+  updatedAt: string;
+}
+
+export interface WorkerArtifactPaths {
+  artifactDir: string;
+  requestPath: string;
+  resultPath: string;
+  statusPath: string;
+  promptPath: string;
+  resultMarkdownPath: string;
+  retrospectiveMarkdownPath: string;
+}
+
+interface ActiveWorkerRequest {
+  request: WorkerRequestFile;
+  priorTools: string[];
+  mainResult?: string;
+  retryableErrorCount: number;
+}
+
+interface WorkerToolDetails {
+  id: string;
+  lockName: string;
+  requestedLockName: string;
+  resultPath: string;
+  artifactDir: string;
+  requestPath: string;
+  resultMarkdownPath: string;
+  retrospectiveMarkdownPath?: string;
+  sessionFile: string;
+  task: string;
+  retrospective: boolean;
+  elapsedMs?: number;
+  status?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isFreshWorkerSession(ctx: ExtensionContext): boolean {
+  return ctx.sessionManager.getBranch().some((entry) => {
+    return isRecord(entry)
+      && entry.type === "custom"
+      && (entry.customType === "pi-ant:coding-agent" || entry.customType === "pi-ant:minitask");
+  });
+}
+
+function stripSubagentTools(tools: string[]): string[] {
+  return tools.filter((tool) => tool !== "call" && tool !== "coding-agent" && tool !== "minitask");
+}
+
+function isWorkerRequestFile(value: unknown): value is WorkerRequestFile {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.task === "string"
+    && typeof value.resultPath === "string"
+    && typeof value.closeWhenDone === "boolean"
+    && (value.retrospective === undefined || typeof value.retrospective === "boolean")
+    && (value.statusPath === undefined || typeof value.statusPath === "string");
+}
+
+function isWorkerResultFile(value: unknown): value is WorkerResultFile {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.result === "string"
+    && typeof value.timestamp === "string"
+    && (value.retrospective === undefined || typeof value.retrospective === "string")
+    && (value.isError === undefined || typeof value.isError === "boolean")
+    && (value.sessionFile === undefined || typeof value.sessionFile === "string")
+    && (value.contextPercent === undefined || typeof value.contextPercent === "number" || value.contextPercent === null);
+}
+
+function latestAssistantMessage(messages: AgentEndEvent["messages"]): Extract<AgentEndEvent["messages"][number], { role: "assistant" }> | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.role === "assistant") return message;
+  }
+  return undefined;
+}
+
+function assistantTextContent(message: Extract<AgentEndEvent["messages"][number], { role: "assistant" }>): string | undefined {
+  const text = message.content
+    .filter((item) => item.type === "text")
+    .map((item) => item.text)
+    .join("")
+    .trim();
+  return text || undefined;
+}
+
+function assistantMessageText(message: Extract<AgentEndEvent["messages"][number], { role: "assistant" }>): string {
+  return assistantTextContent(message) ?? message.errorMessage ?? `Assistant stopped with reason '${message.stopReason}' before returning a final worker result.`;
+}
+
+function isRetryableAssistantFailure(message: Extract<AgentEndEvent["messages"][number], { role: "assistant" }>): boolean {
+  return message.stopReason === "error" && typeof message.errorMessage === "string" && RETRYABLE_ERROR_PATTERN.test(message.errorMessage);
+}
+
+function getContextPercent(ctx: ExtensionContext): number | null | undefined {
+  return ctx.getContextUsage()?.percent;
+}
+
+function writeTextArtifact(filePath: string, content: string): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(filePath, content, { encoding: "utf8", mode: 0o600 });
+}
+
+function atomicWriteJsonNoOverwrite(filePath: string, payload: unknown): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(payload)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  try {
+    fs.linkSync(tmp, filePath);
+  } catch (error) {
+    if (isRecord(error) && error.code === "EEXIST") {
+      throw new Error(`Worker result already exists: ${filePath}`);
+    }
+    throw error;
+  } finally {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // ignore cleanup failure
+    }
+  }
+}
+
+function atomicWriteJson(filePath: string, payload: unknown): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const tmp = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(payload)}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(tmp, filePath);
+}
+
+function appendRetrospective(result: string, retrospective: string): string {
+  return [result.trimEnd(), "", "---", "", "Retrospective:", retrospective.trim()].join("\n");
+}
+
+function parseFinishText(args: string | undefined): string {
+  const trimmed = (args ?? "").trim();
+  if (trimmed.length < 2) return trimmed;
+  const first = trimmed[0];
+  const last = trimmed[trimmed.length - 1];
+  if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+export function makeWorkerId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export function sanitizeWorkerName(name: string): string {
+  return name.replace(/[^A-Za-z0-9._:-]/g, "");
+}
+
+export function createWorkerArtifacts(id: string): WorkerArtifactPaths {
+  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), WORKER_ROOT_PREFIX));
+  fs.chmodSync(artifactDir, 0o700);
+  return {
+    artifactDir,
+    requestPath: path.join(artifactDir, "request.json"),
+    resultPath: path.join(artifactDir, "result.json"),
+    statusPath: path.join(artifactDir, "status.json"),
+    promptPath: path.join(artifactDir, "prompt.md"),
+    resultMarkdownPath: path.join(artifactDir, "result.md"),
+    retrospectiveMarkdownPath: path.join(artifactDir, "retrospective.md"),
+  };
+}
+
+export function writeWorkerRequest(paths: WorkerArtifactPaths, request: WorkerRequestFile): void {
+  atomicWriteJson(paths.requestPath, request);
+  fs.writeFileSync(paths.promptPath, `/worker-run ${paths.requestPath}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+export function readWorkerStatus(statusPath: string): WorkerStatusFile | undefined {
+  if (!fs.existsSync(statusPath)) return undefined;
+  const parsed = JSON.parse(fs.readFileSync(statusPath, "utf8")) as unknown;
+  if (!isRecord(parsed) || typeof parsed.state !== "string" || typeof parsed.updatedAt !== "string") return undefined;
+  return parsed as unknown as WorkerStatusFile;
+}
+
+export function writeWorkerStatus(statusPath: string | undefined, status: Omit<WorkerStatusFile, "updatedAt">): void {
+  if (!statusPath) return;
+  atomicWriteJson(statusPath, { ...status, updatedAt: new Date().toISOString() });
+}
+
+export function parseActualLockName(text: string, requestedLockName: string): string {
+  const machineMatch = text.match(/^PI_TMUX_LOCK_NAME=([^\s]+)$/m);
+  if (machineMatch) return machineMatch[1];
+  const statusMatch = text.match(/Started tmux fork '([^']+)'/);
+  if (statusMatch) return statusMatch[1];
+  return requestedLockName;
+}
+
+export function formatWorkerResult(result: WorkerResultFile): string {
+  if (result.retrospective !== undefined) return appendRetrospective(result.result, result.retrospective);
+  return result.result;
+}
+
+export function parseWorkerResult(raw: string, resultPath: string, expectedId: string): WorkerResultFile {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(`Invalid worker result JSON at ${resultPath}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!isWorkerResultFile(parsed)) {
+    throw new Error(`Invalid worker result shape at ${resultPath}`);
+  }
+  if (parsed.id !== expectedId) {
+    throw new Error(`Worker result id mismatch at ${resultPath}: expected ${expectedId}, got ${parsed.id}`);
+  }
+  return parsed;
+}
+
+export async function captureWorkerOutput(pi: ExtensionAPI, lockName: string, lines = 80): Promise<string> {
+  try {
+    const result = await runTmux(pi, ["capture", lockName, String(lines)]);
+    const text = result.stdout.trimEnd() || result.stderr.trimEnd();
+    return text || "(no tmux output)";
+  } catch (error) {
+    return `Could not capture tmux output for ${lockName}: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+export async function waitForWorkerReady(pi: ExtensionAPI, lockName: string, timeoutMs = 10_000): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const output = await captureWorkerOutput(pi, lockName, 30);
+    if (/\bpi v\d+\.\d+\.\d+\b|Model scope:|Ask it how to use or extend Pi/.test(output)) return;
+    await delay(300);
+  }
+}
+
+function isLockFinished(name: string): boolean {
+  return !fs.existsSync(path.join(LOCK_DIR, name));
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function waitForWorkerResult(
+  pi: ExtensionAPI,
+  options: {
+    id: string;
+    actualLockName: string;
+    requestedLockName: string;
+    paths: WorkerArtifactPaths;
+    sessionFile: string;
+    task: string;
+    retrospective: boolean;
+    allowIdle?: boolean;
+    onUpdate?: (partial: { content: Array<{ type: "text"; text: string }>; details: WorkerToolDetails }) => void;
+  },
+): Promise<{ result: WorkerResultFile; details: WorkerToolDetails }> {
+  const startedAt = Date.now();
+  let lastProgressAt = 0;
+
+  while (true) {
+    if (fs.existsSync(options.paths.resultPath)) {
+      const result = parseWorkerResult(fs.readFileSync(options.paths.resultPath, "utf8"), options.paths.resultPath, options.id);
+      return {
+        result,
+        details: {
+          id: options.id,
+          lockName: options.actualLockName,
+          requestedLockName: options.requestedLockName,
+          resultPath: options.paths.resultPath,
+          artifactDir: options.paths.artifactDir,
+          requestPath: options.paths.requestPath,
+          resultMarkdownPath: options.paths.resultMarkdownPath,
+          ...(options.retrospective ? { retrospectiveMarkdownPath: options.paths.retrospectiveMarkdownPath } : {}),
+          sessionFile: options.sessionFile,
+          task: options.task,
+          retrospective: options.retrospective,
+          elapsedMs: Date.now() - startedAt,
+          status: "finished",
+        },
+      };
+    }
+
+    const elapsedMs = Date.now() - startedAt;
+    if (isLockFinished(options.actualLockName)) {
+      if (options.allowIdle) {
+        const paneResult = await runTmux(pi, ["pane-id", options.actualLockName]);
+        if (paneResult.code === 0) {
+          await delay(RESULT_POLL_INTERVAL_MS);
+          continue;
+        }
+      }
+
+      if (fs.existsSync(options.paths.resultPath)) {
+        const result = parseWorkerResult(fs.readFileSync(options.paths.resultPath, "utf8"), options.paths.resultPath, options.id);
+        return {
+          result,
+          details: {
+            id: options.id,
+            lockName: options.actualLockName,
+            requestedLockName: options.requestedLockName,
+            resultPath: options.paths.resultPath,
+            artifactDir: options.paths.artifactDir,
+            requestPath: options.paths.requestPath,
+            resultMarkdownPath: options.paths.resultMarkdownPath,
+            ...(options.retrospective ? { retrospectiveMarkdownPath: options.paths.retrospectiveMarkdownPath } : {}),
+            sessionFile: options.sessionFile,
+            task: options.task,
+            retrospective: options.retrospective,
+            elapsedMs,
+            status: "finished",
+          },
+        };
+      }
+      const output = await captureWorkerOutput(pi, options.actualLockName);
+      throw new Error([
+        "Worker exited before writing a final result.",
+        `tmux lock: ${options.actualLockName}`,
+        `session: ${options.sessionFile}`,
+        `result path: ${options.paths.resultPath}`,
+        "",
+        "Last tmux output:",
+        output,
+      ].join("\n"));
+    }
+
+    if (options.onUpdate && elapsedMs - lastProgressAt >= PROGRESS_UPDATE_INTERVAL_MS) {
+      lastProgressAt = elapsedMs;
+      const output = await captureWorkerOutput(pi, options.actualLockName, 12);
+      options.onUpdate({
+        content: [{ type: "text", text: [`Waiting for worker ${options.actualLockName} (${Math.floor(elapsedMs / 1000)}s elapsed).`, `Session: ${options.sessionFile}`, "", output].join("\n") }],
+        details: {
+          id: options.id,
+          lockName: options.actualLockName,
+          requestedLockName: options.requestedLockName,
+          resultPath: options.paths.resultPath,
+          artifactDir: options.paths.artifactDir,
+          requestPath: options.paths.requestPath,
+          resultMarkdownPath: options.paths.resultMarkdownPath,
+          ...(options.retrospective ? { retrospectiveMarkdownPath: options.paths.retrospectiveMarkdownPath } : {}),
+          sessionFile: options.sessionFile,
+          task: options.task,
+          retrospective: options.retrospective,
+          elapsedMs,
+          status: "waiting",
+        },
+      });
+    }
+
+    await delay(RESULT_POLL_INTERVAL_MS);
+  }
+}
+
+function writeFinalResult(ctx: ExtensionContext, active: ActiveWorkerRequest, result: string, isError = false, retrospective?: string): void {
+  const contextPercent = getContextPercent(ctx);
+  const paths = {
+    resultMarkdownPath: path.join(path.dirname(active.request.resultPath), "result.md"),
+    retrospectiveMarkdownPath: path.join(path.dirname(active.request.resultPath), "retrospective.md"),
+  };
+  writeTextArtifact(paths.resultMarkdownPath, result);
+  if (retrospective !== undefined) writeTextArtifact(paths.retrospectiveMarkdownPath, retrospective);
+
+  const payload: WorkerResultFile = {
+    id: active.request.id,
+    result,
+    retrospective,
+    isError,
+    sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
+    timestamp: new Date().toISOString(),
+    contextPercent: contextPercent ?? null,
+  };
+  atomicWriteJsonNoOverwrite(active.request.resultPath, payload);
+  writeWorkerStatus(active.request.statusPath, {
+    id: active.request.id,
+    state: active.request.closeWhenDone ? "closed" : "idle",
+    resultPath: active.request.resultPath,
+    sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
+    contextPercent: contextPercent ?? null,
+  });
+}
+
+export default function workerFrameExtension(pi: ExtensionAPI): void {
+  let activeRequest: ActiveWorkerRequest | undefined;
+
+  function refreshFreshWorkerTools(ctx: ExtensionContext): void {
+    if (isFreshWorkerSession(ctx)) {
+      pi.setActiveTools(stripSubagentTools(pi.getActiveTools()));
+    }
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
+    refreshFreshWorkerTools(ctx);
+  });
+
+  pi.on("session_tree", async (_event, ctx) => {
+    refreshFreshWorkerTools(ctx);
+  });
+
+  pi.registerCommand(WORKER_RUN_COMMAND, {
+    description: "Internal worker command. Usage: /worker-run <request.json>",
+    handler: async (args, ctx) => {
+      await ctx.waitForIdle();
+      const requestPath = args.trim();
+      if (!requestPath) {
+        ctx.ui.notify("Usage: /worker-run <request.json>", "warning");
+        return;
+      }
+      if (activeRequest) {
+        ctx.ui.notify("Worker is already running a request.", "warning");
+        return;
+      }
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(fs.readFileSync(requestPath, "utf8"));
+      } catch (error) {
+        ctx.ui.notify(`Could not read worker request: ${error instanceof Error ? error.message : String(error)}`, "error");
+        return;
+      }
+      if (!isWorkerRequestFile(parsed)) {
+        ctx.ui.notify("Invalid worker request file.", "error");
+        return;
+      }
+
+      activeRequest = {
+        request: parsed,
+        priorTools: pi.getActiveTools(),
+        retryableErrorCount: 0,
+      };
+      writeWorkerStatus(parsed.statusPath, {
+        id: parsed.id,
+        state: "running",
+        resultPath: parsed.resultPath,
+        sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
+        contextPercent: getContextPercent(ctx) ?? null,
+      });
+      pi.sendUserMessage(parsed.task);
+    },
+  });
+
+  pi.registerCommand(FINISH_CALL_NOW_COMMAND, {
+    description: "Immediately finish the active worker with a message, bypassing retrospective. Usage: /finish-call-now \"message\"",
+    handler: async (args, ctx) => {
+      const message = parseFinishText(args);
+      if (!message) {
+        ctx.ui.notify("Usage: /finish-call-now \"message\"", "warning");
+        return;
+      }
+      if (!ctx.isIdle()) {
+        ctx.abort();
+        await ctx.waitForIdle();
+      } else {
+        await ctx.waitForIdle();
+      }
+      if (!activeRequest) {
+        ctx.ui.notify("No active worker request to finish.", "warning");
+        return;
+      }
+      writeFinalResult(ctx, activeRequest, message, false, activeRequest.request.retrospective ? "retrospective bypassed by /finish-call-now." : undefined);
+      const shouldClose = activeRequest.request.closeWhenDone;
+      activeRequest = undefined;
+      ctx.ui.notify("Finished worker request with override result.", "info");
+      if (shouldClose) ctx.shutdown();
+    },
+  });
+
+  pi.on("agent_end", async (event, ctx) => {
+    if (!activeRequest || fs.existsSync(activeRequest.request.resultPath)) return;
+    const message = latestAssistantMessage(event.messages);
+    if (!message) return;
+
+    if (activeRequest.mainResult !== undefined) {
+      if (message.stopReason === "aborted" || message.stopReason === "toolUse") return;
+      const retrospective = message.stopReason === "stop"
+        ? (assistantTextContent(message) ?? "retrospective unavailable: assistant returned no retrospective text.")
+        : `retrospective unavailable: assistant stopped with reason '${message.stopReason}'. ${assistantMessageText(message)}`;
+      try {
+        writeFinalResult(ctx, activeRequest, activeRequest.mainResult, false, retrospective);
+        pi.setActiveTools(activeRequest.priorTools);
+        const shouldClose = activeRequest.request.closeWhenDone;
+        activeRequest = undefined;
+        ctx.ui.notify("Finished worker request with result and retrospective.", "info");
+        if (shouldClose) ctx.shutdown();
+      } catch (error) {
+        ctx.ui.notify(`Failed to write worker retrospective result: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+      return;
+    }
+
+    if (message.stopReason === "stop") {
+      const result = assistantTextContent(message);
+      if (!result) {
+        try {
+          writeFinalResult(ctx, activeRequest, "Worker stopped without final result text.", true);
+          const shouldClose = activeRequest.request.closeWhenDone;
+          activeRequest = undefined;
+          if (shouldClose) ctx.shutdown();
+        } catch (error) {
+          ctx.ui.notify(`Failed to report empty worker result: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+        return;
+      }
+
+      if (activeRequest.request.retrospective === true) {
+        activeRequest.mainResult = result;
+        writeTextArtifact(path.join(path.dirname(activeRequest.request.resultPath), "result.md"), result);
+        writeWorkerStatus(activeRequest.request.statusPath, {
+          id: activeRequest.request.id,
+          state: "retrospective",
+          resultPath: activeRequest.request.resultPath,
+          sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
+          contextPercent: getContextPercent(ctx) ?? null,
+        });
+        pi.setActiveTools([]);
+        pi.sendUserMessage(RETROSPECTIVE_PROMPT, { deliverAs: "followUp" });
+        return;
+      }
+
+      try {
+        writeFinalResult(ctx, activeRequest, result);
+        const shouldClose = activeRequest.request.closeWhenDone;
+        activeRequest = undefined;
+        ctx.ui.notify("Finished worker request with result.", "info");
+        if (shouldClose) ctx.shutdown();
+      } catch (error) {
+        ctx.ui.notify(`Failed to write worker result: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+      return;
+    }
+
+    if (isRetryableAssistantFailure(message)) {
+      activeRequest.retryableErrorCount++;
+      if (activeRequest.retryableErrorCount < MAX_RETRYABLE_ERRORS) return;
+    }
+
+    if (message.stopReason === "aborted") return;
+
+    try {
+      writeFinalResult(ctx, activeRequest, assistantMessageText(message), true);
+      const shouldClose = activeRequest.request.closeWhenDone;
+      activeRequest = undefined;
+      if (shouldClose) ctx.shutdown();
+    } catch (error) {
+      ctx.ui.notify(`Failed to write worker failure result: ${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+  });
+
+  pi.on("turn_end", async (_event, ctx) => {
+    if (!activeRequest) return;
+    writeWorkerStatus(activeRequest.request.statusPath, {
+      id: activeRequest.request.id,
+      state: activeRequest.mainResult === undefined ? "running" : "retrospective",
+      resultPath: activeRequest.request.resultPath,
+      sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
+      contextPercent: getContextPercent(ctx) ?? null,
+    });
+  });
+
+  pi.on("before_agent_start", async (event) => {
+    if (!activeRequest) return undefined;
+    if (activeRequest.mainResult !== undefined) {
+      return { systemPrompt: `${event.systemPrompt}\n\nYou are in the retrospective phase of a worker request. The main result is already saved for the parent. Do not call tools and do not continue the original task. Answer only the retrospective prompt.` };
+    }
+    return { systemPrompt: `${event.systemPrompt}\n\nYou are running a structured worker request. When the task is complete, answer with only the exact result text for the caller, or the cause of failure. That final assistant message is returned to the parent.` };
+  });
+}
