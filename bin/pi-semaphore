@@ -293,7 +293,7 @@ cmd_agent_start() {
   rm -f -- "$(idle_path "$safe")"
 
   # If lock already exists with our value (same pane), reuse it.
-  # This happens when tmux-coding-agent creates the lock before pi starts.
+  # This happens when tmux session helpers create the lock before pi starts.
   local path
   path="$(lock_path "$safe")"
   local value

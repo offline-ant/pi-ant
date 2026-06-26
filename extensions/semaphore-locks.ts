@@ -322,7 +322,7 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
   let retryableErrorCount = 0;
 
   // Context alert: release a <name>:context lock when context usage >= threshold.
-  // Set from PI_CONTEXT_ALERT env var. The lock is created by tmux-coding-agent
+  // Set from PI_CONTEXT_ALERT env var. The lock is created by tmux session helpers
   // before pi starts, so we only need to track and release it here.
   const contextAlertThreshold = (() => {
     const raw = parseInt(process.env.PI_CONTEXT_ALERT ?? "", 10);
@@ -394,7 +394,7 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
     if (result.code === 0) {
       currentLockName = parseLockedName(text);
 
-      // Track context alert lock (created by tmux-coding-agent before pi started)
+      // Track context alert lock (created by tmux session helpers before pi started)
       if (contextAlertThreshold && currentLockName && !contextAlertLockName) {
         contextAlertLockName = `${currentLockName}:context`;
       }
@@ -615,7 +615,7 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
       "Wait for one of many semaphore locks to be released. Use this to coordinate with other pi instances. " +
       "IMPORTANT: This call BLOCKS until a lock is released — you cannot do any other work while waiting. " +
       "Finish all independent tasks BEFORE calling this. " +
-      "For agents spawned via tmux-coding-agent, wait on the lock name (e.g., 'worker').",
+      "For low-level tmux worker panes, wait on the lock name (e.g., 'worker'). Structured coding-agent/call/minitask tools wait for their own result files.",
     parameters: semaphoreWaitSchema,
     async execute(_toolCallId, params, signal, onUpdate) {
       const { safeNames, timeoutSeconds } = getSemaphoreWaitParams(params);

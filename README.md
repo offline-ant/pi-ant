@@ -8,11 +8,12 @@ These are the pi tools registered by this package:
 
 - `ask` — ask the user interactive multiple-choice or free-form questions.
 - `browser` — control persistent Chromium/Firefox sessions through `bin/browser-io`, including navigation, awaited JavaScript eval, and before/after screenshots under `/tmp/browser-io`.
-- `call` — run a delegated task in a forked tmux pi worker; the worker's final assistant message becomes the compact `call` tool result.
-- `minitask` — run an isolated one-shot pi RPC task without this session's context.
+- `call` — run a delegated task in a forked current-context tmux pi worker; the worker's final assistant message becomes the compact `call` tool result.
+- `coding-agent` — run a task in a named persistent fresh-context tmux worker; waits for the task result and keeps the worker alive for follow-up work.
+- `minitask` — run an isolated one-shot fresh-context tmux worker without this session's context.
 - `semaphore_wait` — block until one or more semaphore locks release, backed by `bin/pi-semaphore`.
 - `sqlite` — run `sqlite3` against `AGENTS.db` in the current working directory; auto-enabled when that database exists.
-- `tmux-bash`, `tmux-capture`, `tmux-send`, `tmux-kill`, `tmux-coding-agent`, `tmux-fork` — tmux pane, child-agent, and session-fork workflow tools backed by `bin/pi-tmux`.
+- `tmux-bash`, `tmux-capture`, `tmux-send`, `tmux-kill`, `tmux-fork` — low-level tmux pane and session-fork workflow tools backed by `bin/pi-tmux`.
 - Core `edit` and `write` are wrapped by `lints` to display post-write safety warnings.
 - Nested pi guard: `PI_NESTED` is initialized/incremented by the extension runtime; pi exits before work when nesting reaches 4.
 - `present_guidance` — validates structured guidance output for guidance-mode final answers. It is only registered for `PI_GUIDANCE=true` runs or dynamically inside `/ugo` guide-phase sessions.
@@ -20,9 +21,9 @@ These are the pi tools registered by this package:
 ## Commands, snippets, and safety extensions
 
 - Semaphore lock commands: `/lock`, `/release`, `/wait`, `/lock-list`.
-- Call-frame commands: `/bobs-mode [on|off|status|toggle]` toggles Bob's mode and can restrict the root tool set to `call`, `ask`, and `minitask`; `/finish-call-now "message"` is a child-frame recovery command that overrides the call result with `message` and shuts down the worker. See `HOWTO-CALL-MODE.md`.
-- Tmux workflow commands: `/clear-stale`, `/tmux-list`, `/prompt-mini`, `/abort-mini`, `/expand-minitask`, `/tmux-fork`.
-- Tool worker model commands: `/set-tool-model` saves the current model as the favorite tool-worker override and enables it; `/tool-model` toggles that favorite override on/off for `call`, `minitask`, and spawned pi workers when no explicit `piArgs` are supplied.
+- Worker commands: `/bobs-mode [on|off|status|toggle]` toggles Bob's mode and can restrict the root tool set to `call`, `coding-agent`, `ask`, and `minitask`; `/finish-call-now "message"` is a child-frame recovery command that overrides the active worker result with `message` and shuts down close-on-done workers. See `HOWTO-CALL-MODE.md`.
+- Tmux workflow commands: `/clear-stale`, `/tmux-list`, `/tmux-fork`.
+- Tool worker model commands: `/set-tool-model` saves the current model as the favorite tool-worker override and enables it; `/tool-model` toggles that favorite override on/off for `call`, `coding-agent`, `minitask`, and spawned pi workers.
 - Complete context injection commands: `/read-complete`, `/bash-complete`.
 - SQLite workflow commands: `/sqlite-init`, `/agent-db`.
 - Context explorer commands: `/context-explorer`, `/context-explorer-stop`.

@@ -34,14 +34,14 @@ After each call returns, inspect the result, verify or clean up as needed, and d
 
 You are done when all feasible parts of the plan have been implemented, relevant specs and documents updated, relevant checks completed or clearly reported, and you have returned a final summary of what was done plus any remaining obstacles.`;
 
-export const SUPERVISE_SNIPPET = `Spawn a tmux-coding-agent named 'main' to execute the plan we just discussed in phases in serial. Your task as supervisor:
+export const SUPERVISE_SNIPPET = `Use coding-agent named 'main' to execute the plan we just discussed in phases in serial. Your task as supervisor:
 
-Important: every tmux-coding-agent you spawn starts with a fresh conversation and has no previous knowledge of this discussion, prior agents, or their work. It will already have read AGENTS.md/context files for its working directory before your first message, so only provide task-specific context: the task, current state, relevant files, constraints not already covered there, and handoff notes.
+Important: coding-agent starts with a fresh conversation and has no previous knowledge of this discussion, prior agents, or their work. It will already have read AGENTS.md/context files for its working directory before your first message, so only provide task-specific context: the task, current state, relevant files, constraints not already covered there, and handoff notes.
 
-Always wait for every tmux-coding-agent you spawn with semaphore_wait(..., timeoutSeconds: 600).
+The coding-agent tool waits for each requested task to return. Send follow-up work serially to the same named worker only after the previous task returns.
 
-1. Observe the main agent and prevent it from going dormant.
-2. Ensure it stays below 89% context use. If it exceeds it, ask it to write a handoff.md and spawn a new agent to continue its work. Assume that new agent knows only its loaded AGENTS.md/context plus what you provide in its initial prompt and the handoff file.
+1. Observe the main agent's returned results and prevent it from going dormant.
+2. Ensure it stays below 89% context use. If it exceeds it, ask it to write a handoff.md and start a new named coding-agent to continue its work. Assume that new agent knows only its loaded AGENTS.md/context plus what you provide in its initial prompt and the handoff file.
 3. Ensure architectural quality: if the main agent is rushing to a quick fix instead of building a well-structured solution, nudge it to slow down, investigate alternatives, and get the design right.
 4. Do not tell the main agent it has a supervisor.
 
@@ -117,7 +117,7 @@ export const SNIPPETS: PromptSnippet[] = [
   {
     key: "supervise",
     value: SUPERVISE_SNIPPET,
-    description: "Insert tmux coding-agent supervisor instructions",
+    description: "Insert coding-agent supervisor instructions",
   },
   {
     key: "api-review",
