@@ -8,6 +8,7 @@ import { getToolModelCliArgs } from "./tool-model-state.ts";
 
 const CALL_TOOL = "call";
 const ASK_TOOL = "ask";
+const MINITASK_TOOL = "minitask";
 const REMOVED_CALL_CONTROL_TOOLS = new Set(["finish_call", "return"]);
 const ROOT_STATE_CUSTOM_TYPE = "pi-ant:call-state";
 const CALL_RUNTIME_CUSTOM_TYPE = "pi-ant:call-runtime";
@@ -227,7 +228,7 @@ function uniqueTools(tools: string[]): string[] {
 }
 
 function rootActiveTools(state: RootCallState): string[] {
-  if (state.bobsMode) return [CALL_TOOL, ASK_TOOL];
+  if (state.bobsMode) return [CALL_TOOL, ASK_TOOL, MINITASK_TOOL];
   return uniqueTools([...state.rootTools, CALL_TOOL]);
 }
 
@@ -660,7 +661,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     if (rootState?.bobsMode) {
-      ctx.ui.setWidget("call", ["bobs-mode: root tools restricted to call and ask"]);
+      ctx.ui.setWidget("call", ["bobs-mode: root tools restricted to call, ask, and minitask"]);
       return;
     }
 
@@ -897,7 +898,7 @@ export default function (pi: ExtensionAPI) {
         appendRootState(next);
         applyTools(next, undefined, false);
         updateUi(ctx, next, undefined, false);
-        ctx.ui.notify("bobs-mode on: root tools restricted to call and ask.", "info");
+        ctx.ui.notify("bobs-mode on: root tools restricted to call, ask, and minitask.", "info");
         return;
       }
 
@@ -1085,7 +1086,7 @@ export default function (pi: ExtensionAPI) {
         ? ` A call frame will have access to these tools: ${state.rootTools.map((tool) => `\`${tool}\``).join(", ")}.`
         : "";
       return {
-        systemPrompt: `${event.systemPrompt}\n\nTreat the root conversation as an orchestration thread, not a work thread. Default to call for any task, continuation, status check, recommendation, or question whose answer is not already fully available from compact root context. Use ask directly when a user decision or clarification is needed.${workerTools} Do not give generic next-step options when current project/session state is unknown; call a tmux-backed worker to inspect and return a compact recommendation. Answer directly only for purely conversational/conceptual questions or when recent compact call results already contain all needed facts.`,
+        systemPrompt: `${event.systemPrompt}\n\nTreat the root conversation as an orchestration thread, not a work thread. Default to call for any task, continuation, status check, recommendation, or question whose answer is not already fully available from compact root context. Use minitask for isolated fresh-context review or small independent questions that do not need this session's context. Use ask directly when a user decision or clarification is needed.${workerTools} Do not give generic next-step options when current project/session state is unknown; call a tmux-backed worker to inspect and return a compact recommendation. Answer directly only for purely conversational/conceptual questions or when recent compact call results already contain all needed facts.`,
       };
     }
 

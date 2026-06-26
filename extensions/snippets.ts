@@ -13,6 +13,8 @@ export const CUT_SUFFIX =
 export const MINI_REVIEW_SUFFIX =
   "Ask minitask for a generic review of this, just issues and potential improvements. Then you evaluate its suggestions: apply clearly good ones, ignore bad ones, and ask me about anything uncertain.";
 
+export const TS_SUFFIX = "Thoughts? Suggestions?";
+
 export const CALL_PROGRESS_SNIPPET = `Use call to execute the plan we just discussed. Your task as controller:
 
 Important: call opens a call frame in the current session context with tools enabled. The call frame's final assistant message is returned as the compact result. The tool-heavy call branch stays inspectable in the session tree, while the controller resumes from only the compact result.
@@ -101,6 +103,11 @@ export const SNIPPETS: PromptSnippet[] = [
     key: "mini-review",
     value: MINI_REVIEW_SUFFIX,
     description: "Insert the minitask review suffix",
+  },
+  {
+    key: "ts",
+    value: TS_SUFFIX,
+    description: "Insert the thoughts/suggestions suffix",
   },
   {
     key: "call-progress",
