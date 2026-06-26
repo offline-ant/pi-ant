@@ -49,14 +49,16 @@ with `retrospective: true` also write `reflect.md`.
 /finish-call-now "message" # child-frame recovery: override result with message and shut down
 ```
 
-When Bob's mode is on, root active tools are restricted to `call` and `ask`. The root is
-an orchestration thread, not a work thread: default to `call` for tasks,
-continuation, status checks, recommendations, and questions whose answers are not
-already fully available from compact root context. In particular, do not offer
-generic next-step options when current project/session state is unknown; call a
-frame to inspect and return a compact recommendation. Answer directly only for
-purely conversational/conceptual questions or when recent compact call results
-already contain the needed facts.
+When Bob's mode is on, root active tools are restricted to `call`, `ask`, and
+`minitask`. The root is an orchestration thread, not a work thread: default to
+`call` for tasks, continuation, status checks, recommendations, and questions
+whose answers are not already fully available from compact root context. Use
+`minitask` for isolated fresh-context review or small independent questions that
+do not need this session's context. In particular, do not offer generic next-step
+options when current project/session state is unknown; call a frame to inspect
+and return a compact recommendation. Answer directly only for purely
+conversational/conceptual questions or when recent compact call results already
+contain the needed facts.
 
 Inside a call frame, pi restores the worker tools captured by the parent and adds
 `call` only for complex frames. Call frames compact like normal pi sessions; the
