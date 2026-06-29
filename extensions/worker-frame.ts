@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isRetryableAssistantErrorMessage, RETRY_START_GRACE_MS } from "./retryable-errors.ts";
 import { runTmux } from "./tmux-helpers.ts";
 
 const WORKER_ROOT_PREFIX = "pi-ant-worker-";
@@ -9,17 +10,14 @@ const WORKER_RUN_COMMAND = "worker-run";
 const FINISH_CALL_NOW_COMMAND = "finish-call-now";
 const RESULT_POLL_INTERVAL_MS = 250;
 const PROGRESS_UPDATE_INTERVAL_MS = 5000;
-const LOCK_DIR = "/tmp/pi-semaphores";
-const MAX_RETRYABLE_ERRORS = 3;
+const PANE_STATE_POLL_INTERVAL_MS = 1000;
+const PANE_MISSING_GRACE_MS = 60_000;
 
 const RETROSPECTIVE_PROMPT = [
   "The main result has already been saved for the parent. Do not repeat it, do not continue the task, and do not call tools.",
   "Return only substantial observations you noticed outside of the given task, or substantial things you did not mention regarding it, that are worth taking into account or fixing in the long run.",
   "If there is nothing substantial, return exactly: everything was ok",
 ].join("\n");
-
-const RETRYABLE_ERROR_PATTERN =
-  /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|connection.?error|connection.?refused|websocket|other side closed|fetch failed|upstream.?connect|reset before headers|terminated|retry delay/i;
 
 export interface WorkerRequestFile {
   id: string;
@@ -63,7 +61,7 @@ interface ActiveWorkerRequest {
   request: WorkerRequestFile;
   priorTools: string[];
   mainResult?: string;
-  retryableErrorCount: number;
+  retryFailureTimer?: ReturnType<typeof setTimeout>;
 }
 
 interface WorkerToolDetails {
@@ -141,7 +139,7 @@ function assistantMessageText(message: Extract<AgentEndEvent["messages"][number]
 }
 
 function isRetryableAssistantFailure(message: Extract<AgentEndEvent["messages"][number], { role: "assistant" }>): boolean {
-  return message.stopReason === "error" && typeof message.errorMessage === "string" && RETRYABLE_ERROR_PATTERN.test(message.errorMessage);
+  return message.stopReason === "error" && isRetryableAssistantErrorMessage(message.errorMessage);
 }
 
 function getContextPercent(ctx: ExtensionContext): number | null | undefined {
@@ -282,8 +280,27 @@ export async function waitForWorkerReady(pi: ExtensionAPI, lockName: string, tim
   }
 }
 
-function isLockFinished(name: string): boolean {
-  return !fs.existsSync(path.join(LOCK_DIR, name));
+interface WorkerPaneState {
+  state: "live" | "dead" | "missing";
+  paneId?: string;
+  text: string;
+}
+
+function parseWorkerPaneState(stdout: string, stderr: string, code: number): WorkerPaneState {
+  const text = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
+  const state = text.match(/^state=(live|dead|missing)$/m)?.[1];
+  const paneId = text.match(/^pane=(%\d+)$/m)?.[1];
+  if (code !== 0 || (state !== "live" && state !== "dead" && state !== "missing")) return { state: "missing", text };
+  return { state, paneId, text };
+}
+
+async function readWorkerPaneState(pi: ExtensionAPI, lockName: string): Promise<WorkerPaneState> {
+  try {
+    const result = await runTmux(pi, ["pane-state", lockName]);
+    return parseWorkerPaneState(result.stdout, result.stderr, result.code);
+  } catch (error) {
+    return { state: "missing", text: error instanceof Error ? error.message : String(error) };
+  }
 }
 
 function delay(ms: number): Promise<void> {
@@ -300,12 +317,14 @@ export async function waitForWorkerResult(
     sessionFile: string;
     task: string;
     retrospective: boolean;
-    allowIdle?: boolean;
     onUpdate?: (partial: { content: Array<{ type: "text"; text: string }>; details: WorkerToolDetails }) => void;
   },
 ): Promise<{ result: WorkerResultFile; details: WorkerToolDetails }> {
   const startedAt = Date.now();
   let lastProgressAt = 0;
+  let lastPaneStateCheckAt = -PANE_STATE_POLL_INTERVAL_MS;
+  let paneMissingSince: number | undefined;
+  let lastKnownPaneId: string | undefined;
 
   while (true) {
     if (fs.existsSync(options.paths.resultPath)) {
@@ -331,51 +350,44 @@ export async function waitForWorkerResult(
     }
 
     const elapsedMs = Date.now() - startedAt;
-    if (isLockFinished(options.actualLockName)) {
-      if (options.allowIdle) {
-        const paneResult = await runTmux(pi, ["pane-id", options.actualLockName]);
-        if (paneResult.code === 0) {
-          await delay(RESULT_POLL_INTERVAL_MS);
-          continue;
+    if (elapsedMs - lastPaneStateCheckAt >= PANE_STATE_POLL_INTERVAL_MS) {
+      lastPaneStateCheckAt = elapsedMs;
+      const paneState = await readWorkerPaneState(pi, options.actualLockName);
+      if (paneState.paneId) lastKnownPaneId = paneState.paneId;
+      if (paneState.state === "live") {
+        paneMissingSince = undefined;
+      } else if (paneState.state === "dead") {
+        const output = await captureWorkerOutput(pi, paneState.paneId ?? options.actualLockName);
+        throw new Error([
+          "Worker exited before writing a final result.",
+          `tmux lock: ${options.actualLockName}`,
+          `tmux pane: ${paneState.paneId ?? "unknown"}`,
+          `session: ${options.sessionFile}`,
+          `result path: ${options.paths.resultPath}`,
+          "",
+          "Last tmux output:",
+          output,
+        ].join("\n"));
+      } else {
+        paneMissingSince ??= Date.now();
+        if (Date.now() - paneMissingSince >= PANE_MISSING_GRACE_MS) {
+          throw new Error([
+            "Worker pane disappeared before writing a final result.",
+            `tmux lock: ${options.actualLockName}`,
+            `session: ${options.sessionFile}`,
+            `result path: ${options.paths.resultPath}`,
+            `waited after missing: ${Math.floor((Date.now() - paneMissingSince) / 1000)}s`,
+            "",
+            "Pane state:",
+            paneState.text || "(missing)",
+          ].join("\n"));
         }
       }
-
-      if (fs.existsSync(options.paths.resultPath)) {
-        const result = parseWorkerResult(fs.readFileSync(options.paths.resultPath, "utf8"), options.paths.resultPath, options.id);
-        return {
-          result,
-          details: {
-            id: options.id,
-            lockName: options.actualLockName,
-            requestedLockName: options.requestedLockName,
-            resultPath: options.paths.resultPath,
-            artifactDir: options.paths.artifactDir,
-            requestPath: options.paths.requestPath,
-            resultMarkdownPath: options.paths.resultMarkdownPath,
-            ...(options.retrospective ? { retrospectiveMarkdownPath: options.paths.retrospectiveMarkdownPath } : {}),
-            sessionFile: options.sessionFile,
-            task: options.task,
-            retrospective: options.retrospective,
-            elapsedMs,
-            status: "finished",
-          },
-        };
-      }
-      const output = await captureWorkerOutput(pi, options.actualLockName);
-      throw new Error([
-        "Worker exited before writing a final result.",
-        `tmux lock: ${options.actualLockName}`,
-        `session: ${options.sessionFile}`,
-        `result path: ${options.paths.resultPath}`,
-        "",
-        "Last tmux output:",
-        output,
-      ].join("\n"));
     }
 
     if (options.onUpdate && elapsedMs - lastProgressAt >= PROGRESS_UPDATE_INTERVAL_MS) {
       lastProgressAt = elapsedMs;
-      const output = await captureWorkerOutput(pi, options.actualLockName, 12);
+      const output = await captureWorkerOutput(pi, lastKnownPaneId ?? options.actualLockName, 12);
       options.onUpdate({
         content: [{ type: "text", text: [`Waiting for worker ${options.actualLockName} (${Math.floor(elapsedMs / 1000)}s elapsed).`, `Session: ${options.sessionFile}`, "", output].join("\n") }],
         details: {
@@ -437,12 +449,49 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     }
   }
 
+  function clearRetryFailureTimer(request: ActiveWorkerRequest): void {
+    if (request.retryFailureTimer) {
+      clearTimeout(request.retryFailureTimer);
+      request.retryFailureTimer = undefined;
+    }
+  }
+
+  function completeWorkerRequest(ctx: ExtensionContext, request: ActiveWorkerRequest, result: string, isError = false, retrospective?: string): void {
+    clearRetryFailureTimer(request);
+    writeFinalResult(ctx, request, result, isError, retrospective);
+    const shouldClose = request.request.closeWhenDone;
+    activeRequest = undefined;
+    if (shouldClose) ctx.shutdown();
+  }
+
+  function scheduleRetryableFailure(ctx: ExtensionContext, request: ActiveWorkerRequest, complete: () => void): void {
+    clearRetryFailureTimer(request);
+    request.retryFailureTimer = setTimeout(() => {
+      request.retryFailureTimer = undefined;
+      if (activeRequest !== request || fs.existsSync(request.request.resultPath)) return;
+      try {
+        complete();
+      } catch (error) {
+        ctx.ui.notify(`Failed to report retry-exhausted worker failure: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
+    }, RETRY_START_GRACE_MS);
+    request.retryFailureTimer.unref?.();
+  }
+
   pi.on("session_start", async (_event, ctx) => {
     refreshFreshWorkerTools(ctx);
   });
 
   pi.on("session_tree", async (_event, ctx) => {
     refreshFreshWorkerTools(ctx);
+  });
+
+  pi.on("agent_start", async () => {
+    if (activeRequest) clearRetryFailureTimer(activeRequest);
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (activeRequest) clearRetryFailureTimer(activeRequest);
   });
 
   pi.registerCommand(WORKER_RUN_COMMAND, {
@@ -474,7 +523,6 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
       activeRequest = {
         request: parsed,
         priorTools: pi.getActiveTools(),
-        retryableErrorCount: 0,
       };
       writeWorkerStatus(parsed.statusPath, {
         id: parsed.id,
@@ -505,11 +553,10 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
         ctx.ui.notify("No active worker request to finish.", "warning");
         return;
       }
-      writeFinalResult(ctx, activeRequest, message, false, activeRequest.request.retrospective ? "retrospective bypassed by /finish-call-now." : undefined);
-      const shouldClose = activeRequest.request.closeWhenDone;
-      activeRequest = undefined;
+      const request = activeRequest;
+      completeWorkerRequest(ctx, request, message, false, request.request.retrospective ? "retrospective bypassed by /finish-call-now." : undefined);
+      pi.setActiveTools(request.priorTools);
       ctx.ui.notify("Finished worker request with override result.", "info");
-      if (shouldClose) ctx.shutdown();
     },
   });
 
@@ -520,16 +567,23 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
 
     if (activeRequest.mainResult !== undefined) {
       if (message.stopReason === "aborted" || message.stopReason === "toolUse") return;
+      if (isRetryableAssistantFailure(message)) {
+        const request = activeRequest;
+        scheduleRetryableFailure(ctx, request, () => {
+          const retrospective = `retrospective unavailable: assistant retry did not restart within ${Math.floor(RETRY_START_GRACE_MS / 1000)}s after retryable error. ${assistantMessageText(message)}`;
+          completeWorkerRequest(ctx, request, request.mainResult ?? "", false, retrospective);
+          pi.setActiveTools(request.priorTools);
+        });
+        return;
+      }
       const retrospective = message.stopReason === "stop"
         ? (assistantTextContent(message) ?? "retrospective unavailable: assistant returned no retrospective text.")
         : `retrospective unavailable: assistant stopped with reason '${message.stopReason}'. ${assistantMessageText(message)}`;
       try {
-        writeFinalResult(ctx, activeRequest, activeRequest.mainResult, false, retrospective);
-        pi.setActiveTools(activeRequest.priorTools);
-        const shouldClose = activeRequest.request.closeWhenDone;
-        activeRequest = undefined;
+        const request = activeRequest;
+        completeWorkerRequest(ctx, request, request.mainResult ?? "", false, retrospective);
+        pi.setActiveTools(request.priorTools);
         ctx.ui.notify("Finished worker request with result and retrospective.", "info");
-        if (shouldClose) ctx.shutdown();
       } catch (error) {
         ctx.ui.notify(`Failed to write worker retrospective result: ${error instanceof Error ? error.message : String(error)}`, "error");
       }
@@ -540,10 +594,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
       const result = assistantTextContent(message);
       if (!result) {
         try {
-          writeFinalResult(ctx, activeRequest, "Worker stopped without final result text.", true);
-          const shouldClose = activeRequest.request.closeWhenDone;
-          activeRequest = undefined;
-          if (shouldClose) ctx.shutdown();
+          completeWorkerRequest(ctx, activeRequest, "Worker stopped without final result text.", true);
         } catch (error) {
           ctx.ui.notify(`Failed to report empty worker result: ${error instanceof Error ? error.message : String(error)}`, "error");
         }
@@ -566,11 +617,8 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
       }
 
       try {
-        writeFinalResult(ctx, activeRequest, result);
-        const shouldClose = activeRequest.request.closeWhenDone;
-        activeRequest = undefined;
+        completeWorkerRequest(ctx, activeRequest, result);
         ctx.ui.notify("Finished worker request with result.", "info");
-        if (shouldClose) ctx.shutdown();
       } catch (error) {
         ctx.ui.notify(`Failed to write worker result: ${error instanceof Error ? error.message : String(error)}`, "error");
       }
@@ -578,17 +626,15 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     }
 
     if (isRetryableAssistantFailure(message)) {
-      activeRequest.retryableErrorCount++;
-      if (activeRequest.retryableErrorCount < MAX_RETRYABLE_ERRORS) return;
+      const request = activeRequest;
+      scheduleRetryableFailure(ctx, request, () => completeWorkerRequest(ctx, request, assistantMessageText(message), true));
+      return;
     }
 
     if (message.stopReason === "aborted") return;
 
     try {
-      writeFinalResult(ctx, activeRequest, assistantMessageText(message), true);
-      const shouldClose = activeRequest.request.closeWhenDone;
-      activeRequest = undefined;
-      if (shouldClose) ctx.shutdown();
+      completeWorkerRequest(ctx, activeRequest, assistantMessageText(message), true);
     } catch (error) {
       ctx.ui.notify(`Failed to write worker failure result: ${error instanceof Error ? error.message : String(error)}`, "error");
     }

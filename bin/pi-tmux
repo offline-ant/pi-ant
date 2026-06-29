@@ -52,6 +52,14 @@ claude_agent_marker_path() {
   printf '%s/claude-agent.%s' "$STATE_DIR" "$1"
 }
 
+interactive_remote_marker_path() {
+  printf '%s/interactive-remote.%s' "$STATE_DIR" "$1"
+}
+
+pane_marker_path() {
+  printf '%s/pane.%s' "$STATE_DIR" "$1"
+}
+
 last_warned_input_path() {
   printf '%s/last-warned-input.%s' "$STATE_DIR" "$1"
 }
@@ -68,9 +76,20 @@ mark_claude_agent_lock() {
   : > "$(claude_agent_marker_path "$name")"
 }
 
+mark_interactive_remote_lock() {
+  local name="$1"
+  local kind="$2"
+  local command="$3"
+  ensure_state_dir
+  {
+    printf 'kind=%s\n' "$kind"
+    printf 'command=%s\n' "$command"
+  } > "$(interactive_remote_marker_path "$name")"
+}
+
 clear_pi_agent_state() {
   local name="$1"
-  rm -f -- "$(pi_agent_marker_path "$name")" "$(claude_agent_marker_path "$name")" "$(last_warned_input_path "$name")"
+  rm -f -- "$(pi_agent_marker_path "$name")" "$(claude_agent_marker_path "$name")" "$(interactive_remote_marker_path "$name")" "$(pane_marker_path "$name")" "$(last_warned_input_path "$name")"
 }
 
 is_pi_agent_target() {
@@ -93,6 +112,162 @@ is_claude_agent_target() {
   [[ -n "$safe_name" ]] || return 1
 
   [[ -e "$(claude_agent_marker_path "$safe_name")" ]]
+}
+
+is_interactive_remote_target() {
+  local target="${1:-}"
+  [[ "$target" != %* ]] || return 1
+
+  local safe_name
+  safe_name="$(sanitize_name "$target")"
+  [[ -n "$safe_name" ]] || return 1
+
+  [[ -e "$(interactive_remote_marker_path "$safe_name")" ]]
+}
+
+ssh_option_takes_argument() {
+  local option="$1"
+  case "$option" in
+    b|c|D|E|e|F|I|i|J|L|l|m|O|o|p|Q|R|S|W|w) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+ssh_no_argument_option_chars() {
+  local chars="$1"
+  [[ "$chars" =~ ^[1246AaCfGgKkMqsTtVvXxYy]+$ ]]
+}
+
+is_direct_interactive_ssh_tokens() {
+  local tokens=("$@")
+  local i=1
+  local argc=${#tokens[@]}
+  local token chars first
+
+  while (( i < argc )); do
+    token="${tokens[$i]}"
+
+    if [[ "$token" == "--" ]]; then
+      i=$((i + 1))
+      (( i < argc )) || return 1
+      (( i == argc - 1 ))
+      return
+    fi
+
+    if [[ "$token" != -* || "$token" == "-" ]]; then
+      (( i == argc - 1 ))
+      return
+    fi
+
+    chars="${token#-}"
+
+    # These modes do not create a normal interactive shell prompt to detect.
+    if [[ "$chars" == *N* || "$chars" == *T* || "$chars" == *W* ]]; then
+      return 1
+    fi
+
+    if ssh_no_argument_option_chars "$chars"; then
+      i=$((i + 1))
+      continue
+    fi
+
+    first="${chars:0:1}"
+    if ssh_option_takes_argument "$first"; then
+      if (( ${#chars} == 1 )); then
+        i=$((i + 2))
+      else
+        i=$((i + 1))
+      fi
+      (( i <= argc )) || return 1
+      continue
+    fi
+
+    return 1
+  done
+
+  return 1
+}
+
+is_direct_interactive_mosh_tokens() {
+  local tokens=("$@")
+  local i=1
+  local argc=${#tokens[@]}
+  local token
+
+  while (( i < argc )); do
+    token="${tokens[$i]}"
+
+    if [[ "$token" == "--" ]]; then
+      i=$((i + 1))
+      (( i < argc )) || return 1
+      (( i == argc - 1 ))
+      return
+    fi
+
+    if [[ "$token" != -* || "$token" == "-" ]]; then
+      (( i == argc - 1 ))
+      return
+    fi
+
+    case "$token" in
+      -p|--port|--ssh|--server|--client|--predict)
+        i=$((i + 2))
+        (( i <= argc )) || return 1
+        ;;
+      --port=*|--ssh=*|--server=*|--client=*|--predict=*)
+        i=$((i + 1))
+        ;;
+      -*)
+        return 1
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+is_direct_interactive_remote_command() {
+  local command="${1:-}"
+  local kind_ref="${2:-}"
+
+  [[ -n "$command" ]] || return 1
+
+  # Be conservative: only unquoted, direct commands are classified. Anything
+  # with shell operators, substitutions, quotes, or escapes keeps normal
+  # process-lifetime semaphore behavior.
+  [[ "$command" == *$'\n'* ]] && return 1
+  [[ "$command" == *"|"* || "$command" == *"&"* || "$command" == *";"* ]] && return 1
+  [[ "$command" == *"<"* || "$command" == *">"* || "$command" == *"("* || "$command" == *")"* ]] && return 1
+  [[ "$command" == *'`'* || "$command" == *'$'* || "$command" == *"\\"* ]] && return 1
+  [[ "$command" == *"'"* || "$command" == *'"'* ]] && return 1
+
+  local words=()
+  read -r -a words <<< "$command"
+  [[ ${#words[@]} -gt 0 ]] || return 1
+
+  if [[ "${words[0]}" == "exec" ]]; then
+    words=("${words[@]:1}")
+    [[ ${#words[@]} -gt 0 ]] || return 1
+  fi
+
+  local exe
+  exe="$(basename -- "${words[0]}")"
+  case "$exe" in
+    ssh)
+      if is_direct_interactive_ssh_tokens "${words[@]}"; then
+        printf -v "$kind_ref" '%s' ssh
+        return 0
+      fi
+      ;;
+    mosh)
+      if is_direct_interactive_mosh_tokens "${words[@]}"; then
+        printf -v "$kind_ref" '%s' mosh
+        return 0
+      fi
+      ;;
+  esac
+
+  return 1
 }
 
 detect_pi_input_text() {
@@ -184,6 +359,13 @@ record_pane_if_lock_active() {
   printf '%s\n' "$pane" > "$path"
 }
 
+record_named_pane() {
+  local name="$1"
+  local pane="$2"
+  ensure_state_dir
+  printf '%s\n' "$pane" > "$(pane_marker_path "$name")"
+}
+
 resolve_pane() {
   local target="${1:-}"
   [[ -n "$target" ]] || { echo "error: missing target" >&2; return 1; }
@@ -216,6 +398,33 @@ resolve_pane() {
   fi
 
   printf '%s' "$pane"
+}
+
+resolve_named_pane() {
+  local target="${1:-}"
+  [[ -n "$target" ]] || { echo "error: missing target" >&2; return 1; }
+
+  if [[ "$target" == %* ]]; then
+    printf '%s' "$target"
+    return
+  fi
+
+  local name
+  name="$(sanitize_name "$target")"
+  [[ -n "$name" ]] || { echo "error: invalid target name" >&2; return 1; }
+
+  local marker
+  marker="$(pane_marker_path "$name")"
+  if [[ -e "$marker" ]]; then
+    local pane
+    pane="$(head -n 1 "$marker" 2>/dev/null || true)"
+    if [[ -n "$pane" && "$pane" == %* ]]; then
+      printf '%s' "$pane"
+      return
+    fi
+  fi
+
+  resolve_pane "$name"
 }
 
 strip_startup_help() {
@@ -285,6 +494,10 @@ cmd_bash() {
   fi
 
   record_pane_if_lock_active "$lock_name" "$pane_id" || true
+  local interactive_remote_kind=""
+  if is_direct_interactive_remote_command "$command" interactive_remote_kind; then
+    mark_interactive_remote_lock "$lock_name" "$interactive_remote_kind" "$command"
+  fi
   tmux set-option -g remain-on-exit on >/dev/null 2>&1 || true
 
   echo "Created '$lock_name'"
@@ -760,6 +973,7 @@ cmd_session_agent() {
   fi
 
   record_pane_if_lock_active "$lock_name" "$pane_id" || true
+  record_named_pane "$lock_name" "$pane_id"
   if [[ -n "$context_lock_name" ]]; then
     record_pane_if_lock_active "$context_lock_name" "$pane_id" || true
   fi
@@ -868,6 +1082,7 @@ cmd_claude_agent() {
   fi
 
   record_pane_if_lock_active "$lock_name" "$pane_id" || true
+  record_named_pane "$lock_name" "$pane_id"
   mark_claude_agent_lock "$lock_name"
   tmux set-option -g remain-on-exit on >/dev/null 2>&1 || true
 
@@ -985,6 +1200,109 @@ cmd_pane_id() {
   echo
 }
 
+cmd_pane_state() {
+  require_tmux
+
+  local target="${1:-}"
+  [[ -n "$target" ]] || { echo "error: pane-state requires <lock-name|pane-id>" >&2; return 1; }
+
+  local pane
+  if ! pane="$(resolve_named_pane "$target" 2>/dev/null)"; then
+    echo "state=missing"
+    echo "target=$target"
+    return 1
+  fi
+
+  if ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+    echo "state=missing"
+    echo "target=$target"
+    echo "pane=$pane"
+    return 1
+  fi
+
+  local dead window_name interactive_remote
+  dead="$(tmux display-message -p -t "$pane" '#{pane_dead}' 2>/dev/null || true)"
+  window_name="$(tmux display-message -p -t "$pane" '#{window_name}' 2>/dev/null || true)"
+  interactive_remote=0
+  if is_interactive_remote_target "$target"; then
+    interactive_remote=1
+  fi
+  echo "state=$([[ "$dead" == "1" ]] && printf 'dead' || printf 'live')"
+  echo "target=$target"
+  echo "pane=$pane"
+  echo "window=${window_name:-unknown}"
+  echo "interactiveRemote=$interactive_remote"
+}
+
+strip_ansi_line() {
+  sed -E $'s/\x1b\[[0-9;?]*[ -/]*[@-~]//g; s/\x1b\][^\x07]*(\x07|\x1b\\\\)//g; s/\x1b\([A-Za-z0-9]//g'
+}
+
+trim_line() {
+  sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
+prompt_line_looks_idle() {
+  local line="${1:-}"
+  [[ "$line" == *"@"* ]] || return 1
+  [[ "$line" =~ [#\$%\>][[:space:]]*$ ]]
+}
+
+cmd_prompt_state() {
+  require_tmux
+
+  local target="${1:-}"
+  [[ -n "$target" ]] || { echo "error: prompt-state requires <lock-name>" >&2; return 1; }
+  [[ "$target" != %* ]] || { echo "state=not-interactive"; echo "target=$target"; return 2; }
+
+  local safe_name
+  safe_name="$(sanitize_name "$target")"
+  [[ -n "$safe_name" ]] || { echo "error: invalid target name" >&2; return 1; }
+
+  if ! is_interactive_remote_target "$safe_name"; then
+    echo "state=not-interactive"
+    echo "target=$safe_name"
+    return 2
+  fi
+
+  local pane
+  if ! pane="$(resolve_named_pane "$safe_name" 2>/dev/null)"; then
+    echo "state=missing"
+    echo "target=$safe_name"
+    return 1
+  fi
+
+  if ! tmux display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+    echo "state=missing"
+    echo "target=$safe_name"
+    echo "pane=$pane"
+    return 1
+  fi
+
+  local dead cursor_y raw_line clean_line
+  dead="$(tmux display-message -p -t "$pane" '#{pane_dead}' 2>/dev/null || true)"
+  if [[ "$dead" == "1" ]]; then
+    echo "state=dead"
+    echo "target=$safe_name"
+    echo "pane=$pane"
+    return 1
+  fi
+
+  cursor_y="$(tmux display-message -p -t "$pane" '#{cursor_y}' 2>/dev/null || true)"
+  [[ "$cursor_y" =~ ^-?[0-9]+$ ]] || cursor_y=0
+  raw_line="$(tmux capture-pane -t "$pane" -p -S "$cursor_y" -E "$cursor_y" 2>/dev/null || true)"
+  clean_line="$(printf '%s' "$raw_line" | strip_ansi_line | trim_line)"
+
+  if prompt_line_looks_idle "$clean_line"; then
+    echo "state=idle"
+  else
+    echo "state=busy"
+  fi
+  echo "target=$safe_name"
+  echo "pane=$pane"
+  echo "line=$clean_line"
+}
+
 cmd_list() {
   require_tmux
   tmux list-panes -a -F '#{pane_id} #{session_name}:#{window_index}.#{pane_index} #{pane_current_command}'
@@ -1006,6 +1324,7 @@ base_lock_name_from_file() {
 cmd_clear_stale() {
   require_tmux
   ensure_lock_dir
+  ensure_state_dir
 
   local dead_panes_cleaned=0
   local pane_id pane_dead
@@ -1070,10 +1389,27 @@ cmd_clear_stale() {
     stale_locks_cleaned=$((stale_locks_cleaned + 1))
   done
 
-  if [[ $dead_panes_cleaned -eq 0 && $stale_locks_cleaned -eq 0 ]]; then
-    echo "No stale tmux panes or locks found."
+  local stale_pane_markers_cleaned=0
+  local pane_marker marker_name marker_lock
+  for pane_marker in "$STATE_DIR"/pane.*; do
+    [[ -e "$pane_marker" ]] || continue
+    marker_name="$(basename "$pane_marker")"
+    marker_lock="${marker_name#pane.}"
+    pane_id="$(head -n 1 "$pane_marker" 2>/dev/null || true)"
+    [[ -n "$pane_id" && "$pane_id" == %* ]] || { rm -f -- "$pane_marker"; stale_pane_markers_cleaned=$((stale_pane_markers_cleaned + 1)); continue; }
+    if echo "$live_panes" | grep -qxF "$pane_id"; then
+      window_name="$(tmux display-message -p -t "$pane_id" '#{window_name}' 2>/dev/null || true)"
+      [[ "$window_name" == "$marker_lock" ]] && continue
+    fi
+    rm -f -- "$pane_marker"
+    echo "Cleaned stale pane marker: $marker_name"
+    stale_pane_markers_cleaned=$((stale_pane_markers_cleaned + 1))
+  done
+
+  if [[ $dead_panes_cleaned -eq 0 && $stale_locks_cleaned -eq 0 && $stale_pane_markers_cleaned -eq 0 ]]; then
+    echo "No stale tmux panes, locks, or pane markers found."
   else
-    echo "Cleaned $dead_panes_cleaned dead pane(s) and $stale_locks_cleaned stale lock(s)."
+    echo "Cleaned $dead_panes_cleaned dead pane(s), $stale_locks_cleaned stale lock(s), and $stale_pane_markers_cleaned stale pane marker(s)."
   fi
 }
 
@@ -1087,6 +1423,8 @@ Usage:
   pi-tmux watch <lock-name> <pattern>
   pi-tmux session-agent <lock-name> <folder> <session-file> [--status-only] [--context-alert N] [--prompt-file file] [pi args...]
   pi-tmux claude-agent <lock-name> <folder> [--model <name>] [claude args...]
+  pi-tmux pane-state <lock-name|pane-id>
+  pi-tmux prompt-state <lock-name>
   pi-tmux list
   pi-tmux clear-stale
 EOF
@@ -1106,6 +1444,8 @@ main() {
     claude-agent) cmd_claude_agent "$@" ;;
     line-count) cmd_line_count "$@" ;;
     pane-id) cmd_pane_id "$@" ;;
+    pane-state) cmd_pane_state "$@" ;;
+    prompt-state) cmd_prompt_state "$@" ;;
     list) cmd_list "$@" ;;
     clear-stale) cmd_clear_stale "$@" ;;
     -h|--help|help|"") usage ;;

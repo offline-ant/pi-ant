@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOCK_DIR="/tmp/pi-semaphores"
+STATE_DIR="/tmp/pi-tmux-state"
+STREAM_DIR="/tmp/pi-tmux-streams"
+IDLE_PREFIX="idle:"
+
+sanitize_name() {
+  printf '%s' "${1:-}" | tr -cd '[:alnum:]._-'
+}
+
+require_tmux() {
+  command -v tmux >/dev/null 2>&1 || {
+    echo "error: tmux is not installed or not on PATH" >&2
+    exit 1
+  }
+}
+
+ensure_lock_dir() {
+  mkdir -p "$LOCK_DIR"
+  chmod 0777 "$LOCK_DIR" 2>/dev/null || true
+}
+
+ensure_state_dir() {
+  mkdir -p "$STATE_DIR"
+  chmod 0777 "$STATE_DIR" 2>/dev/null || true
+}
+
+lock_path() {
+  printf '%s/%s' "$LOCK_DIR" "$1"
+}
+
+idle_path() {
+  printf '%s/%s%s' "$LOCK_DIR" "$IDLE_PREFIX" "$1"
+}
+
+stream_path() {
+  printf '%s/%s' "$STREAM_DIR" "$1"
+}
+
+pi_agent_marker_path() {
+  printf '%s/pi-agent.%s' "$STATE_DIR" "$1"
+}
+
+claude_agent_marker_path() {
+  printf '%s/claude-agent.%s' "$STATE_DIR" "$1"
+}
+
+interactive_remote_marker_path() {
+  printf '%s/interactive-remote.%s' "$STATE_DIR" "$1"
+}
+
+pane_marker_path() {
+  printf '%s/pane.%s' "$STATE_DIR" "$1"
+}
+
+last_warned_input_path() {
+  printf '%s/last-warned-input.%s' "$STATE_DIR" "$1"
+}
+
+clear_pi_agent_state() {
+  local name="$1"
+  rm -f -- \
+    "$(pi_agent_marker_path "$name")" \
+    "$(claude_agent_marker_path "$name")" \
+    "$(interactive_remote_marker_path "$name")" \
+    "$(pane_marker_path "$name")" \
+    "$(last_warned_input_path "$name")"
+}
+
+resolve_pane() {
+  local target="${1:-}"
+  [[ -n "$target" ]] || return 1
+
+  if [[ "$target" == %* ]]; then
+    printf '%s' "$target"
+    return 0
+  fi
+
+  local name
+  name="$(sanitize_name "$target")"
+  [[ -n "$name" ]] || return 1
+
+  local path
+  path="$(lock_path "$name")"
+  if [[ ! -e "$path" ]]; then
+    path="$(idle_path "$name")"
+  fi
+  [[ -e "$path" ]] || return 1
+
+  local pane
+  pane="$(head -n 1 "$path" 2>/dev/null || true)"
+  [[ -n "$pane" && "$pane" == %* ]] || return 1
+
+  printf '%s' "$pane"
+}
+
+cleanup_watch_state() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || return 0
+
+  local f
+  for f in "$LOCK_DIR/${name}:watch" "$LOCK_DIR/${name}:watch-"*; do
+    [[ -e "$f" ]] && rm -f -- "$f"
+  done
+
+  local stream
+  stream="$(stream_path "$name")"
+  if [[ -e "$stream" ]]; then
+    local pane
+    pane="$(resolve_pane "$name" 2>/dev/null || true)"
+    if [[ -n "$pane" ]]; then
+      tmux pipe-pane -t "$pane" 2>/dev/null || true
+    fi
+    rm -f -- "$stream"
+  fi
+
+  pkill -f "tail -f $(stream_path "$name")" 2>/dev/null || true
+}
+
+base_lock_name_from_file() {
+  local name="$1"
+
+  if [[ "$name" == "$IDLE_PREFIX"* ]]; then
+    name="${name#"$IDLE_PREFIX"}"
+  fi
+  name="${name%:context}"
+  name="${name%:watch}"
+  name="${name%:watch-[0-9]*}"
+
+  printf '%s' "$name"
+}
+
+clear_stale() {
+  require_tmux
+  ensure_lock_dir
+  ensure_state_dir
+
+  local dead_panes_cleaned=0
+  local pane_id pane_dead
+
+  while read -r pane_id pane_dead; do
+    [[ -n "$pane_id" ]] || continue
+    [[ "$pane_dead" == "1" ]] || continue
+
+    tmux kill-pane -t "$pane_id" >/dev/null 2>&1 || true
+    echo "Cleaned dead pane: $pane_id"
+    dead_panes_cleaned=$((dead_panes_cleaned + 1))
+  done < <(tmux list-panes -a -F '#{pane_id} #{pane_dead}' 2>/dev/null || true)
+
+  local live_panes
+  live_panes="$(tmux list-panes -a -F '#{pane_id}' 2>/dev/null || true)"
+
+  local stale_locks_cleaned=0
+  local lock_file name basename_f reason window_name
+
+  for lock_file in "$LOCK_DIR"/*; do
+    [[ -e "$lock_file" ]] || continue
+    basename_f="$(basename "$lock_file")"
+
+    pane_id="$(head -n 1 "$lock_file" 2>/dev/null || true)"
+    [[ -n "$pane_id" && "$pane_id" == %* ]] || continue
+
+    name="$(base_lock_name_from_file "$basename_f")"
+    reason=""
+
+    if echo "$live_panes" | grep -qxF "$pane_id"; then
+      if [[ -e "$(pi_agent_marker_path "$name")" || -e "$(claude_agent_marker_path "$name")" ]]; then
+        window_name="$(tmux display-message -p -t "$pane_id" '#{window_name}' 2>/dev/null || true)"
+        if [[ "$window_name" != "$name" ]]; then
+          reason="pane $pane_id reused by window '$window_name'"
+        fi
+      fi
+      [[ -n "$reason" ]] || continue
+    else
+      reason="pane $pane_id not live"
+    fi
+
+    rm -f -- "$lock_file"
+    cleanup_watch_state "$name" 2>/dev/null || true
+    clear_pi_agent_state "$name" 2>/dev/null || true
+    rm -f -- "$(lock_path "${name}:context")" 2>/dev/null || true
+
+    echo "Cleaned stale lock: $basename_f ($reason)"
+    stale_locks_cleaned=$((stale_locks_cleaned + 1))
+  done
+
+  local stale_pane_markers_cleaned=0
+  local pane_marker marker_name marker_lock
+  for pane_marker in "$STATE_DIR"/pane.*; do
+    [[ -e "$pane_marker" ]] || continue
+    marker_name="$(basename "$pane_marker")"
+    marker_lock="${marker_name#pane.}"
+    pane_id="$(head -n 1 "$pane_marker" 2>/dev/null || true)"
+    if [[ -z "$pane_id" || "$pane_id" != %* ]]; then
+      rm -f -- "$pane_marker"
+      stale_pane_markers_cleaned=$((stale_pane_markers_cleaned + 1))
+      continue
+    fi
+    if echo "$live_panes" | grep -qxF "$pane_id"; then
+      window_name="$(tmux display-message -p -t "$pane_id" '#{window_name}' 2>/dev/null || true)"
+      [[ "$window_name" == "$marker_lock" ]] && continue
+    fi
+    rm -f -- "$pane_marker"
+    echo "Cleaned stale pane marker: $marker_name"
+    stale_pane_markers_cleaned=$((stale_pane_markers_cleaned + 1))
+  done
+
+  if [[ $dead_panes_cleaned -eq 0 && $stale_locks_cleaned -eq 0 && $stale_pane_markers_cleaned -eq 0 ]]; then
+    echo "No stale tmux panes, locks, or pane markers found."
+  else
+    echo "Cleaned $dead_panes_cleaned dead pane(s), $stale_locks_cleaned stale lock(s), and $stale_pane_markers_cleaned stale pane marker(s)."
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  clear-stale
+EOF
+}
+
+main() {
+  case "${1:-}" in
+    "") clear_stale ;;
+    -h|--help|help) usage ;;
+    *)
+      echo "error: clear-stale does not accept arguments" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

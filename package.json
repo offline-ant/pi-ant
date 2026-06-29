@@ -19,7 +19,8 @@
     "pi-tmux": "./bin/pi-tmux",
     "pi-claude-agent": "./bin/pi-claude-agent",
     "browser-io": "./bin/browser-io",
-    "pi-guidance-loop": "./bin/pi-guidance-loop"
+    "pi-guidance-loop": "./bin/pi-guidance-loop",
+    "clear-stale": "./bin/clear-stale"
   },
   "pi": {
     "extensions": [
