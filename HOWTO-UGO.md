@@ -36,7 +36,9 @@ It has two phases:
 1. **ugo-guide phase**: read `workboard.md`, load editable `workflow.md`, choose
    the next workflow outcome, and produce structured guidance for it.
 2. **ugo-do phase**: run a worker or workboard-update prompt when guidance
-   returns one, or in manual mode prefill it for the user to edit/submit.
+   returns one, or in manual mode prefill it for the user to edit/submit. After
+   every ugo-do main result, ugo automatically runs a no-tools retrospective
+   turn and records it with the ugo-do result.
 
 Personally, i used the /pi-prompt to reflect on how i was using my LLM in a loop.
 
@@ -69,7 +71,8 @@ Starting ugo requires:
 
 Ugo always commits after each ugo-guide or ugo-do phase if files changed. The
 diff is the repo change; the commit message records the ugo-guide item/reason,
-prompt, session, and ugo-guide/ugo-do result. Ugo uses `git add -A` when
+prompt, session, and ugo-guide/ugo-do result. Every ugo-do result includes an
+automatic no-tools retrospective section. Ugo uses `git add -A` when
 checkpointing, so any dirty files present when a phase finishes are included in
 the checkpoint commit. If commit fails, ugo pauses.
 
@@ -148,7 +151,7 @@ The ugo-guide phase communicates its decision by calling `present_guidance`.
 
 Default. Ugo runs a ugo-guide phase, creates the ugo-do session, and pre-fills
 the editor with the ugo-do prompt. You edit or submit it manually. After the
-ugo-do turn finishes, pi pre-fills:
+ugo-do turn and its automatic no-tools retrospective finish, pi pre-fills:
 
 ```text
 /ugo-continue
@@ -329,16 +332,20 @@ ugo-guide phase. You can also submit `/ugo-continue` after editing
 
 ### ugo-do phase finishes
 
+Ugo first runs an automatic no-tools retrospective turn for the ugo-do result.
+The retrospective cannot call tools and should only report substantial long-term
+observations or `everything was ok`.
+
 In `auto` mode:
 
 ```text
-ugo-do -> ugo-guide
+ugo-do -> ugo-do retrospective -> ugo-guide
 ```
 
 In `manual` mode:
 
 ```text
-ugo-do -> wait for /ugo-continue
+ugo-do -> ugo-do retrospective -> wait for /ugo-continue
 ```
 
 If `/ugo-disable` was run while the ugo-do phase was active:
@@ -404,6 +411,11 @@ ugo-do prompt:
 
 ugo-do result:
 <last assistant response>
+
+---
+
+Retrospective:
+<retrospective response>
 ```
 
 The next ugo-guide phase sees the updated workboard. If nothing runnable or

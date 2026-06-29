@@ -221,12 +221,16 @@ Never treat semaphore release, lock idleness, or pane output as task success.
 
 A task is done only when the matching `result.json` exists.
 
-This fixes the websocket `(1/3)` issue: retryable errors must not produce a result file. The parent should keep waiting unless the pane exits or the user cancels.
+Structured workers must also not treat semaphore release or idle state as worker death. The tmux helper owns stable pane identity separately from semaphore busy/idle state, and parent-side worker waiting uses that pane liveness plus the result file. Semaphore locks remain advisory coordination/UX state.
+
+This fixes the websocket `(1/3)` issue: retryable errors must not produce a result file, and semaphore busy locks must remain held while pi is expected to auto-retry. The parent should keep waiting unless the pane is truly dead/missing beyond the grace window or the user cancels.
 
 Simple behavior:
 
 - Matching `result.json`: return it.
-- Pane exits before result: return/throw worker failure with captured pane output.
+- Live pane without result, even if semaphore says idle: keep waiting.
+- Dead pane before result: return/throw worker failure with captured pane output.
+- Missing pane before result: wait a grace window, then return/throw worker failure.
 - Retryable provider error: write no result; keep waiting.
 - Parent cancels `call`: close the call worker.
 - Parent cancels `coding-agent`: stop waiting, but leave the persistent worker alone.

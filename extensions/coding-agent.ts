@@ -245,7 +245,6 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
           sessionFile: entry.sessionFile,
           task: params.task,
           retrospective: params.retrospective === true,
-          allowIdle: true,
           onUpdate,
         });
         if (result.isError) throw new Error(result.result);

@@ -38,11 +38,17 @@ const PRESENT_GUIDANCE_TOOL = "present_guidance";
 const WORKBOARD_FILE = "workboard.md";
 const DECISIONS_DIR = join("scratch", "decisions");
 const DEFAULT_MAX_ITERATIONS = 20;
+const UGO_RETROSPECTIVE_PROMPT = [
+  "The ugo-do main result has already been saved. Do not repeat it, do not continue the task, and do not call tools.",
+  "Return only substantial observations you noticed outside of the given task, or substantial things you did not mention regarding it, that are worth taking into account or fixing in the long run.",
+  "If there is nothing substantial, return exactly: everything was ok",
+].join("\n");
 const execFileAsync = promisify(execFile);
 
 type UgoPhase =
   | "guide"
   | "do"
+  | "do_retrospective"
   | "paused"
   | "awaiting_decision"
   | "empty"
@@ -60,6 +66,8 @@ interface UgoState {
   lastGuidance?: PresentGuidanceParams;
   doPrompt?: string;
   doCompleted?: boolean;
+  doMainResponse?: string;
+  continueAfterRetrospective?: boolean;
   reason?: string;
 }
 
@@ -122,6 +130,7 @@ function normalizePhase(value: unknown): UgoPhase | undefined {
   if (
     value === "guide" ||
     value === "do" ||
+    value === "do_retrospective" ||
     value === "paused" ||
     value === "awaiting_decision" ||
     value === "empty" ||
@@ -218,6 +227,10 @@ function appendUgoMessage(
   );
 }
 
+function appendUgoRetrospective(result: string, retrospective: string): string {
+  return [result.trimEnd(), "", "---", "", "Retrospective:", retrospective.trim()].join("\n");
+}
+
 function guidePrompt(state: UgoState): string {
   const previous = state.previousGuidance
     ? `\n\nPrevious guidance result for context:\n${formatGuidanceResult(state.previousGuidance)}`
@@ -307,6 +320,8 @@ function formatSessionMessage(state: UgoState): string {
     return "Select the next runnable workboard.md item and present the guidance result.";
   if (state.phase === "do" && state.previousGuidance)
     return formatGuidanceSummary(state.previousGuidance, state.doPrompt);
+  if (state.phase === "do_retrospective")
+    return "Collecting the no-tools retrospective for the completed ugo-do result.";
   return `Workboard state: ${state.phase}${state.reason ? ` — ${state.reason}` : ""}.`;
 }
 
@@ -315,6 +330,8 @@ function formatDisplaySessionMessage(state: UgoState): string {
     return `ugo-guide phase #${state.iteration} (${state.mode}).`;
   if (state.phase === "do" && state.previousGuidance)
     return formatGuidanceSummary(state.previousGuidance, state.doPrompt, true);
+  if (state.phase === "do_retrospective")
+    return `ugo-do retrospective phase #${state.iteration} (${state.mode}).`;
   return `${stateActor(state)} ${state.phase}${state.reason ? ` — ${state.reason}` : ""}.`;
 }
 
@@ -348,6 +365,7 @@ function phaseActor(phase: "guide" | "do"): "ugo-guide" | "ugo-do" {
 function stateActor(state: UgoState): string {
   if (state.phase === "guide" || state.phase === "do")
     return phaseActor(state.phase);
+  if (state.phase === "do_retrospective") return "ugo-do";
   if (state.phase === "awaiting_decision" || state.phase === "empty")
     return "ugo-guide";
   return "ugo";
@@ -387,6 +405,12 @@ function updateUi(ctx: ExtensionContext, state: UgoState | undefined): void {
           : "current ugo-do prompt";
       widget.push(`${label}: ${promptPreview(state.doPrompt)}`);
     }
+  } else if (state.phase === "do_retrospective") {
+    if (state.previousGuidance)
+      widget.push(
+        `ugo-guide result: ${state.previousGuidance.status} — ${state.previousGuidance.item}`,
+      );
+    widget.push("current: collecting ugo-do retrospective");
   } else {
     if (state.lastGuidance)
       widget.push(
@@ -747,6 +771,11 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
+    if (state?.active && state.phase === "do_retrospective") {
+      pi.setActiveTools([]);
+      return;
+    }
+
     const active = pi.getActiveTools();
     const restored =
       state?.originalTools && state.originalTools.length > 0
@@ -808,6 +837,124 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  function hasSessionControl(
+    ctx: ExtensionContext | ReplacementSessionContext,
+  ): ctx is ExtensionCommandContext | ReplacementSessionContext {
+    return "newSession" in ctx;
+  }
+
+  async function prepareDoRetrospective(
+    ctx: ExtensionContext | ReplacementSessionContext,
+    state: UgoState,
+    prompt: string,
+    response: string,
+  ): Promise<UgoState> {
+    const retrospectiveState: UgoState = {
+      ...state,
+      active: true,
+      phase: "do_retrospective",
+      doPrompt: prompt,
+      doMainResponse: response,
+      doCompleted: false,
+      reason: "collecting ugo-do retrospective",
+    };
+    await persistCurrentState(ctx, retrospectiveState);
+    updateUi(ctx, retrospectiveState);
+    pi.setActiveTools([]);
+    return retrospectiveState;
+  }
+
+  async function queueDoRetrospective(
+    ctx: ExtensionContext | ReplacementSessionContext,
+    state: UgoState,
+    prompt: string,
+    response: string,
+  ): Promise<void> {
+    await prepareDoRetrospective(ctx, state, prompt, response);
+    pi.sendUserMessage(UGO_RETROSPECTIVE_PROMPT, { deliverAs: "followUp" });
+  }
+
+  async function runDoRetrospective(
+    ctx: ReplacementSessionContext,
+    state: UgoState,
+    prompt: string,
+    response: string,
+  ): Promise<void> {
+    const retrospectiveState = await prepareDoRetrospective(
+      ctx,
+      state,
+      prompt,
+      response,
+    );
+    await ctx.sendUserMessage(UGO_RETROSPECTIVE_PROMPT, { deliverAs: "followUp" });
+    const latestState = getLatestState(ctx);
+    if (latestState && !latestState.active) {
+      updateUi(ctx, latestState);
+      ctx.ui.notify(
+        "ugo disabled; not committing or continuing after retrospective.",
+        "info",
+      );
+      return;
+    }
+    const activeState =
+      latestState?.active && latestState.phase === "do_retrospective"
+        ? latestState
+        : retrospectiveState;
+    await finishDoRetrospective(ctx, activeState);
+  }
+
+  async function finishDoRetrospective(
+    ctx: ExtensionContext | ReplacementSessionContext,
+    state: UgoState,
+  ): Promise<void> {
+    const retrospective =
+      lastAssistantTextFromContext(ctx) ||
+      "retrospective unavailable: assistant returned no retrospective text.";
+    const completedState: UgoState = {
+      ...state,
+      phase: "do",
+      doCompleted: true,
+      doMainResponse: undefined,
+      continueAfterRetrospective: undefined,
+      reason: undefined,
+    };
+    activateToolsForState(completedState);
+    const committed = await commitStepOrPause(ctx, {
+      phase: "do",
+      prompt: state.doPrompt ?? "",
+      response: appendUgoRetrospective(state.doMainResponse ?? "", retrospective),
+      state: completedState,
+      guidance: state.previousGuidance,
+    });
+    if (!committed) return;
+
+    if (state.mode === "auto" || state.continueAfterRetrospective === true) {
+      if (hasSessionControl(ctx)) {
+        await runGuideSession(ctx, {
+          ...completedState,
+          phase: "guide",
+          doPrompt: undefined,
+          doCompleted: true,
+          doMainResponse: undefined,
+          continueAfterRetrospective: undefined,
+        });
+        return;
+      }
+      ctx.ui.notify(
+        "ugo-do retrospective finished, but this context cannot start the next guide session. Submit /ugo-continue.",
+        "warning",
+      );
+    }
+
+    appendCurrentState(completedState);
+    updateUi(ctx, completedState);
+    ctx.ui.setEditorText("/ugo-continue");
+    ctx.ui.notify(
+      "ugo-do finished with retrospective. Submit /ugo-continue to start the next ugo-guide phase.",
+      "info",
+    );
+  }
+
   function closeDecisionWatchers(): void {
     decisionWatcherGeneration++;
     for (const watcher of decisionWatchers) watcher.close();
@@ -831,6 +978,7 @@ export default function (pi: ExtensionAPI) {
       previousGuidance: state.lastGuidance,
       doPrompt: prompt,
       doCompleted: false,
+      continueAfterRetrospective: true,
       reason: `human ${signal.kind} signal in ${signal.path}`,
     };
     const parentSession = ctx.sessionManager.getSessionFile();
@@ -855,20 +1003,12 @@ export default function (pi: ExtensionAPI) {
           return;
         }
         const activeState = latestState?.active ? latestState : doState;
-        const committed = await commitStepOrPause(signalCtx, {
-          phase: "do",
+        await runDoRetrospective(
+          signalCtx,
+          activeState,
           prompt,
-          response: lastAssistantTextFromContext(signalCtx),
-          state: activeState,
-          guidance: activeState.previousGuidance,
-        });
-        if (!committed) return;
-        await runGuideSession(signalCtx, {
-          ...activeState,
-          phase: "guide",
-          doPrompt: undefined,
-          doCompleted: true,
-        });
+          lastAssistantTextFromContext(signalCtx),
+        );
       },
     });
 
@@ -1057,32 +1197,18 @@ export default function (pi: ExtensionAPI) {
         if (latestState && !latestState.active) {
           updateUi(doCtx, latestState);
           doCtx.ui.notify(
-            "ugo disabled; not committing or continuing.",
+            "ugo disabled; not starting retrospective or continuing.",
             "info",
           );
           return;
         }
         const activeState = latestState?.active ? latestState : state;
-        const committed = await commitStepOrPause(doCtx, {
-          phase: "do",
-          prompt: state.doPrompt,
-          response: lastAssistantTextFromContext(doCtx),
-          state: activeState,
-          guidance: activeState.previousGuidance,
-        });
-        if (!committed) return;
-        const afterCommitState = getLatestState(doCtx);
-        if (afterCommitState && !afterCommitState.active) {
-          updateUi(doCtx, afterCommitState);
-          doCtx.ui.notify("ugo disabled; not continuing.", "info");
-          return;
-        }
-        await runGuideSession(doCtx, {
-          ...activeState,
-          phase: "guide",
-          doPrompt: undefined,
-          doCompleted: true,
-        });
+        await runDoRetrospective(
+          doCtx,
+          activeState,
+          state.doPrompt,
+          lastAssistantTextFromContext(doCtx),
+        );
       },
     });
 
@@ -1458,31 +1584,32 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`ugo-guide could not load ${WORKFLOW_FILE}: ${message}`, "error");
       }
     }
+    if (currentState?.active && currentState.phase === "do_retrospective") {
+      return {
+        systemPrompt: `${event.systemPrompt}\n\nYou are in the ugo-do retrospective phase. The main ugo-do result is already saved. Do not call tools and do not continue the original task. Answer only the retrospective prompt.`,
+      };
+    }
     return undefined;
   });
 
   pi.on("agent_end", async (_event, ctx) => {
     const state = getLatestState(ctx) ?? currentState;
-    if (!state?.active || state.mode !== "manual") return;
+    if (!state?.active) return;
 
-    if (state.phase === "do") {
-      const completedState: UgoState = { ...state, doCompleted: true };
-      if (state.doPrompt) {
-        const committed = await commitStepOrPause(ctx, {
-          phase: "do",
-          prompt: lastUserTextFromContext(ctx) || state.doPrompt,
-          response: lastAssistantTextFromContext(ctx),
-          state: completedState,
-          guidance: state.previousGuidance,
-        });
-        if (!committed) return;
-      }
-      appendCurrentState(completedState);
-      updateUi(ctx, completedState);
-      ctx.ui.setEditorText("/ugo-continue");
-      ctx.ui.notify(
-        "ugo-do finished. Submit /ugo-continue to start the next ugo-guide phase.",
-        "info",
+    if (state.phase === "do_retrospective") {
+      if (state.mode === "manual" && state.continueAfterRetrospective !== true)
+        await finishDoRetrospective(ctx, state);
+      return;
+    }
+
+    if (state.mode !== "manual") return;
+
+    if (state.phase === "do" && state.doPrompt) {
+      await queueDoRetrospective(
+        ctx,
+        state,
+        lastUserTextFromContext(ctx) || state.doPrompt,
+        lastAssistantTextFromContext(ctx),
       );
     }
   });

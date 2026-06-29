@@ -436,6 +436,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use call for delegated operational work when the user asks for a separate worker or when current conversation context matters.",
       "Use call as the only tool call in its assistant turn; sibling tool work is not included in the forked worker context.",
+      "When the user asks to use call for a plan, range, or phases, act as coordinator: split the work into the fewest cohesive focused batches and invoke call separately for each. Do not pass the whole plan to one call unless it is truly atomic or the user explicitly asks for a single call.",
       "Use call.complex only when the worker may need delegated subtasks with nested call frames.",
       "Use call.retrospective when the delegated task is likely to inspect more than about 5 files, perform a deep code/design dive, or expose long-term architecture/naming cleanup observations; leave it off for small, narrow tasks.",
     ],
