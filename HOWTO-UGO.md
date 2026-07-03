@@ -36,30 +36,28 @@ It has two phases:
 1. **ugo-guide phase**: read `workboard.md`, load editable `workflow.md`, choose
    the next workflow outcome, and produce structured guidance for it.
 2. **ugo-do phase**: run a worker or workboard-update prompt when guidance
-   returns one, or in manual mode prefill it for the user to edit/submit. After
-   every ugo-do main result, ugo automatically runs a no-tools retrospective
-   turn and records it with the ugo-do result.
+   returns one. After every ugo-do main result, ugo automatically runs a
+   no-tools reflection turn with `Retrospective` and `Simplify` notes, records
+   it with the ugo-do result,
+   and injects the complete reflection into the next ugo-guide prompt for
+   workboard triage.
 
 Personally, i used the /pi-prompt to reflect on how i was using my LLM in a loop.
 
 ## Commands
 
 ```text
-/ugo [auto|manual] [max=N]
-/ugo-continue
-/ugo-disable
-/ugo-status
+/ugo
+/ugo-pause
 ```
 
-Defaults: `manual`, `max=20`.
+`/ugo` starts or resumes the automatic workboard loop. `/ugo-pause` requests a
+safe pause without aborting the current agent turn.
 
-Examples:
+Example:
 
 ```text
 /ugo
-/ugo manual
-/ugo auto
-/ugo auto max=5
 ```
 
 Starting ugo requires:
@@ -72,12 +70,16 @@ Starting ugo requires:
 Ugo always commits after each ugo-guide or ugo-do phase if files changed. The
 diff is the repo change; the commit message records the ugo-guide item/reason,
 prompt, session, and ugo-guide/ugo-do result. Every ugo-do result includes an
-automatic no-tools retrospective section. Ugo uses `git add -A` when
-checkpointing, so any dirty files present when a phase finishes are included in
-the checkpoint commit. If commit fails, ugo pauses.
+automatic no-tools reflection section with `Retrospective` and `Simplify` notes.
+The complete reflection is saved in ugo state and injected into the next
+ugo-guide prompt so the guide can promote relevant improvements into
+`workboard.md` updates/items. Ugo uses `git add -A` when checkpointing, so any
+dirty files present when a phase finishes are included in the checkpoint commit.
+If commit fails, ugo pauses.
 
-`/ugo-disable` disables loop control without aborting the current agent turn. Use
-Escape to abort the active turn.
+`/ugo-pause` stops file watchers immediately and otherwise waits for the active
+ugo-guide or ugo-do phase to finish and checkpoint before pausing. Use Escape to
+abort the active turn.
 
 ## The loop ugo replaces
 
@@ -108,8 +110,7 @@ done
 
 Ugo runs that loop inside interactive pi instead of a blind shell. That gives the
 user visibility and control: each ugo-guide/ugo-do phase is a normal pi session,
-manual mode lets the user edit the ugo-do prompt before submitting, Escape
-aborts the active turn, and `/ugo-disable` prevents the next phase.
+Escape aborts the active turn, and `/ugo-pause` prevents the next phase after a safe checkpoint.
 
 ## How ugo-guide chooses the next workflow outcome
 
@@ -145,27 +146,17 @@ fix list.
 
 The ugo-guide phase communicates its decision by calling `present_guidance`.
 
-## Modes
+## Loop control
 
-### manual
-
-Default. Ugo runs a ugo-guide phase, creates the ugo-do session, and pre-fills
-the editor with the ugo-do prompt. You edit or submit it manually. After the
-ugo-do turn and its automatic no-tools retrospective finish, pi pre-fills:
-
-```text
-/ugo-continue
-```
-
-Submitting it starts the next ugo-guide phase.
-
-### auto
-
-Runs continuously until `REQUIRE_HUMAN_DECISION`, `EMPTY_WORKBOARD`, `max=N`, commit failure, Escape, or disable:
+Ugo runs continuously until `REQUIRE_HUMAN_DECISION`, `EMPTY_WORKBOARD`, commit failure, Escape, or `/ugo-pause`:
 
 ```text
 ugo-guide -> ugo-do -> ugo-guide -> ugo-do -> ...
 ```
+
+`/ugo` resumes from `paused`, `awaiting_decision`, or `empty` by starting the next ugo-guide phase. If ugo is already running, `/ugo` reports the current phase instead of starting a second loop.
+
+`/ugo-pause` does not abort the active model turn. During ugo-guide it pauses after guidance is committed and before ugo-do. During ugo-do it pauses after the do result, reflection, and checkpoint commit. While waiting for a decision or an empty workboard edit, it stops the file watchers and marks ugo paused.
 
 ## State transitions and prompts
 
@@ -184,15 +175,22 @@ Prompt sent to the LLM:
 Inspect workboard.md, follow workflow.md, choose the next workflow outcome, and call present_guidance with the result.
 ```
 
-If there was a previous guidance result, the prompt becomes:
+If there was a previous guidance result, the prompt also includes it:
 
 ```text
-Inspect workboard.md, follow workflow.md, choose the next workflow outcome, and call present_guidance with the result.
-
 Previous guidance result for context:
 <pi-guidance-result>
 { ...previous guidance JSON... }
 </pi-guidance-result>
+```
+
+If there was a previous ugo-do reflection, the prompt also includes it:
+
+```text
+The previous ugo-do reflection was this:
+<complete reflection response>
+
+If it contains a relevant improvement, cleanup, simplification opportunity, or follow-up to apply, upgrade it into a new workboard.md item or precise workboard.md update according to workflow.md. Prefer needs-distill for cleanup/docs and ready for concrete code simplification. If it is not relevant now, ignore it.
 ```
 
 ### `present_guidance`: CONTINUE_WORK
@@ -300,8 +298,7 @@ matching `needs-decision` item to `ready` unless the signal names another
 runnable section. When it sees `CLARIFY:`, it moves the matching item to
 `needs-enrichment`. Then ugo commits and starts the next ugo-guide phase.
 
-If you manually edit `workboard.md` instead, submit `/ugo-continue` to run the
-next ugo-guide phase.
+If you manually edit `workboard.md` instead, submit `/ugo` to run the next ugo-guide phase.
 
 ### `present_guidance`: EMPTY_WORKBOARD
 
@@ -327,34 +324,36 @@ ugo-guide -> empty -> watch workboard.md
 
 Ugo remains active while empty. When `workboard.md` changes and only
 `workboard.md`/`workflow.md`/`scratch/` paths are dirty, ugo starts the next
-ugo-guide phase. You can also submit `/ugo-continue` after editing
-`workboard.md` or `workflow.md`.
+ugo-guide phase. You can also submit `/ugo` after editing `workboard.md` or
+`workflow.md`.
 
 ### ugo-do phase finishes
 
-Ugo first runs an automatic no-tools retrospective turn for the ugo-do result.
-The retrospective cannot call tools and should only report substantial long-term
-observations or `everything was ok`.
-
-In `auto` mode:
+Ugo first runs an automatic no-tools reflection turn for the ugo-do result. The
+reflection cannot call tools and must return two labeled notes:
 
 ```text
-ugo-do -> ugo-do retrospective -> ugo-guide
+- Retrospective: wrong-shape direction, missed design choice, or process/plan issue.
+- Simplify: cleanup/simplification opportunities observed while doing the work.
 ```
 
-In `manual` mode:
+Ugo appends the reflection to the ugo-do result for the checkpoint commit. The
+complete reflection is also injected into the next ugo-guide prompt; the guide
+decides whether it is relevant enough to become `workboard.md` updates or items.
+
+Default completion path:
 
 ```text
-ugo-do -> ugo-do retrospective -> wait for /ugo-continue
+ugo-do -> ugo-do reflection -> ugo-guide
 ```
 
-If `/ugo-disable` was run while the ugo-do phase was active:
+If `/ugo-pause` was requested while the ugo-do phase was active:
 
 ```text
-ugo-do finishes -> disabled
+ugo-do -> ugo-do reflection -> paused
 ```
 
-No commit or next ugo-guide phase is started after disable.
+The do result and reflection are still committed before the pause takes effect.
 
 ## Minimal example
 
@@ -374,7 +373,7 @@ Initial `workboard.md`:
 Start:
 
 ```text
-/ugo auto max=3
+/ugo
 ```
 
 ugo-guide phase calls:
@@ -398,7 +397,6 @@ ugo: Add hello file
 
 ugo-do phase
 ugo loop iteration: 1
-ugo mode: auto
 Session: <session file>
 
 ugo-guide result:
@@ -414,10 +412,11 @@ ugo-do result:
 
 ---
 
-Retrospective:
-<retrospective response>
+Reflection:
+- Retrospective: <retrospective response>
+- Simplify: <simplify response>
 ```
 
-The next ugo-guide phase sees the updated workboard. If nothing runnable or
-pending decision remains, it calls `EMPTY_WORKBOARD` and stays active while
-watching `workboard.md` for new work.
+The next ugo-guide phase sees the updated workboard and the complete reflection.
+If nothing runnable or pending decision remains, it calls `EMPTY_WORKBOARD` and
+stays active while watching `workboard.md` for new work.

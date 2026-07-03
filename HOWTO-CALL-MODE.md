@@ -37,6 +37,8 @@ A call frame finishes when it returns a final assistant message. That message is
 written for the parent, and the worker pi process shuts down gracefully. The call
 artifact directory contains `request.json`, `prompt.md`, `result.json`, and
 `result.md`; calls with `retrospective: true` also write `retrospective.md`.
+Successful and failed worker results include a `More info in /tmp/pi-ant-worker-*`
+footer so the caller can inspect or manually continue from the artifact files.
 
 ## Commands
 

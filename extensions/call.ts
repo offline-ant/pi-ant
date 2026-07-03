@@ -1,12 +1,13 @@
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { SessionManager, type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { flushSessionFile, runTmux } from "./tmux-helpers.ts";
 import { getToolModelCliArgs } from "./tool-model-state.ts";
 import {
+  appendWorkerMoreInfo,
   createWorkerArtifacts,
+  formatWorkerMoreInfo,
   formatWorkerResult,
   makeWorkerId,
   parseActualLockName,
@@ -329,6 +330,7 @@ export default function (pi: ExtensionAPI) {
     ctx: ExtensionContext,
     params: CallParams,
     toolCallId: string,
+    signal: AbortSignal | undefined,
     onUpdate: AgentToolUpdateCallback | undefined,
   ): Promise<{ resultText: string; details: CallToolDetails }> {
     if (!isTmuxAvailable()) {
@@ -343,89 +345,97 @@ export default function (pi: ExtensionAPI) {
     const callId = makeWorkerId();
     const requestedLockName = sanitizeWorkerName(`call-${callId}`);
     const paths = createWorkerArtifacts(callId);
-    const targetCwd = ctx.cwd;
-    const preCallLeafId = getPreCallLeafId(ctx, toolCallId);
-    const rootState = resolveRootState(ctx) ?? defaultRootState(pi.getActiveTools());
-    const parentRuntime = resolveRuntime(ctx);
-    const workerTools = captureWorkerTools(pi, rootState, parentRuntime);
-    if (workerTools.length === 0) {
-      throw new Error("Cannot start call frame: no worker tools are available after stripping call control tools.");
-    }
+    const retrospective = params.retrospective === true;
+    try {
+      writeWorkerRequest(paths, {
+        id: callId,
+        task: callFrameInstructions(params.task, params.complex === true || retrospective),
+        resultPath: paths.resultPath,
+        statusPath: paths.statusPath,
+        retrospective,
+        closeWhenDone: true,
+      });
 
-    writeWorkerRequest(paths, {
-      id: callId,
-      task: callFrameInstructions(params.task, params.complex === true || params.retrospective === true),
-      resultPath: paths.resultPath,
-      statusPath: paths.statusPath,
-      retrospective: params.retrospective === true,
-      closeWhenDone: true,
-    });
+      const targetCwd = ctx.cwd;
+      const preCallLeafId = getPreCallLeafId(ctx, toolCallId);
+      const rootState = resolveRootState(ctx) ?? defaultRootState(pi.getActiveTools());
+      const parentRuntime = resolveRuntime(ctx);
+      const workerTools = captureWorkerTools(pi, rootState, parentRuntime);
+      if (workerTools.length === 0) {
+        throw new Error("Cannot start call frame: no worker tools are available after stripping call control tools.");
+      }
 
-    const forked = SessionManager.forkFrom(parentSession, targetCwd);
-    const childSessionFile = forked.getSessionFile();
-    if (!childSessionFile) {
-      throw new Error("Could not create a persistent fork session for call frame.");
-    }
-    if (preCallLeafId === null) {
-      forked.resetLeaf();
-    } else {
-      forked.branch(preCallLeafId);
-    }
+      const forked = SessionManager.forkFrom(parentSession, targetCwd);
+      const childSessionFile = forked.getSessionFile();
+      if (!childSessionFile) {
+        throw new Error("Could not create a persistent fork session for call frame.");
+      }
+      if (preCallLeafId === null) {
+        forked.resetLeaf();
+      } else {
+        forked.branch(preCallLeafId);
+      }
 
-    const runtime: CallRuntimeState = {
-      id: callId,
-      task: params.task,
-      complex: params.complex === true,
-      parentSession,
-      childSession: childSessionFile,
-      parentCwd: ctx.cwd,
-      childCwd: targetCwd,
-      lockName: requestedLockName,
-      workerTools,
-      createdAt: new Date().toISOString(),
-    };
-    forked.appendCustomEntry(CALL_RUNTIME_CUSTOM_TYPE, runtime);
-    flushSessionFile(forked, childSessionFile);
+      const runtime: CallRuntimeState = {
+        id: callId,
+        task: params.task,
+        complex: params.complex === true,
+        parentSession,
+        childSession: childSessionFile,
+        parentCwd: ctx.cwd,
+        childCwd: targetCwd,
+        lockName: requestedLockName,
+        workerTools,
+        createdAt: new Date().toISOString(),
+      };
+      forked.appendCustomEntry(CALL_RUNTIME_CUSTOM_TYPE, runtime);
+      flushSessionFile(forked, childSessionFile);
 
-    const startResult = await runTmux(
-      pi,
-      [
-        "session-agent",
+      const startResult = await runTmux(
+        pi,
+        [
+          "session-agent",
+          requestedLockName,
+          targetCwd,
+          childSessionFile,
+          "--status-only",
+          ...getToolModelCliArgs(ctx),
+        ],
+        signal,
+      );
+      const startText = [startResult.stdout.trim(), startResult.stderr.trim()].filter(Boolean).join("\n");
+      if (startResult.code !== 0) {
+        throw new Error(startText || "Failed to start tmux call frame.");
+      }
+
+      const actualLockName = parseActualLockName(startText, requestedLockName);
+      await waitForWorkerReady(pi, actualLockName, 10_000, signal);
+      const sendResult = await runTmux(pi, ["send", actualLockName, `/worker-run ${paths.requestPath}`], signal);
+      if (sendResult.code !== 0) {
+        throw new Error(sendResult.stdout.trim() || sendResult.stderr.trim() || "Failed to send worker request to call frame.");
+      }
+
+      const { result, details } = await waitForWorkerResult(pi, {
+        id: callId,
+        actualLockName,
         requestedLockName,
-        targetCwd,
-        childSessionFile,
-        "--status-only",
-        ...getToolModelCliArgs(ctx),
-      ],
-    );
-    const startText = [startResult.stdout.trim(), startResult.stderr.trim()].filter(Boolean).join("\n");
-    if (startResult.code !== 0) {
-      throw new Error(startText || "Failed to start tmux call frame.");
+        paths,
+        sessionFile: childSessionFile,
+        task: params.task,
+        retrospective,
+        signal,
+        onUpdate,
+      });
+      const resultText = formatWorkerResult(result);
+      if (result.isError) throw new Error(appendWorkerMoreInfo(resultText, paths, retrospective));
+
+      return {
+        resultText: `${resultText}\n\n${formatWorkerMoreInfo(paths, retrospective)}`,
+        details: { ...createCallDetails(paths, callId, actualLockName, requestedLockName, childSessionFile, params), elapsedMs: details.elapsedMs },
+      };
+    } catch (error) {
+      throw new Error(appendWorkerMoreInfo(error instanceof Error ? error.message : String(error), paths, retrospective));
     }
-
-    const actualLockName = parseActualLockName(startText, requestedLockName);
-    await waitForWorkerReady(pi, actualLockName);
-    const sendResult = await runTmux(pi, ["send", actualLockName, `/worker-run ${paths.requestPath}`]);
-    if (sendResult.code !== 0) {
-      throw new Error(sendResult.stdout.trim() || sendResult.stderr.trim() || "Failed to send worker request to call frame.");
-    }
-
-    const { result, details } = await waitForWorkerResult(pi, {
-      id: callId,
-      actualLockName,
-      requestedLockName,
-      paths,
-      sessionFile: childSessionFile,
-      task: params.task,
-      retrospective: params.retrospective === true,
-      onUpdate,
-    });
-    if (result.isError) throw new Error(result.result);
-
-    return {
-      resultText: formatWorkerResult(result),
-      details: { ...createCallDetails(paths, callId, actualLockName, requestedLockName, childSessionFile, params), elapsedMs: details.elapsedMs },
-    };
   }
 
   pi.registerTool({
@@ -442,13 +452,13 @@ export default function (pi: ExtensionAPI) {
     ],
     parameters: callParams,
     renderCall: renderCallArgs,
-    async execute(toolCallId, params: CallParams, _signal, onUpdate, ctx) {
+    async execute(toolCallId, params: CallParams, signal, onUpdate, ctx) {
       const runtime = resolveRuntime(ctx);
       if (runtime && !runtime.complex) {
         throw new Error("This call frame is not complex; nested call is disabled.");
       }
 
-      const { resultText, details } = await startForkedCall(ctx, params, toolCallId, onUpdate);
+      const { resultText, details } = await startForkedCall(ctx, params, toolCallId, signal, onUpdate);
       return {
         content: [{ type: "text", text: resultText }],
         details,

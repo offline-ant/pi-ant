@@ -21,6 +21,11 @@ preserve useful context, enable review, or help drive broad work to completion.
 Use clear stopping points over vague autonomy. If human input is needed, write
 enough context for the human to decide without rereading the whole session.
 
+When the prompt includes a previous ugo-do reflection, triage it as advisory
+context. If it identifies a relevant improvement, wrong-shape cut, cleanup,
+simplification, or follow-up, promote it into the appropriate `workboard.md`
+update or item. If it is not relevant now, ignore it.
+
 ## Workboard sections
 
 If the user did not name an item, choose the first runnable non-empty workboard

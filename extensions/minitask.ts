@@ -1,4 +1,3 @@
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { SessionManager, type AgentToolUpdateCallback, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
@@ -7,6 +6,7 @@ import { flushSessionFile, runTmux } from "./tmux-helpers.ts";
 import { getToolModelCliArgs } from "./tool-model-state.ts";
 import {
   createWorkerArtifacts,
+  formatWorkerMoreInfo,
   formatWorkerResult,
   makeWorkerId,
   parseActualLockName,
@@ -40,6 +40,7 @@ interface MinitaskRunResult {
   exitCode: number;
   args: string[];
   sessionFile?: string;
+  moreInfo?: string;
 }
 
 function isTmuxAvailable(): boolean {
@@ -60,6 +61,7 @@ function formatMinitaskResult(result: MinitaskRunResult): string {
   const sessionLines = result.sessionFile
     ? ["", "## Session", `Reopen manually: pi --session ${result.sessionFile}`]
     : [];
+  const moreInfoLines = result.moreInfo ? ["", "---", result.moreInfo] : [];
   return [
     "## Task",
     result.task,
@@ -67,6 +69,7 @@ function formatMinitaskResult(result: MinitaskRunResult): string {
     `## Answer${exitLabel}`,
     result.answer || "(no output)",
     ...sessionLines,
+    ...moreInfoLines,
   ].join("\n");
 }
 
@@ -91,22 +94,27 @@ async function runMinitaskAttempt(
   params: MinitaskParams,
   cwd: string,
   args: string[],
+  signal: AbortSignal | undefined,
   onUpdate: AgentToolUpdateCallback | undefined,
 ): Promise<MinitaskRunResult> {
   const id = makeWorkerId();
   const paths = createWorkerArtifacts(id);
+  const retrospective = params.retrospective === true;
+  const moreInfo = formatWorkerMoreInfo(paths, retrospective);
   writeWorkerRequest(paths, {
     id,
     task: params.task,
     resultPath: paths.resultPath,
     statusPath: paths.statusPath,
-    retrospective: params.retrospective === true,
+    retrospective,
     closeWhenDone: true,
   });
 
   const session = SessionManager.create(cwd);
   const sessionFile = session.getSessionFile();
-  if (!sessionFile) throw new Error("Could not create a persistent session for minitask.");
+  if (!sessionFile) {
+    return { task: params.task, answer: "Could not create a persistent session for minitask.", exitCode: 1, args, moreInfo };
+  }
   session.appendCustomEntry("pi-ant:minitask", { id, createdAt: new Date().toISOString() });
   flushSessionFile(session, sessionFile);
 
@@ -118,16 +126,16 @@ async function runMinitaskAttempt(
     sessionFile,
     "--status-only",
     ...args,
-  ]);
+  ], signal);
   const startText = [startResult.stdout.trim(), startResult.stderr.trim()].filter(Boolean).join("\n");
   if (startResult.code !== 0) {
-    return { task: params.task, answer: startText || "Failed to start minitask worker.", exitCode: 1, args, sessionFile };
+    return { task: params.task, answer: startText || "Failed to start minitask worker.", exitCode: 1, args, sessionFile, moreInfo };
   }
 
   const actualLockName = parseActualLockName(startText, requestedLockName);
   try {
-    await waitForWorkerReady(pi, actualLockName);
-    const sendResult = await runTmux(pi, ["send", actualLockName, `/worker-run ${paths.requestPath}`]);
+    await waitForWorkerReady(pi, actualLockName, 10_000, signal);
+    const sendResult = await runTmux(pi, ["send", actualLockName, `/worker-run ${paths.requestPath}`], signal);
     if (sendResult.code !== 0) {
       return {
         task: params.task,
@@ -135,6 +143,7 @@ async function runMinitaskAttempt(
         exitCode: 1,
         args,
         sessionFile,
+        moreInfo,
       };
     }
 
@@ -145,7 +154,8 @@ async function runMinitaskAttempt(
       paths,
       sessionFile,
       task: params.task,
-      retrospective: params.retrospective === true,
+      retrospective,
+      signal,
       onUpdate,
     });
     return {
@@ -154,9 +164,10 @@ async function runMinitaskAttempt(
       exitCode: result.isError ? 1 : 0,
       args,
       sessionFile,
+      moreInfo,
     };
   } catch (error) {
-    return { task: params.task, answer: error instanceof Error ? error.message : String(error), exitCode: 1, args, sessionFile };
+    return { task: params.task, answer: error instanceof Error ? error.message : String(error), exitCode: 1, args, sessionFile, moreInfo };
   } finally {
     await runTmux(pi, ["kill", actualLockName]).catch(() => undefined);
   }
@@ -172,7 +183,7 @@ export default function minitaskExtension(pi: ExtensionAPI): void {
       "For multiple independent tasks, call this tool multiple times in parallel; do not put dependent followups here because each run has no shared context.",
     parameters: minitaskParams,
     renderCall: renderMinitaskArgs,
-    async execute(_toolCallId, params, _signal, onUpdate, ctx) {
+    async execute(_toolCallId, params, signal, onUpdate, ctx) {
       if (!isTmuxAvailable()) {
         throw new Error("minitask requires tmux; start pi inside a tmux session to use tmux-backed minitasks.");
       }
@@ -181,7 +192,7 @@ export default function minitaskExtension(pi: ExtensionAPI): void {
       let result: MinitaskRunResult | undefined;
       const attempts = buildPiAttempts(params.simple === true && toolModelArgs.length === 0, toolModelArgs);
       for (const args of attempts) {
-        result = await runMinitaskAttempt(pi, params, ctx.cwd, args, onUpdate);
+        result = await runMinitaskAttempt(pi, params, ctx.cwd, args, signal, onUpdate);
         if (result.exitCode === 0) break;
       }
 
