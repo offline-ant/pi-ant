@@ -388,7 +388,7 @@ function waitForAbortableDelay(ms: number, signal?: AbortSignal): Promise<boolea
 function formatInteractivePromptIdleText(name: string, state: PromptState): string {
   const line = state.line?.trim();
   const prompt = line && line.length > 0 ? `\nPrompt: ${line}` : "";
-  return `Interactive remote pane '${name}' appears idle; prompt detected at cursor.${prompt}`;
+  return `Interactive pane '${name}' appears idle; prompt detected at cursor.${prompt}`;
 }
 
 async function getStableIdlePromptState(
@@ -792,7 +792,7 @@ export default function semaphoreLocksExtension(pi: ExtensionAPI) {
       "Wait for one of many semaphore locks to be released. Use this to coordinate with other pi instances. " +
       "IMPORTANT: This call BLOCKS until a lock is released — you cannot do any other work while waiting. " +
       "Finish all independent tasks BEFORE calling this. " +
-      "For low-level tmux worker panes, wait on the lock name (e.g., 'worker'). For direct interactive SSH/mosh panes created by tmux-bash, semaphore_wait on the base lock returns when a remote shell prompt is detected at the cursor. Structured coding-agent/call/minitask tools wait for their own result files.",
+      "For low-level tmux worker panes, wait on the lock name (e.g., 'worker'). For direct interactive ssh/mosh/su panes created by tmux-bash, semaphore_wait on the base lock returns when a shell prompt is detected at the cursor. Structured coding-agent/call/minitask tools wait for their own result files.",
     parameters: semaphoreWaitSchema,
     async execute(_toolCallId, params, signal, onUpdate) {
       const { safeNames, timeoutSeconds } = getSemaphoreWaitParams(params);

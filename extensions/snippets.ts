@@ -10,6 +10,9 @@ export const PRINCIPLES_SUFFIX =
 export const CUT_SUFFIX =
   "Take a step back before continuing. Re-state the outer problem, then separate essential complexity from accidental complexity in the current frame/code/plan. Ask what should not exist, what mechanisms duplicate the same boundary, what state or authority boundary is in the wrong owner, and whether a cleaner cut would collapse the problem. If the current direction is wrong-shape, pause and propose the simpler cut before editing; ask me about real design choices.";
 
+export const SIMPLIFY_SUFFIX =
+  "Take a simplification pass before continuing. Ask what can be deleted, inlined, merged, renamed, or not built at all. Everything that is not written is never wrong, stale, or overcomplicated. Prefer the smallest clean end state over mechanisms, options, compatibility layers, abstractions, or docs that do not pull their weight. Separate essential complexity from accidental complexity, then propose or apply the safe simplifications; ask me about real design choices.";
+
 export const MINI_REVIEW_SUFFIX =
   "Ask minitask for a generic review of this, just issues and potential improvements. Then you evaluate its suggestions: apply clearly good ones, ignore bad ones, and ask me about anything uncertain.";
 
@@ -98,6 +101,11 @@ export const SNIPPETS: PromptSnippet[] = [
     key: "cut",
     value: CUT_SUFFIX,
     description: "Insert the cut/framing suffix",
+  },
+  {
+    key: "simplify",
+    value: SIMPLIFY_SUFFIX,
+    description: "Insert the simplification/deletion review suffix",
   },
   {
     key: "mini-review",

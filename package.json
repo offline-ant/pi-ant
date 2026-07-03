@@ -49,6 +49,7 @@
       "./extensions/tmux-fork.ts",
       "./extensions/context-explorer.ts",
       "./extensions/browser.ts",
+      "./extensions/web.ts",
       "./extensions/prompt-history.ts",
       "./extensions/vim.ts",
       "./extensions/agents-d.ts"

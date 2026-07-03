@@ -6,7 +6,9 @@ import { Type, type Static } from "typebox";
 import { flushSessionFile, runTmux } from "./tmux-helpers.ts";
 import { getToolModelCliArgs } from "./tool-model-state.ts";
 import {
+  appendWorkerMoreInfo,
   createWorkerArtifacts,
+  formatWorkerMoreInfo,
   formatWorkerResult,
   makeWorkerId,
   parseActualLockName,
@@ -102,9 +104,9 @@ function claimWorker(name: string): () => void {
   };
 }
 
-async function paneExists(pi: ExtensionAPI, lockName: string): Promise<boolean> {
-  const result = await runTmux(pi, ["pane-id", lockName]);
-  return result.code === 0 && result.stdout.trim().startsWith("%");
+async function paneExists(pi: ExtensionAPI, lockName: string, signal?: AbortSignal): Promise<boolean> {
+  const result = await runTmux(pi, ["pane-state", lockName], signal);
+  return result.code === 0 && /^state=live$/m.test(result.stdout);
 }
 
 function isIdle(entry: RegistryEntry): boolean {
@@ -112,7 +114,7 @@ function isIdle(entry: RegistryEntry): boolean {
   return status === undefined || status.state === "idle" || status.state === "closed";
 }
 
-async function startWorker(pi: ExtensionAPI, _params: CodingAgentParams, name: string, cwd: string, paths: WorkerArtifactPaths, ctx: ExtensionContext): Promise<RegistryEntry> {
+async function startWorker(pi: ExtensionAPI, _params: CodingAgentParams, name: string, cwd: string, paths: WorkerArtifactPaths, ctx: ExtensionContext, signal?: AbortSignal): Promise<RegistryEntry> {
   const session = SessionManager.create(cwd);
   const sessionFile = session.getSessionFile();
   if (!sessionFile) throw new Error("Could not create a persistent session for coding-agent.");
@@ -127,7 +129,7 @@ async function startWorker(pi: ExtensionAPI, _params: CodingAgentParams, name: s
     sessionFile,
     "--status-only",
     ...getToolModelCliArgs(ctx),
-  ]);
+  ], signal);
   const startText = [startResult.stdout.trim(), startResult.stderr.trim()].filter(Boolean).join("\n");
   if (startResult.code !== 0) throw new Error(startText || "Failed to start coding-agent.");
 
@@ -146,8 +148,8 @@ async function startWorker(pi: ExtensionAPI, _params: CodingAgentParams, name: s
   return entry;
 }
 
-async function sendWorkerRun(pi: ExtensionAPI, lockName: string, requestPath: string): Promise<void> {
-  const result = await runTmux(pi, ["send", lockName, `/worker-run ${requestPath}`]);
+async function sendWorkerRun(pi: ExtensionAPI, lockName: string, requestPath: string, signal?: AbortSignal): Promise<void> {
+  const result = await runTmux(pi, ["send", lockName, `/worker-run ${requestPath}`], signal);
   const text = result.stdout.trim() || result.stderr.trim();
   if (result.code !== 0) throw new Error(text || `Failed to send request to coding-agent '${lockName}'.`);
 }
@@ -163,7 +165,7 @@ function renderCodingAgentArgs(args: CodingAgentParams) {
   };
 }
 
-function formatCodingAgentResult(resultText: string, entry: RegistryEntry, paths: WorkerArtifactPaths, contextPercent: number | null | undefined): string {
+function formatCodingAgentResult(resultText: string, entry: RegistryEntry, paths: WorkerArtifactPaths, contextPercent: number | null | undefined, retrospective: boolean): string {
   const context = contextPercent === null || contextPercent === undefined ? "unknown" : `${contextPercent.toFixed(1)}%`;
   return [
     "## Result",
@@ -175,7 +177,8 @@ function formatCodingAgentResult(resultText: string, entry: RegistryEntry, paths
     `Context: ${context}`,
     `Session: ${entry.sessionFile}`,
     `Continue manually: pi --session ${entry.sessionFile}`,
-    `Artifacts: ${paths.artifactDir}`,
+    "",
+    formatWorkerMoreInfo(paths, retrospective),
   ].join("\n");
 }
 
@@ -193,7 +196,7 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
     ],
     parameters: codingAgentParams,
     renderCall: renderCodingAgentArgs,
-    async execute(_toolCallId, params, _signal, onUpdate: AgentToolUpdateCallback | undefined, ctx) {
+    async execute(_toolCallId, params, signal, onUpdate: AgentToolUpdateCallback | undefined, ctx) {
       const name = validateName(params.name);
       const cwd = path.resolve(ctx.cwd, params.folder ?? ".");
       if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
@@ -201,15 +204,17 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
       }
 
       const releaseClaim = claimWorker(name);
+      let paths: WorkerArtifactPaths | undefined;
+      const retrospective = params.retrospective === true;
       try {
         const id = makeWorkerId();
-        const paths = createWorkerArtifacts(id);
+        paths = createWorkerArtifacts(id);
         writeWorkerRequest(paths, {
           id,
           task: params.task,
           resultPath: paths.resultPath,
           statusPath: paths.statusPath,
-          retrospective: params.retrospective === true,
+          retrospective,
           closeWhenDone: false,
         });
 
@@ -218,7 +223,7 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
           if (path.resolve(entry.cwd) !== cwd) {
             throw new Error(`coding-agent '${name}' already exists for ${entry.cwd}; refusing reuse with ${cwd}.`);
           }
-          if (!(await paneExists(pi, entry.lockName))) {
+          if (!(await paneExists(pi, entry.lockName, signal))) {
             entry = undefined;
           } else if (!isIdle(entry)) {
             throw new Error(`coding-agent '${name}' is busy.`);
@@ -227,14 +232,14 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
 
         if (!entry) {
           writeWorkerStatus(paths.statusPath, { id, state: "running", resultPath: paths.resultPath, sessionFile: undefined, contextPercent: null });
-          entry = await startWorker(pi, params, name, cwd, paths, ctx);
-          await waitForWorkerReady(pi, entry.lockName);
-          await sendWorkerRun(pi, entry.lockName, paths.requestPath);
+          entry = await startWorker(pi, params, name, cwd, paths, ctx, signal);
+          await waitForWorkerReady(pi, entry.lockName, 10_000, signal);
+          await sendWorkerRun(pi, entry.lockName, paths.requestPath, signal);
         } else {
           writeWorkerStatus(paths.statusPath, { id, state: "running", resultPath: paths.resultPath, sessionFile: entry.sessionFile, contextPercent: null });
           entry = { ...entry, statusPath: paths.statusPath, updatedAt: new Date().toISOString() };
           writeRegistry(entry);
-          await sendWorkerRun(pi, entry.lockName, paths.requestPath);
+          await sendWorkerRun(pi, entry.lockName, paths.requestPath, signal);
         }
 
         const { result } = await waitForWorkerResult(pi, {
@@ -244,17 +249,21 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
           paths,
           sessionFile: entry.sessionFile,
           task: params.task,
-          retrospective: params.retrospective === true,
+          retrospective,
+          signal,
           onUpdate,
         });
-        if (result.isError) throw new Error(result.result);
-
         const resultText = formatWorkerResult(result);
-        const responseText = formatCodingAgentResult(resultText, entry, paths, result.contextPercent);
+        if (result.isError) throw new Error(appendWorkerMoreInfo(resultText, paths, retrospective));
+
+        const responseText = formatCodingAgentResult(resultText, entry, paths, result.contextPercent, retrospective);
         return {
           content: [{ type: "text", text: responseText }],
           details: { name, worker: entry, result, artifacts: paths, sessionCommand: `pi --session ${entry.sessionFile}` },
         };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(paths ? appendWorkerMoreInfo(message, paths, retrospective) : message);
       } finally {
         releaseClaim();
       }

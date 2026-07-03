@@ -29,7 +29,11 @@ interface BrowserResult {
 	url: string | null;
 	title: string | null;
 	before_screenshot: string;
+	before_html: string;
 	after_screenshot: string;
+	after_html: string;
+	before_html_error?: string;
+	after_html_error?: string;
 	eval_result?: unknown;
 	eval_error?: string;
 }
@@ -66,8 +70,10 @@ function parseBrowserResult(stdout: string): BrowserResult {
 	const sessionId = readString(result, "session_id");
 	const browser = readString(result, "browser");
 	const beforeScreenshot = readString(result, "before_screenshot");
+	const beforeHtml = readString(result, "before_html");
 	const afterScreenshot = readString(result, "after_screenshot");
-	if (!sessionId || (browser !== "chromium" && browser !== "firefox") || !beforeScreenshot || !afterScreenshot) {
+	const afterHtml = readString(result, "after_html");
+	if (!sessionId || (browser !== "chromium" && browser !== "firefox") || !beforeScreenshot || !beforeHtml || !afterScreenshot || !afterHtml) {
 		throw new Error("browser-io returned an invalid result object");
 	}
 
@@ -79,9 +85,15 @@ function parseBrowserResult(stdout: string): BrowserResult {
 		url,
 		title,
 		before_screenshot: beforeScreenshot,
+		before_html: beforeHtml,
 		after_screenshot: afterScreenshot,
+		after_html: afterHtml,
 	};
 
+	const beforeHtmlError = readString(result, "before_html_error");
+	if (beforeHtmlError) browserResult.before_html_error = beforeHtmlError;
+	const afterHtmlError = readString(result, "after_html_error");
+	if (afterHtmlError) browserResult.after_html_error = afterHtmlError;
 	if ("eval_result" in result) browserResult.eval_result = result.eval_result;
 	const evalError = readString(result, "eval_error");
 	if (evalError) browserResult.eval_error = evalError;
@@ -169,9 +181,17 @@ function formatBrowserResult(result: BrowserResult): string {
 		`url: ${result.url ?? ""}`,
 		`title: ${result.title ?? ""}`,
 		`before_screenshot: ${result.before_screenshot}`,
+		`before_html: ${result.before_html}`,
 		`after_screenshot: ${result.after_screenshot}`,
+		`after_html: ${result.after_html}`,
 	];
 
+	if (result.before_html_error) {
+		lines.push("", "before_html_error:", result.before_html_error);
+	}
+	if (result.after_html_error) {
+		lines.push("", "after_html_error:", result.after_html_error);
+	}
 	if ("eval_result" in result) {
 		lines.push("", "eval_result:", formatValue(result.eval_result));
 	}
@@ -195,12 +215,12 @@ export default function (pi: ExtensionAPI) {
 		name: "browser",
 		label: "Browser",
 		description:
-			"Control a persistent Firefox or Chromium browser session. Minimal flow: navigate url if provided, capture screenshot, evaluate JavaScript if provided, capture screenshot again. Returns screenshot paths and eval result. Output is truncated to " +
+			"Control a persistent Firefox or Chromium browser session. Minimal flow: navigate url if provided, capture screenshot and HTML, evaluate JavaScript if provided, capture screenshot and HTML again. Returns screenshot/HTML paths and eval result. Output is truncated to " +
 			`${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
-		promptSnippet: "Control Chromium/Firefox via devtools, with before/after screenshot paths and awaited JavaScript eval",
+		promptSnippet: "Control Chromium/Firefox via devtools, with before/after screenshot and HTML paths plus awaited JavaScript eval",
 		promptGuidelines: [
 			"Use browser when the user asks to inspect a web page, capture browser screenshots, or evaluate JavaScript in Chromium/Firefox.",
-			"browser always captures screenshots after navigation and after eval; use read on a returned PNG path if visual inspection is needed.",
+			"browser always captures screenshots and HTML after navigation and after eval; use read on returned PNG/HTML paths to inspect visual output or DOM structure.",
 			"browser eval awaits promises; for multi-statement JavaScript, pass an async IIFE expression such as `(async () => { const x = await f(); return x; })()`.",
 		],
 		parameters: BROWSER_PARAMS,

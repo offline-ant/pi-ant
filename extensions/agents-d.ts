@@ -2,9 +2,12 @@
  * agents-d — auto-load AGENTS.d/ context files into model prompt.
  *
  * On every agent start, checks for ./AGENTS.d/ in ctx.cwd. If present:
- *   1. Prints a notification with the directory listing.
- *   2. Injects top-level file contents and the full tree structure into the
- *      system prompt.
+ *   1. Injects top-level file contents and the full tree structure into the
+ *      system prompt for that agent run.
+ *   2. Prints a notification saying the context was injected.
+ *
+ * If the current system prompt already contains this extension's AGENTS.d
+ * marker, injection is skipped to prevent duplicate large file content.
  *
  * File loading rules (following the lace context-files.ts pattern):
  *   - Only top-level entries (files and symlinks) in AGENTS.d/ are loaded.
@@ -37,6 +40,9 @@ import {
   realpathSync,
 } from "node:fs";
 import { join } from "node:path";
+
+const AGENTS_D_CONTEXT_START = "<!-- pi-ant agents-d context start -->";
+const AGENTS_D_CONTEXT_END = "<!-- pi-ant agents-d context end -->";
 
 interface FsEntry {
   name: string;
@@ -239,6 +245,7 @@ function buildAgentsDContext(cwd: string): AgentsDContext | null {
     .sort();
 
   const systemPromptBlock = [
+    AGENTS_D_CONTEXT_START,
     "# AGENTS.d — auto-loaded context files",
     "",
     "The AGENTS.d/ directory was found in this workspace. Its contents are",
@@ -252,6 +259,7 @@ function buildAgentsDContext(cwd: string): AgentsDContext | null {
     "```",
     treeBlock,
     "```",
+    AGENTS_D_CONTEXT_END,
   ].join("\n");
 
   return { systemPromptBlock, loadedFiles, visibleDirs, treeBlock };
@@ -278,8 +286,16 @@ export default function (pi: ExtensionAPI) {
     const parts: string[] = [`loaded: ${loadedList}`];
     if (dirsList) parts.push(`dirs: ${dirsList}`);
 
+    if (event.systemPrompt.includes(AGENTS_D_CONTEXT_START)) {
+      ctx.ui.notify(
+        `AGENTS.d/ already injected; skipped duplicate: ${parts.join("; ")}`,
+        "warning",
+      );
+      return;
+    }
+
     ctx.ui.notify(
-      `AGENTS.d/ ${parts.join("; ")}`,
+      `AGENTS.d/ injected into system prompt: ${parts.join("; ")}`,
       "info",
     );
 

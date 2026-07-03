@@ -47,8 +47,8 @@ claude_agent_marker_path() {
   printf '%s/claude-agent.%s' "$STATE_DIR" "$1"
 }
 
-interactive_remote_marker_path() {
-  printf '%s/interactive-remote.%s' "$STATE_DIR" "$1"
+interactive_prompt_marker_path() {
+  printf '%s/interactive-prompt.%s' "$STATE_DIR" "$1"
 }
 
 pane_marker_path() {
@@ -64,7 +64,7 @@ clear_pi_agent_state() {
   rm -f -- \
     "$(pi_agent_marker_path "$name")" \
     "$(claude_agent_marker_path "$name")" \
-    "$(interactive_remote_marker_path "$name")" \
+    "$(interactive_prompt_marker_path "$name")" \
     "$(pane_marker_path "$name")" \
     "$(last_warned_input_path "$name")"
 }

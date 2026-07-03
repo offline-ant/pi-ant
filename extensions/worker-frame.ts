@@ -11,7 +11,7 @@ const FINISH_CALL_NOW_COMMAND = "finish-call-now";
 const RESULT_POLL_INTERVAL_MS = 250;
 const PROGRESS_UPDATE_INTERVAL_MS = 5000;
 const PANE_STATE_POLL_INTERVAL_MS = 1000;
-const PANE_MISSING_GRACE_MS = 60_000;
+const PANE_MISSING_GRACE_MS = 5000;
 
 const RETROSPECTIVE_PROMPT = [
   "The main result has already been saved for the parent. Do not repeat it, do not continue the task, and do not call tools.",
@@ -215,9 +215,29 @@ export function createWorkerArtifacts(id: string): WorkerArtifactPaths {
   };
 }
 
+export function formatWorkerMoreInfo(paths: WorkerArtifactPaths, retrospective: boolean): string {
+  const usefulFiles = [
+    "prompt.md",
+    "result.md",
+    ...(retrospective ? ["retrospective.md"] : []),
+    "request.json",
+    "result.json",
+    "status.json",
+  ];
+  return [`More info in ${paths.artifactDir}`, `Useful files: ${usefulFiles.join(", ")}`].join("\n");
+}
+
+export function appendWorkerMoreInfo(message: string, paths: WorkerArtifactPaths, retrospective: boolean): string {
+  const trimmed = message.trimEnd();
+  if (!trimmed) return formatWorkerMoreInfo(paths, retrospective);
+  if (trimmed.includes(paths.artifactDir)) return trimmed;
+  return `${trimmed}\n\n${formatWorkerMoreInfo(paths, retrospective)}`;
+}
+
 export function writeWorkerRequest(paths: WorkerArtifactPaths, request: WorkerRequestFile): void {
   atomicWriteJson(paths.requestPath, request);
-  fs.writeFileSync(paths.promptPath, `/worker-run ${paths.requestPath}\n`, { encoding: "utf8", mode: 0o600 });
+  const prompt = ["# Prompt", "", request.task, "", "# Worker command", "", `/worker-run ${paths.requestPath}`, ""].join("\n");
+  fs.writeFileSync(paths.promptPath, prompt, { encoding: "utf8", mode: 0o600 });
 }
 
 export function readWorkerStatus(statusPath: string): WorkerStatusFile | undefined {
@@ -261,23 +281,26 @@ export function parseWorkerResult(raw: string, resultPath: string, expectedId: s
   return parsed;
 }
 
-export async function captureWorkerOutput(pi: ExtensionAPI, lockName: string, lines = 80): Promise<string> {
+export async function captureWorkerOutput(pi: ExtensionAPI, lockName: string, lines = 80, signal?: AbortSignal): Promise<string> {
   try {
-    const result = await runTmux(pi, ["capture", lockName, String(lines)]);
+    const result = await runTmux(pi, ["capture", lockName, String(lines)], signal);
     const text = result.stdout.trimEnd() || result.stderr.trimEnd();
     return text || "(no tmux output)";
   } catch (error) {
+    throwIfAborted(signal);
     return `Could not capture tmux output for ${lockName}: ${error instanceof Error ? error.message : String(error)}`;
   }
 }
 
-export async function waitForWorkerReady(pi: ExtensionAPI, lockName: string, timeoutMs = 10_000): Promise<void> {
+export async function waitForWorkerReady(pi: ExtensionAPI, lockName: string, timeoutMs = 10_000, signal?: AbortSignal): Promise<void> {
   const startedAt = Date.now();
   while (Date.now() - startedAt < timeoutMs) {
-    const output = await captureWorkerOutput(pi, lockName, 30);
+    throwIfAborted(signal);
+    const output = await captureWorkerOutput(pi, lockName, 30, signal);
     if (/\bpi v\d+\.\d+\.\d+\b|Model scope:|Ask it how to use or extend Pi/.test(output)) return;
     await delay(300);
   }
+  throwIfAborted(signal);
 }
 
 interface WorkerPaneState {
@@ -294,13 +317,18 @@ function parseWorkerPaneState(stdout: string, stderr: string, code: number): Wor
   return { state, paneId, text };
 }
 
-async function readWorkerPaneState(pi: ExtensionAPI, lockName: string): Promise<WorkerPaneState> {
+async function readWorkerPaneState(pi: ExtensionAPI, lockName: string, signal?: AbortSignal): Promise<WorkerPaneState> {
   try {
-    const result = await runTmux(pi, ["pane-state", lockName]);
+    const result = await runTmux(pi, ["pane-state", lockName], signal);
     return parseWorkerPaneState(result.stdout, result.stderr, result.code);
   } catch (error) {
+    throwIfAborted(signal);
     return { state: "missing", text: error instanceof Error ? error.message : String(error) };
   }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error("Worker wait aborted.");
 }
 
 function delay(ms: number): Promise<void> {
@@ -317,6 +345,7 @@ export async function waitForWorkerResult(
     sessionFile: string;
     task: string;
     retrospective: boolean;
+    signal?: AbortSignal;
     onUpdate?: (partial: { content: Array<{ type: "text"; text: string }>; details: WorkerToolDetails }) => void;
   },
 ): Promise<{ result: WorkerResultFile; details: WorkerToolDetails }> {
@@ -325,8 +354,10 @@ export async function waitForWorkerResult(
   let lastPaneStateCheckAt = -PANE_STATE_POLL_INTERVAL_MS;
   let paneMissingSince: number | undefined;
   let lastKnownPaneId: string | undefined;
+  let hasSeenLivePane = false;
 
   while (true) {
+    throwIfAborted(options.signal);
     if (fs.existsSync(options.paths.resultPath)) {
       const result = parseWorkerResult(fs.readFileSync(options.paths.resultPath, "utf8"), options.paths.resultPath, options.id);
       return {
@@ -352,12 +383,13 @@ export async function waitForWorkerResult(
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs - lastPaneStateCheckAt >= PANE_STATE_POLL_INTERVAL_MS) {
       lastPaneStateCheckAt = elapsedMs;
-      const paneState = await readWorkerPaneState(pi, options.actualLockName);
+      const paneState = await readWorkerPaneState(pi, options.actualLockName, options.signal);
       if (paneState.paneId) lastKnownPaneId = paneState.paneId;
       if (paneState.state === "live") {
+        hasSeenLivePane = true;
         paneMissingSince = undefined;
       } else if (paneState.state === "dead") {
-        const output = await captureWorkerOutput(pi, paneState.paneId ?? options.actualLockName);
+        const output = await captureWorkerOutput(pi, paneState.paneId ?? options.actualLockName, 80, options.signal);
         throw new Error([
           "Worker exited before writing a final result.",
           `tmux lock: ${options.actualLockName}`,
@@ -370,10 +402,11 @@ export async function waitForWorkerResult(
         ].join("\n"));
       } else {
         paneMissingSince ??= Date.now();
-        if (Date.now() - paneMissingSince >= PANE_MISSING_GRACE_MS) {
+        if (hasSeenLivePane || Date.now() - paneMissingSince >= PANE_MISSING_GRACE_MS) {
           throw new Error([
             "Worker pane disappeared before writing a final result.",
             `tmux lock: ${options.actualLockName}`,
+            `tmux pane: ${lastKnownPaneId ?? "unknown"}`,
             `session: ${options.sessionFile}`,
             `result path: ${options.paths.resultPath}`,
             `waited after missing: ${Math.floor((Date.now() - paneMissingSince) / 1000)}s`,
@@ -387,7 +420,7 @@ export async function waitForWorkerResult(
 
     if (options.onUpdate && elapsedMs - lastProgressAt >= PROGRESS_UPDATE_INTERVAL_MS) {
       lastProgressAt = elapsedMs;
-      const output = await captureWorkerOutput(pi, lastKnownPaneId ?? options.actualLockName, 12);
+      const output = await captureWorkerOutput(pi, lastKnownPaneId ?? options.actualLockName, 12, options.signal);
       options.onUpdate({
         content: [{ type: "text", text: [`Waiting for worker ${options.actualLockName} (${Math.floor(elapsedMs / 1000)}s elapsed).`, `Session: ${options.sessionFile}`, "", output].join("\n") }],
         details: {
@@ -409,6 +442,7 @@ export async function waitForWorkerResult(
     }
 
     await delay(RESULT_POLL_INTERVAL_MS);
+    throwIfAborted(options.signal);
   }
 }
 
