@@ -5,52 +5,32 @@ export interface PromptSnippet {
 }
 
 export const PRINCIPLES_SUFFIX =
-  "Note our design principles: Do the hard part first, clean up as you go, leave no dead code or overcomplicated abstractions behind, being broken between phases is fine, cost of change is 0, avoid quick fixes / hacks, well designed longterm architecture endstate is critcal. Clear, consistent names are important; immediately refactor and rename things to best describe reality.";
+  "Prefer the smallest clean long-term design. Do structural work first; remove stale code and avoid shims, duplicate mechanisms, and speculative abstractions. Rename unclear concepts to match reality.";
 
 export const CUT_SUFFIX =
-  "Take a step back before continuing. Re-state the outer problem, then separate essential complexity from accidental complexity in the current frame/code/plan. Ask what should not exist, what mechanisms duplicate the same boundary, what state or authority boundary is in the wrong owner, and whether a cleaner cut would collapse the problem. If the current direction is wrong-shape, pause and propose the simpler cut before editing; ask me about real design choices.";
+  "Before continuing, restate the outer problem and separate essential from accidental complexity. Identify duplicate mechanisms, misplaced state or authority, and things that should not exist. If the current direction has the wrong shape, pause and propose the simpler boundary before editing; ask only about material design choices.";
 
 export const SIMPLIFY_SUFFIX =
-  "Take a simplification pass before continuing. Ask what can be deleted, inlined, merged, renamed, or not built at all. Everything that is not written is never wrong, stale, or overcomplicated. Prefer the smallest clean end state over mechanisms, options, compatibility layers, abstractions, or docs that do not pull their weight. Separate essential complexity from accidental complexity, then propose or apply the safe simplifications; ask me about real design choices.";
+  "Before changing anything, propose what can be deleted, inlined, merged, renamed, or not built. Prefer the smallest clean end state over options, compatibility layers, and abstractions that do not pull their weight. Show concrete simplifications and ask about material design choices; wait for approval before implementing them.";
 
 export const MINI_REVIEW_SUFFIX =
   "Ask minitask for a generic review of this, just issues and potential improvements. Then you evaluate its suggestions: apply clearly good ones, ignore bad ones, and ask me about anything uncertain.";
 
 export const TS_SUFFIX = "Thoughts? Suggestions?";
 
-export const CALL_PROGRESS_SNIPPET = `Use call to execute the plan we just discussed. Your task as controller:
+export const CALL_PROGRESS_SNIPPET = `Use call to execute the feasible plan. Start with one cohesive call; add serial calls only after a result exposes remaining work, a blocker, or a handoff. Never run dependent or overlapping edits in parallel.
 
-Important: call opens a call frame in the current session context with tools enabled. The call frame's final assistant message is returned as the compact result. The tool-heavy call branch stays inspectable in the session tree, while the controller resumes from only the compact result.
+Each call should make the in-scope code/docs changes, run relevant checks, and update workboard.md when applicable. If it materially changes a plan, review that plan with minitask and triage the result before execution. Move unresolved material choices to needs-decision with a scratch/decisions artifact.
 
-Start with a single call assigned to execute the entire feasible plan as far as possible. Do not split the work into phases by default. Use additional calls only after the prior call returns with completed work, blockers, remaining scope, or a clear handoff. For dependent tasks or tasks that may edit the same files, run calls serially and include the latest returned state/results in each new call task.
+Verify each returned result before continuing. Finish with the parent-facing outcome: required changed files, checks, evidence, caveats, blockers, and next actions. Omit introductions, repetition, and optional background first. Stop only when feasible scope is complete or a real decision/external blocker is documented.`;
 
-Tell each call frame to:
+export const SUPERVISE_SNIPPET = `Use coding-agent named 'main' to execute the plan in serial phases. A new worker knows only its loaded project instructions, so provide the task, current state, relevant files, extra constraints, and handoff facts without repeating project guidance.
 
-1. Execute as much of the supplied plan and scope as possible before returning.
-2. Make the necessary code, document, and spec changes directly when safe.
-3. Run focused relevant checks when practical.
-4. If the work writes or materially changes a plan, ask minitask for a generic review of the plan before returning. Triage the review in the same call frame: apply clearly good suggestions, ignore bad ones, and move real unresolved questions to needs-decision with a scratch/decisions artifact.
-5. Update workboard.md as required before returning, when this work came from a workboard item.
-6. Finish with a final assistant message containing the exact concise text to return to the caller. Include changed files, checks, remaining work, and blockers in that text only when relevant.
+Wait for each result before sending follow-up work. Verify progress and correct quick fixes or wrong architecture. Before 89% context use, require a handoff.md preserving decisions, changed files, checks, blockers, and next actions, then continue with a new named worker. Do not mention supervision unless it affects the task.
 
-After each call returns, inspect the result, verify or clean up as needed, and decide whether another call should continue with updated context. You may pause when a major unexpected blocker or design choice is uncovered.
+Stop when feasible scope and relevant validation/docs are complete or a material decision/external blocker is documented. Commit only if explicitly requested.`;
 
-You are done when all feasible parts of the plan have been implemented, relevant specs and documents updated, relevant checks completed or clearly reported, and you have returned a final summary of what was done plus any remaining obstacles.`;
-
-export const SUPERVISE_SNIPPET = `Use coding-agent named 'main' to execute the plan we just discussed in phases in serial. Your task as supervisor:
-
-Important: coding-agent starts with a fresh conversation and has no previous knowledge of this discussion, prior agents, or their work. It will already have read AGENTS.md/context files for its working directory before your first message, so only provide task-specific context: the task, current state, relevant files, constraints not already covered there, and handoff notes.
-
-The coding-agent tool waits for each requested task to return. Send follow-up work serially to the same named worker only after the previous task returns.
-
-1. Observe the main agent's returned results and prevent it from going dormant.
-2. Ensure it stays below 89% context use. If it exceeds it, ask it to write a handoff.md and start a new named coding-agent to continue its work. Assume that new agent knows only its loaded AGENTS.md/context plus what you provide in its initial prompt and the handoff file.
-3. Ensure architectural quality: if the main agent is rushing to a quick fix instead of building a well-structured solution, nudge it to slow down, investigate alternatives, and get the design right.
-4. Do not tell the main agent it has a supervisor.
-
-You may pause when a major unforeseen blocker or design choice is uncovered. You are done when all feasible phases have been implemented, relevant specs/documents updated, relevant checks completed or clearly reported, and you have returned a final summary. Commit only if I explicitly requested a commit.`;
-
-export const API_REVIEW_SNIPPET = `Before implementing, do a concise API/architecture review.
+export const API_REVIEW_SNIPPET = `Before implementing, review the API and architecture.
 
 Focus on preventing the common failure mode: adding a plausible abstraction before proving it is the simplest clean end-state.
 
@@ -63,19 +43,13 @@ Check:
 5. Compatibility/shim pressure: is any layer being kept only to avoid editing call sites? Would deleting the old shape make the design clearer?
 6. User decision points: what choice materially affects public API, persistence, protocol semantics, or long-term architecture?
 
-Return: recommended shape, avoided abstractions/shims, state ownership, semantic risks, names to remove/rename, and questions for me if any. Do not implement until this review is done.`;
+Return the recommended shape, avoided abstractions/shims, state ownership, semantic risks, names to remove/rename, and material questions. Preserve required evidence and caveats; omit introductions and repetition. Do not implement until this review is done.`;
 
 export const ENRICH_SNIPPET = `Perform an enrichment pass only. Do not implement source changes or authority-doc changes.
 
 Read the relevant required-reading, handoff, plans, and current code/docs for this topic. If you write or materially change a plan, ask minitask for a generic review of the plan before finishing, then triage the review in the same pass: apply clearly good suggestions, ignore bad ones, and split real unresolved questions into needs-decision with a scratch/decisions artifact.
 
-Return with:
-1. Current factual state with file references.
-2. Stale or contradictory docs.
-3. Open design questions, with decision artifacts for questions needing human input.
-4. What can be decided now vs what needs user input.
-5. Risks of overcomplication or stale compatibility.
-6. How workboard.md was updated: usually move executable enriched work to ready, or move blockers to needs-decision.
+Return the factual state with file references, stale/contradictory docs, open design questions, local versus human decisions, overcomplication risks, and the exact workboard.md update. Preserve evidence, caveats, blockers, and next actions; omit introductions and repetition. Usually move executable work to ready and material unresolved choices to needs-decision.
 
 Separate facts, inferences, and guesses. Do not edit source code or authority docs during enrichment.`;
 
@@ -85,11 +59,7 @@ Update required-reading/spec/AGENTS only with current factual state.
 Move mutation plans/status/history into ordinary root docs or delete them if obsolete.
 Remove stale compatibility language, old names, and misleading transitional docs.
 
-Then report:
-- durable facts recorded,
-- obsolete docs removed/updated,
-- remaining non-durable plans,
-- anything still uncertain.`;
+Report the durable facts recorded, obsolete docs removed or updated, remaining non-durable plans, uncertainty, and next actions. Omit introductions and repetition.`;
 
 export const SNIPPETS: PromptSnippet[] = [
   {

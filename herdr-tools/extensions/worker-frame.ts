@@ -3,9 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { isRetryableAssistantErrorMessage, RETRY_START_GRACE_MS } from "./retryable-errors.ts";
-import { runTmux } from "./tmux-helpers.ts";
+import { paneExists, readPane } from "./herdr-helpers.ts";
 
-const WORKER_ROOT_PREFIX = "pi-ant-worker-";
+const WORKER_ROOT_PREFIX = "pi-herdr-worker-";
 const WORKER_RUN_COMMAND = "worker-run";
 const FINISH_CALL_NOW_COMMAND = "finish-call-now";
 const RESULT_POLL_INTERVAL_MS = 250;
@@ -15,7 +15,7 @@ const PANE_MISSING_GRACE_MS = 5000;
 
 const RETROSPECTIVE_PROMPT = [
   "The main result has already been saved for the parent. Do not repeat it, do not continue the task, and do not call tools.",
-  "Return only substantial observations you noticed outside of the given task, or substantial things you did not mention regarding it, that are worth taking into account or fixing in the long run.",
+  "Return only substantial observations you noticed outside the task, or important details not included in the main result, that are worth preserving.",
   "If there is nothing substantial, return exactly: everything was ok",
 ].join("\n");
 
@@ -23,7 +23,6 @@ export interface WorkerRequestFile {
   id: string;
   task: string;
   resultPath: string;
-  retrospective?: boolean;
   closeWhenDone: boolean;
   statusPath?: string;
 }
@@ -72,10 +71,9 @@ interface WorkerToolDetails {
   artifactDir: string;
   requestPath: string;
   resultMarkdownPath: string;
-  retrospectiveMarkdownPath?: string;
+  retrospectiveMarkdownPath: string;
   sessionFile: string;
   task: string;
-  retrospective: boolean;
   elapsedMs?: number;
   status?: string;
 }
@@ -88,12 +86,12 @@ function isFreshWorkerSession(ctx: ExtensionContext): boolean {
   return ctx.sessionManager.getBranch().some((entry) => {
     return isRecord(entry)
       && entry.type === "custom"
-      && (entry.customType === "pi-ant:coding-agent" || entry.customType === "pi-ant:minitask");
+      && (entry.customType === "pi-herdr:coding-agent" || entry.customType === "pi-herdr:minitask" || entry.customType === "pi-herdr:fresh-history");
   });
 }
 
 function stripSubagentTools(tools: string[]): string[] {
-  return tools.filter((tool) => tool !== "call" && tool !== "coding-agent" && tool !== "minitask");
+  return tools.filter((tool) => tool !== "call" && tool !== "coding-agent" && tool !== "minitask" && tool !== "fresh-history");
 }
 
 function isWorkerRequestFile(value: unknown): value is WorkerRequestFile {
@@ -102,7 +100,6 @@ function isWorkerRequestFile(value: unknown): value is WorkerRequestFile {
     && typeof value.task === "string"
     && typeof value.resultPath === "string"
     && typeof value.closeWhenDone === "boolean"
-    && (value.retrospective === undefined || typeof value.retrospective === "boolean")
     && (value.statusPath === undefined || typeof value.statusPath === "string");
 }
 
@@ -178,10 +175,6 @@ function atomicWriteJson(filePath: string, payload: unknown): void {
   fs.renameSync(tmp, filePath);
 }
 
-function appendRetrospective(result: string, retrospective: string): string {
-  return [result.trimEnd(), "", "---", "", "Retrospective:", retrospective.trim()].join("\n");
-}
-
 function parseFinishText(args: string | undefined): string {
   const trimmed = (args ?? "").trim();
   if (trimmed.length < 2) return trimmed;
@@ -201,7 +194,7 @@ export function sanitizeWorkerName(name: string): string {
   return name.replace(/[^A-Za-z0-9._:-]/g, "");
 }
 
-export function createWorkerArtifacts(id: string): WorkerArtifactPaths {
+export function createWorkerArtifacts(): WorkerArtifactPaths {
   const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), WORKER_ROOT_PREFIX));
   fs.chmodSync(artifactDir, 0o700);
   return {
@@ -215,23 +208,21 @@ export function createWorkerArtifacts(id: string): WorkerArtifactPaths {
   };
 }
 
-export function formatWorkerMoreInfo(paths: WorkerArtifactPaths, retrospective: boolean): string {
-  const usefulFiles = [
-    "prompt.md",
-    "result.md",
-    ...(retrospective ? ["retrospective.md"] : []),
-    "request.json",
-    "result.json",
-    "status.json",
-  ];
+export function formatWorkerMoreInfo(paths: WorkerArtifactPaths): string {
+  const usefulFiles = ["prompt.md", "result.md", "retrospective.md", "request.json", "result.json", "status.json"];
   return [`More info in ${paths.artifactDir}`, `Useful files: ${usefulFiles.join(", ")}`].join("\n");
 }
 
-export function appendWorkerMoreInfo(message: string, paths: WorkerArtifactPaths, retrospective: boolean): string {
+export function appendWorkerMoreInfo(message: string, paths: WorkerArtifactPaths): string {
   const trimmed = message.trimEnd();
-  if (!trimmed) return formatWorkerMoreInfo(paths, retrospective);
+  if (!trimmed) return formatWorkerMoreInfo(paths);
   if (trimmed.includes(paths.artifactDir)) return trimmed;
-  return `${trimmed}\n\n${formatWorkerMoreInfo(paths, retrospective)}`;
+  return `${trimmed}\n\n${formatWorkerMoreInfo(paths)}`;
+}
+
+export function formatWorkerResult(result: WorkerResultFile): string {
+  if (result.retrospective === undefined) return result.result;
+  return `${result.result.trimEnd()}\n\n---\n\nRetrospective:\n${result.retrospective}`;
 }
 
 export function writeWorkerRequest(paths: WorkerArtifactPaths, request: WorkerRequestFile): void {
@@ -253,16 +244,11 @@ export function writeWorkerStatus(statusPath: string | undefined, status: Omit<W
 }
 
 export function parseActualLockName(text: string, requestedLockName: string): string {
-  const machineMatch = text.match(/^PI_TMUX_LOCK_NAME=([^\s]+)$/m);
+  const machineMatch = text.match(/^PI_HERDR_PANE_ID=([^\s]+)$/m);
   if (machineMatch) return machineMatch[1];
-  const statusMatch = text.match(/Started tmux fork '([^']+)'/);
+  const statusMatch = text.match(/Started Herdr pane '([^']+)'/);
   if (statusMatch) return statusMatch[1];
   return requestedLockName;
-}
-
-export function formatWorkerResult(result: WorkerResultFile): string {
-  if (result.retrospective !== undefined) return appendRetrospective(result.result, result.retrospective);
-  return result.result;
 }
 
 export function parseWorkerResult(raw: string, resultPath: string, expectedId: string): WorkerResultFile {
@@ -281,14 +267,13 @@ export function parseWorkerResult(raw: string, resultPath: string, expectedId: s
   return parsed;
 }
 
-export async function captureWorkerOutput(pi: ExtensionAPI, lockName: string, lines = 80, signal?: AbortSignal): Promise<string> {
+export async function captureWorkerOutput(pi: ExtensionAPI, paneId: string, lines = 80, signal?: AbortSignal): Promise<string> {
   try {
-    const result = await runTmux(pi, ["capture", lockName, String(lines)], signal);
-    const text = result.stdout.trimEnd() || result.stderr.trimEnd();
-    return text || "(no tmux output)";
+    const text = await readPane(pi, paneId, lines, signal);
+    return text || "(no Herdr output)";
   } catch (error) {
     throwIfAborted(signal);
-    return `Could not capture tmux output for ${lockName}: ${error instanceof Error ? error.message : String(error)}`;
+    return `Could not capture Herdr output for ${paneId}: ${error instanceof Error ? error.message : String(error)}`;
   }
 }
 
@@ -304,26 +289,18 @@ export async function waitForWorkerReady(pi: ExtensionAPI, lockName: string, tim
 }
 
 interface WorkerPaneState {
-  state: "live" | "dead" | "missing";
+  state: "live" | "missing";
   paneId?: string;
   text: string;
 }
 
-function parseWorkerPaneState(stdout: string, stderr: string, code: number): WorkerPaneState {
-  const text = [stdout.trim(), stderr.trim()].filter(Boolean).join("\n");
-  const state = text.match(/^state=(live|dead|missing)$/m)?.[1];
-  const paneId = text.match(/^pane=(%\d+)$/m)?.[1];
-  if (code !== 0 || (state !== "live" && state !== "dead" && state !== "missing")) return { state: "missing", text };
-  return { state, paneId, text };
-}
-
-async function readWorkerPaneState(pi: ExtensionAPI, lockName: string, signal?: AbortSignal): Promise<WorkerPaneState> {
+async function readWorkerPaneState(pi: ExtensionAPI, paneId: string, signal?: AbortSignal): Promise<WorkerPaneState> {
   try {
-    const result = await runTmux(pi, ["pane-state", lockName], signal);
-    return parseWorkerPaneState(result.stdout, result.stderr, result.code);
+    if (await paneExists(pi, paneId, signal)) return { state: "live", paneId, text: "state=live" };
+    return { state: "missing", paneId, text: "state=missing" };
   } catch (error) {
     throwIfAborted(signal);
-    return { state: "missing", text: error instanceof Error ? error.message : String(error) };
+    return { state: "missing", paneId, text: error instanceof Error ? error.message : String(error) };
   }
 }
 
@@ -344,7 +321,6 @@ export async function waitForWorkerResult(
     paths: WorkerArtifactPaths;
     sessionFile: string;
     task: string;
-    retrospective: boolean;
     signal?: AbortSignal;
     onUpdate?: (partial: { content: Array<{ type: "text"; text: string }>; details: WorkerToolDetails }) => void;
   },
@@ -370,10 +346,9 @@ export async function waitForWorkerResult(
           artifactDir: options.paths.artifactDir,
           requestPath: options.paths.requestPath,
           resultMarkdownPath: options.paths.resultMarkdownPath,
-          ...(options.retrospective ? { retrospectiveMarkdownPath: options.paths.retrospectiveMarkdownPath } : {}),
+          retrospectiveMarkdownPath: options.paths.retrospectiveMarkdownPath,
           sessionFile: options.sessionFile,
           task: options.task,
-          retrospective: options.retrospective,
           elapsedMs: Date.now() - startedAt,
           status: "finished",
         },
@@ -388,25 +363,12 @@ export async function waitForWorkerResult(
       if (paneState.state === "live") {
         hasSeenLivePane = true;
         paneMissingSince = undefined;
-      } else if (paneState.state === "dead") {
-        const output = await captureWorkerOutput(pi, paneState.paneId ?? options.actualLockName, 80, options.signal);
-        throw new Error([
-          "Worker exited before writing a final result.",
-          `tmux lock: ${options.actualLockName}`,
-          `tmux pane: ${paneState.paneId ?? "unknown"}`,
-          `session: ${options.sessionFile}`,
-          `result path: ${options.paths.resultPath}`,
-          "",
-          "Last tmux output:",
-          output,
-        ].join("\n"));
       } else {
         paneMissingSince ??= Date.now();
         if (hasSeenLivePane || Date.now() - paneMissingSince >= PANE_MISSING_GRACE_MS) {
           throw new Error([
             "Worker pane disappeared before writing a final result.",
-            `tmux lock: ${options.actualLockName}`,
-            `tmux pane: ${lastKnownPaneId ?? "unknown"}`,
+            `Herdr pane: ${lastKnownPaneId ?? options.actualLockName}`,
             `session: ${options.sessionFile}`,
             `result path: ${options.paths.resultPath}`,
             `waited after missing: ${Math.floor((Date.now() - paneMissingSince) / 1000)}s`,
@@ -431,10 +393,9 @@ export async function waitForWorkerResult(
           artifactDir: options.paths.artifactDir,
           requestPath: options.paths.requestPath,
           resultMarkdownPath: options.paths.resultMarkdownPath,
-          ...(options.retrospective ? { retrospectiveMarkdownPath: options.paths.retrospectiveMarkdownPath } : {}),
+          retrospectiveMarkdownPath: options.paths.retrospectiveMarkdownPath,
           sessionFile: options.sessionFile,
           task: options.task,
-          retrospective: options.retrospective,
           elapsedMs,
           status: "waiting",
         },
@@ -446,14 +407,18 @@ export async function waitForWorkerResult(
   }
 }
 
-function writeFinalResult(ctx: ExtensionContext, active: ActiveWorkerRequest, result: string, isError = false, retrospective?: string): void {
+function writeFinalResult(
+  ctx: ExtensionContext,
+  active: ActiveWorkerRequest,
+  result: string,
+  isError = false,
+  retrospective?: string,
+): void {
   const contextPercent = getContextPercent(ctx);
-  const paths = {
-    resultMarkdownPath: path.join(path.dirname(active.request.resultPath), "result.md"),
-    retrospectiveMarkdownPath: path.join(path.dirname(active.request.resultPath), "retrospective.md"),
-  };
-  writeTextArtifact(paths.resultMarkdownPath, result);
-  if (retrospective !== undefined) writeTextArtifact(paths.retrospectiveMarkdownPath, retrospective);
+  writeTextArtifact(path.join(path.dirname(active.request.resultPath), "result.md"), result);
+  if (retrospective !== undefined) {
+    writeTextArtifact(path.join(path.dirname(active.request.resultPath), "retrospective.md"), retrospective);
+  }
 
   const payload: WorkerResultFile = {
     id: active.request.id,
@@ -490,11 +455,18 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     }
   }
 
-  function completeWorkerRequest(ctx: ExtensionContext, request: ActiveWorkerRequest, result: string, isError = false, retrospective?: string): void {
+  function completeWorkerRequest(
+    ctx: ExtensionContext,
+    request: ActiveWorkerRequest,
+    result: string,
+    isError = false,
+    retrospective?: string,
+  ): void {
     clearRetryFailureTimer(request);
     writeFinalResult(ctx, request, result, isError, retrospective);
     const shouldClose = request.request.closeWhenDone;
     activeRequest = undefined;
+    pi.setActiveTools(request.priorTools);
     if (shouldClose) ctx.shutdown();
   }
 
@@ -587,9 +559,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
         ctx.ui.notify("No active worker request to finish.", "warning");
         return;
       }
-      const request = activeRequest;
-      completeWorkerRequest(ctx, request, message, false, request.request.retrospective ? "retrospective bypassed by /finish-call-now." : undefined);
-      pi.setActiveTools(request.priorTools);
+      completeWorkerRequest(ctx, activeRequest, message, false, "retrospective bypassed by /finish-call-now.");
       ctx.ui.notify("Finished worker request with override result.", "info");
     },
   });
@@ -606,7 +576,6 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
         scheduleRetryableFailure(ctx, request, () => {
           const retrospective = `retrospective unavailable: assistant retry did not restart within ${Math.floor(RETRY_START_GRACE_MS / 1000)}s after retryable error. ${assistantMessageText(message)}`;
           completeWorkerRequest(ctx, request, request.mainResult ?? "", false, retrospective);
-          pi.setActiveTools(request.priorTools);
         });
         return;
       }
@@ -616,7 +585,6 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
       try {
         const request = activeRequest;
         completeWorkerRequest(ctx, request, request.mainResult ?? "", false, retrospective);
-        pi.setActiveTools(request.priorTools);
         ctx.ui.notify("Finished worker request with result and retrospective.", "info");
       } catch (error) {
         ctx.ui.notify(`Failed to write worker retrospective result: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -635,27 +603,17 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      if (activeRequest.request.retrospective === true) {
-        activeRequest.mainResult = result;
-        writeTextArtifact(path.join(path.dirname(activeRequest.request.resultPath), "result.md"), result);
-        writeWorkerStatus(activeRequest.request.statusPath, {
-          id: activeRequest.request.id,
-          state: "retrospective",
-          resultPath: activeRequest.request.resultPath,
-          sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
-          contextPercent: getContextPercent(ctx) ?? null,
-        });
-        pi.setActiveTools([]);
-        pi.sendUserMessage(RETROSPECTIVE_PROMPT, { deliverAs: "followUp" });
-        return;
-      }
-
-      try {
-        completeWorkerRequest(ctx, activeRequest, result);
-        ctx.ui.notify("Finished worker request with result.", "info");
-      } catch (error) {
-        ctx.ui.notify(`Failed to write worker result: ${error instanceof Error ? error.message : String(error)}`, "error");
-      }
+      activeRequest.mainResult = result;
+      writeTextArtifact(path.join(path.dirname(activeRequest.request.resultPath), "result.md"), result);
+      writeWorkerStatus(activeRequest.request.statusPath, {
+        id: activeRequest.request.id,
+        state: "retrospective",
+        resultPath: activeRequest.request.resultPath,
+        sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
+        contextPercent: getContextPercent(ctx) ?? null,
+      });
+      pi.setActiveTools([]);
+      pi.sendUserMessage(RETROSPECTIVE_PROMPT, { deliverAs: "followUp" });
       return;
     }
 
@@ -665,7 +623,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
       return;
     }
 
-    if (message.stopReason === "aborted") return;
+    if (message.stopReason === "aborted" || message.stopReason === "toolUse") return;
 
     try {
       completeWorkerRequest(ctx, activeRequest, assistantMessageText(message), true);
@@ -688,8 +646,8 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
   pi.on("before_agent_start", async (event) => {
     if (!activeRequest) return undefined;
     if (activeRequest.mainResult !== undefined) {
-      return { systemPrompt: `${event.systemPrompt}\n\nYou are in the retrospective phase of a worker request. The main result is already saved for the parent. Do not call tools and do not continue the original task. Answer only the retrospective prompt.` };
+      return { systemPrompt: `${event.systemPrompt}\n\nThe main result is saved. Do not call tools or continue the task; answer only the retrospective prompt.` };
     }
-    return { systemPrompt: `${event.systemPrompt}\n\nYou are running a structured worker request. When the task is complete, answer with only the exact result text for the caller, or the cause of failure. That final assistant message is returned to the parent.` };
+    return { systemPrompt: `${event.systemPrompt}\n\nComplete the worker task and return only the parent-facing result or blocker.` };
   });
 }

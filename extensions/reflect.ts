@@ -22,58 +22,28 @@ const MAX_BLOCK_CONTENT_CHARS = 4000;
 const MAX_PREVIEW_CHARS = 140;
 
 const REFLECTION_SYSTEM_PROMPT =
-	"You help rewrite an agent's memory checkpoint. Be conservative, factual, and preserve operationally important details.";
+	"Rewrite an agent memory checkpoint conservatively and factually. Preserve operationally required details.";
 
-const REFLECTION_PROMPT = `You are reflecting on the agent memory below. The memory is represented as numbered blocks in chronological order.
+const REFLECTION_PROMPT = `Review the numbered memory blocks and return:
+- <commands>: one command per line: drop <number>, replace <number>: <text>, or none.
+- <summary>: the authoritative replacement checkpoint.
 
-Task:
-1. Return machine-readable memory edit commands in <commands> tags.
-2. Return a replacement memory checkpoint summary in <summary> tags.
+Drop only obsolete, misleading, duplicated, or harmful blocks. Replace only materially wrong blocks or repetition. Preserve stable early memory unless clearly wrong. The summary must incorporate every kept block and replacement while excluding dropped material. Retain exact paths, commands, constraints, preferences, decisions, progress, blockers, evidence, and next actions; remove repetition and optional background first. Do not mention block numbers unless they matter.
 
-Command syntax:
-- drop <number>
-- replace <number>: <replacement text>
-- none
-
-Rules:
-- Use drop only for obsolete, misleading, duplicated, or harmful memory.
-- Use replace only when a block is materially wrong or should be shortened/corrected.
-- Avoid editing early-numbered blocks unless they are clearly wrong; prefer preserving stable early memory.
-- The <summary> is authoritative. A replace command only matters if its replacement is incorporated into <summary>.
-- The summary must incorporate all kept blocks plus replacements and exclude dropped blocks.
-- Preserve exact file paths, commands, constraints, user preferences, decisions, and next steps.
-- Do not mention block numbers in the summary unless the number itself matters.
-- If no edits are needed, use "none" in <commands> and still provide a concise current memory summary.
-
-Use this exact response shape:
+Use this shape, omitting only empty subsections:
 <commands>
 none
 </commands>
 <summary>
 ## Goal
-...
-
 ## Constraints & Preferences
-- ...
-
 ## Progress
 ### Done
-- ...
-
 ### In Progress
-- ...
-
 ### Blocked
-- ...
-
 ## Key Decisions
-- ...
-
 ## Next Steps
-1. ...
-
 ## Critical Context
-- ...
 </summary>`;
 
 type TextishContent =

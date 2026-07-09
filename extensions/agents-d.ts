@@ -246,13 +246,8 @@ function buildAgentsDContext(cwd: string): AgentsDContext | null {
 
   const systemPromptBlock = [
     AGENTS_D_CONTEXT_START,
-    "# AGENTS.d — auto-loaded context files",
-    "",
-    "The AGENTS.d/ directory was found in this workspace. Its contents are",
-    "automatically loaded and made available to all (sub)agents running here.",
-    "Entries can be regular files or symlinks. Only top-level files and",
-    "file-target symlinks are loaded; subdirectories appear in the tree",
-    "listing below but their contents are not auto-injected.",
+    "# AGENTS.d context",
+    "Top-level files are loaded below; directories appear only in the tree. Symlink targets show their real paths.",
     "",
     contents,
     "",

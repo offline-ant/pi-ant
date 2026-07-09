@@ -608,12 +608,7 @@ export default function askExtension(pi: ExtensionAPI) {
 		name: "ask",
 		label: "Ask",
 		description:
-			"Ask the user interactive multiple-choice or free-form questions while working. Use this to clarify requirements, gather preferences, or ask for decisions instead of guessing.",
-		promptSnippet:
-			"Ask the user interactive questions and return their answers.",
-		promptGuidelines: [
-			"Use ask when a user decision or clarification is needed and proceeding without input would risk doing the wrong work.",
-		],
+			"Ask the user interactive multiple-choice or free-form questions when a required preference, approval, or decision is missing. Returns answers keyed by question id; cancellation and non-interactive use are reported explicitly.",
 		parameters: AskParamsSchema,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			if (!ctx.hasUI) {

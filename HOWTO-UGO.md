@@ -125,19 +125,15 @@ needs-enrichment -> ready -> implementing -> needs-distill
 
 The selected section shapes the prompt it emits:
 
-- `needs-enrichment`: produce a context-gathering prompt; usually use the
-  call-based enrichment primitive and do not implement yet. If enrichment writes
-  or materially changes a plan, the plan writer must ask minitask for a generic
-  plan review before finishing, triage the review in the same call frame, move
-  executable work to `ready`, and move real unresolved questions to
+- `needs-enrichment`: gather missing context without implementing. A new or
+  materially changed plan must receive a minitask review in the same pass;
+  executable work moves to `ready`, while material unresolved questions move to
   `needs-decision` with a `scratch/decisions/` artifact.
-- `ready`: produce an implementation/execution prompt; for substantial tool work,
-  use the call-progress primitive so the ugo-do controller resumes from compact
-  call results.
-- `implementing`: produce a continuation prompt using the current handoff/status;
-  prefer call-progress when more tool-heavy progress is needed.
-- `needs-distill`: produce a durable-facts cleanup/distillation prompt; use
-  call-progress when the cleanup is broad or tool-heavy.
+- `ready`: emit the lightest safe implementation/execution prompt.
+- `implementing`: continue from current status and handoff, escalating to
+  supervised workers only when breadth or context requires it.
+- `needs-distill`: move durable facts into authority docs and remove stale
+  temporary state.
 
 Every emitted ugo-do prompt must tell the ugo-do phase how to update
 `workboard.md` before finishing. Typical outcomes are moving the item to
@@ -272,9 +268,9 @@ Tool input:
 }
 ```
 
-For human decisions, ugo-guide should write a concise decision artifact under
-`scratch/decisions/` with the question, relevant context/files, options,
-recommendation, consequences, and a human response section. The human can write
+For human decisions, ugo-guide writes a decision artifact under
+`scratch/decisions/` containing the question, required context/files, options,
+recommendation, material consequences, and a human response section. The human can write
 one of these lines in `workboard.md` or any `scratch/decisions/*` file:
 
 ```text
@@ -383,7 +379,7 @@ ugo-guide phase calls:
   "status": "CONTINUE_WORK",
   "item": "Add hello file",
   "reason": "The ready item is concrete and has enough context.",
-  "nextPrompt": "Implement the ready workboard.md item \"Add hello file\". Create `hello.txt` containing exactly `hello` followed by a newline. Then update workboard.md by moving \"Add hello file\" from ready to previous-done with a concise note, replacing any existing previous-done entry. Finish by reporting changed files."
+  "nextPrompt": "Implement the ready workboard.md item \"Add hello file\". Create `hello.txt` containing exactly `hello` followed by a newline. Then update workboard.md by moving \"Add hello file\" from ready to previous-done with its outcome and changed file, replacing any existing previous-done entry. Finish by reporting changed files."
 }
 ```
 

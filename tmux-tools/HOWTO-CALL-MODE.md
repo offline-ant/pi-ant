@@ -18,8 +18,7 @@ inspection. It is not merged into the root session tree.
 
 ```json
 {
-  "task": "...",
-  "complex": false
+  "task": "..."
 }
 ```
 
@@ -29,16 +28,17 @@ and in Bob's mode. It should be the only tool call in its assistant turn because
 sibling tool work is not included in the forked worker context. The parent blocks
 until the worker returns, exits early, or is aborted.
 
-Set `complex: true` only when the worker may need nested `call` frames for
-substantial subtasks. Calls wait indefinitely by design. If `/tool-model` is set,
-call frames start with that configured pi model/thinking level.
+Nested `call` is always available inside call frames. Calls wait indefinitely by
+design. If `/tool-model` is set, call frames start with that configured pi
+model/thinking level.
 
-A call frame finishes when it returns a final assistant message. That message is
-written for the parent, and the worker pi process shuts down gracefully. The call
-artifact directory contains `request.json`, `prompt.md`, `result.json`, and
-`result.md`; calls with `retrospective: true` also write `retrospective.md`.
-Successful and failed worker results include a `More info in /tmp/pi-ant-worker-*`
-footer so the caller can inspect or manually continue from the artifact files.
+A call frame finishes when it returns a final assistant message, then
+automatically runs a no-tools retrospective. The main message is written for the
+parent, and the worker pi process shuts down gracefully after the retrospective.
+The call artifact directory contains `request.json`, `prompt.md`, `result.json`,
+`result.md`, and `retrospective.md`. Successful and failed worker results include
+a `More info in /tmp/pi-tmux-worker-*` footer so the caller can inspect or
+manually continue from the artifact files.
 
 ## Commands
 
@@ -63,9 +63,9 @@ frame to inspect and return a compact recommendation. Answer directly only for
 purely conversational/conceptual questions or when recent compact worker results
 already contain the needed facts.
 
-Inside a call frame, pi restores the worker tools captured by the parent and adds
-`call` only for complex frames. Call frames compact like normal pi sessions; the
-worker request remains the active objective until a structured result is written.
+Inside a call frame, pi restores the worker tools captured by the parent and
+adds `call`. Call frames compact like normal pi sessions; the worker request
+remains the active objective until a structured result is written.
 
 `/finish-call-now "message"` is a manual recovery command for a child tmux call frame.
 It aborts/waits for the current worker if needed, overrides the call result with
