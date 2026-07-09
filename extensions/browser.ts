@@ -215,14 +215,8 @@ export default function (pi: ExtensionAPI) {
 		name: "browser",
 		label: "Browser",
 		description:
-			"Control a persistent Firefox or Chromium browser session. Minimal flow: navigate url if provided, capture screenshot and HTML, evaluate JavaScript if provided, capture screenshot and HTML again. Returns screenshot/HTML paths and eval result. Output is truncated to " +
+			"Navigate a persistent Firefox/Chromium session and optionally evaluate one JavaScript expression (use an async IIFE for multiple statements). Returns before/after HTML and screenshot paths plus eval results or capture/eval errors; process and response failures throw. Inspect HTML first and read only the screenshot needed for visual evidence. Output is truncated to " +
 			`${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
-		promptSnippet: "Control Chromium/Firefox via devtools, with before/after screenshot and HTML paths plus awaited JavaScript eval",
-		promptGuidelines: [
-			"Use browser when the user asks to inspect a web page, capture browser screenshots, or evaluate JavaScript in Chromium/Firefox.",
-			"browser always captures screenshots and HTML after navigation and after eval; use read on returned PNG/HTML paths to inspect visual output or DOM structure.",
-			"browser eval awaits promises; for multi-statement JavaScript, pass an async IIFE expression such as `(async () => { const x = await f(); return x; })()`.",
-		],
 		parameters: BROWSER_PARAMS,
 		async execute(_toolCallId, params, signal) {
 			const commandResult = await runBrowserIo(params, signal);

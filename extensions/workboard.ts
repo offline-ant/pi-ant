@@ -12,84 +12,54 @@ const WORKBOARD_CUSTOM_TYPE = "pi-ant:workboard";
 
 const WORKBOARD_TEMPLATE = `# Workboard
 
-This file is operational state for agents working in this repository.
+Active operational state for this repository. pi-ant autoloads this file; update
+it with \`edit\` whenever task state, blockers, decisions, handoffs, or plans
+change.
 
-pi-ant autoloads this file into agent context whenever it exists in the current
-working directory. Agents do not need to be told to read it separately. Use the
-\`edit\` tool to update this file and avoid using the \`write\` tool. Always keep it
-up to date when task state changes, when blockers or decisions appear, and when
-handoffs or plans change. Keep entries concise. Link to files instead of copying
-long context.
+Keep required status, decisions, blockers, and next actions here, linking
+supporting detail instead of copying it. Put plans and handoffs in \`scratch/\`,
+human decisions in \`scratch/decisions/\`, durable facts in authority docs, and
+unpromoted ideas in a separate backlog. Delete obsolete state and stale scratch
+files; git history preserves history.
 
-Guidance workflow policy lives in \`workflow.md\`. \`/ugo\` creates that file when
-missing; edit it to change how guidance chooses and prepares work from this
-workboard.
+Guidance policy lives in \`workflow.md\`. Move entries as their state changes.
+Plan changes require a minitask review before executable work moves to \`ready\`;
+material unresolved choices move to \`needs-decision\`.
 
-This is not design authority or a cold idea backlog. Durable facts belong in
-AGENTS.md, spec/, required-reading/, or equivalent project authority docs. Ideas
-that should not enter the agent workflow yet belong in a project backlog or
-ideas file outside workboard.md. Current runnable queues, blockers, and short
-handoff notes belong here. Longer mutation plans, handoffs, and temporary
-working notes belong in \`scratch/\`, with this file linking to them.
+Entry shape:
 
-Treat \`scratch/\` as temporary operational memory. Clean up stale scratch files
-when entries move to previous-done. Git history is the record; do not keep
-obsolete scratch files or workboard history just to preserve what happened.
-
-## How to use this file
-
-Use this file as an index of current operational state. Each entry should be a
-short note plus links to the files that contain details.
-
-Create a separate \`scratch/\` details file when an issue needs more than a few
-sentences, contains a plan/handoff, needs code or API examples, or may be worked
-by another agent later. Edit only the pointer and current status into this file.
-
-Edit only a note into this file when the issue is a small blocker, a concrete
-question, or a short next action that does not need its own artifact.
-
-Do not park cold ideas here. First promote them from backlog/ideas into
-\`needs-enrichment\` for investigation/planning or \`ready\` for execution.
-
-Move entries as their state changes. Delete obsolete entries instead of carrying
-history. If an entry records a durable fact, move that fact into the authority
-docs. When work completes, replace the previous-done entry with the latest
-completed item and clean up obsolete scratch files.
-
-Generic entry shape:
-
-- Short title.
-  - Status/next action.
+- Title.
+  - Current state, blockers, and next action.
   - Details: \`scratch/<slug>-plan.md\`, \`scratch/<slug>-handoff.md\`, or
-    \`scratch/decisions/<slug>.md\` if needed.
+    \`scratch/decisions/<slug>.md\` when needed.
 
 ## needs-enrichment
-Use: Vague tasks that need context gathering before design or implementation. Enrichment that writes or materially changes a plan should review it with minitask, triage that review in the same pass, then move executable work to ready or unresolved questions to needs-decision.
+Tasks missing context or a safe plan.
 
 - None.
 
 ## needs-decision
-Use: Items blocked on a user/design decision. Include the concrete question and link a \`scratch/decisions/<slug>.md\` artifact.
+Tasks blocked on a material human decision; include the question and decision artifact.
 
 - None.
 
 ## ready
-Use: Clear tasks with enough context to execute.
+Tasks with enough context to execute.
 
 - None.
 
 ## implementing
-Use: Active work. Include the session/agent, current scope, and handoff file if any.
+Active work; include worker/session, scope, blockers, and handoff when needed.
 
 - None.
 
 ## needs-distill
-Use: Work that is done or mostly done, but durable facts still need to be moved into authority docs and stale plans/history need cleanup.
+Completed work whose durable facts or stale temporary docs still need cleanup.
 
 - None.
 
 ## previous-done
-Use: The latest completed workboard item only. Replace this entry whenever a task moves here; do not accumulate history in workboard.md.
+Latest completed item only; replace the old entry instead of accumulating history.
 
 - None.
 `;
@@ -116,10 +86,10 @@ function formatWorkboardContext(
   originalChars: number,
 ): string {
   const truncationNotice = truncated
-    ? `\n\n[workboard.md truncated in context: showing first ${MAX_CONTEXT_CHARS} of ${originalChars} characters. Keep workboard.md concise.]`
+    ? `\n\n[workboard.md truncated: first ${MAX_CONTEXT_CHARS} of ${originalChars} characters. Retain status, decisions, blockers, and next actions; link supporting detail.]`
     : "";
 
-  return `A workboard.md file exists in the current working directory and is autoloaded as active operational state. Use it to understand runnable queues, blockers, active work, handoffs, and items needing distillation. Keep it up to date when task state changes. Guidance workflow policy lives in workflow.md. It is not design authority or a cold idea backlog; durable facts belong in AGENTS.md, spec/, required-reading/, or equivalent authority docs, and unpromoted ideas belong in project backlog/ideas files outside workboard.md.\n\n<workboard.md>\n${text}${truncationNotice}\n</workboard.md>`;
+  return `workboard.md is autoloaded operational state. Keep its runnable queues, blockers, handoffs, decisions, and next actions current. workflow.md defines guidance policy. Put durable facts in authority docs and unpromoted ideas in a separate backlog.\n\n<workboard.md>\n${text}${truncationNotice}\n</workboard.md>`;
 }
 
 async function fileExists(filePath: string): Promise<boolean> {

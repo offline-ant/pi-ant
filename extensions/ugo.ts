@@ -39,10 +39,9 @@ const PRESENT_GUIDANCE_TOOL = "present_guidance";
 const WORKBOARD_FILE = "workboard.md";
 const DECISIONS_DIR = join("scratch", "decisions");
 const UGO_RETROSPECTIVE_PROMPT = [
-  "The ugo-do main result has already been saved. Do not repeat it, do not continue the task, and do not call tools.",
-  "Take a step back before ugo continues, then return exactly two bullet lines with these labels:",
-  "- Retrospective: wrong-shape direction, missed design choice, or process/plan issue. Ask what should not exist, what mechanisms duplicate the same boundary, what state or authority boundary is in the wrong owner, and whether a cleaner cut would collapse the problem.",
-  "- Simplify: concrete cleanup or simplification opportunities observed while doing the work. Prefer removing mechanisms, merging duplicated boundaries, deleting stale code/docs, or renaming unclear concepts. Do not invent broad rewrites.",
+  "The main result is saved and tools are unavailable. Return exactly two bullet lines:",
+  "- Retrospective: any wrong direction, missed material choice, misplaced authority/state, or process issue; otherwise none.",
+  "- Simplify: concrete removal, merge, rename, or stale cleanup supported by the work; otherwise none.",
 ].join("\n");
 const execFileAsync = promisify(execFile);
 
@@ -236,7 +235,7 @@ function guidePrompt(state: UgoState): string {
         "The previous ugo-do reflection was this:",
         state.previousReflection,
         "",
-        "If it contains a relevant improvement, cleanup, simplification opportunity, or follow-up to apply, upgrade it into a new workboard.md item or precise workboard.md update according to workflow.md. Prefer needs-distill for cleanup/docs and ready for concrete code simplification. If it is not relevant now, ignore it.",
+        "Promote relevant cleanup or follow-up according to workflow.md (needs-distill for durable cleanup, ready for executable simplification); otherwise ignore it.",
       ].join("\n")
     : "";
   return `Inspect workboard.md, follow workflow.md, choose the next workflow outcome, and call present_guidance with the result.${previousGuidance}${previousReflection}`;
@@ -716,12 +715,7 @@ export default function (pi: ExtensionAPI) {
       name: PRESENT_GUIDANCE_TOOL,
       label: "Present Guidance",
       description:
-        "Validate and store a workboard guidance decision. Use only as the final action while selecting the next workboard step.",
-      promptSnippet:
-        "Emit a validated workboard guidance decision as the final action",
-      promptGuidelines: [
-        "Use present_guidance exactly once as the final action while selecting the next workboard step.",
-      ],
+        "Submit the final workboard guidance decision. Valid input is stored and returned as an exact <pi-guidance-result> block; invalid input throws. Use once as the final guidance action.",
       parameters: PRESENT_GUIDANCE_PARAMS,
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
         const errors = validateGuidance(params);
@@ -1552,7 +1546,7 @@ export default function (pi: ExtensionAPI) {
     }
     if (currentState?.active && currentState.phase === "do_retrospective") {
       return {
-        systemPrompt: `${event.systemPrompt}\n\nYou are in the ugo-do reflection phase. The main ugo-do result is already saved. Do not call tools and do not continue the original task. Answer only the reflection prompt.`,
+        systemPrompt: `${event.systemPrompt}\n\nAnswer only the ugo-do reflection prompt; tools are disabled.`,
       };
     }
     return undefined;

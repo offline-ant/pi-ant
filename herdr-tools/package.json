@@ -1,0 +1,31 @@
+{
+  "name": "herdr-tools",
+  "version": "1.0.0",
+  "description": "Herdr-backed pi orchestration tools and worker workflows",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "herdr",
+    "workers"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/nesting.ts",
+      "./extensions/tool-model.ts",
+      "./extensions/worker-frame.ts",
+      "./extensions/herdr.ts",
+      "./extensions/herdr-fork.ts",
+      "./extensions/call.ts",
+      "./extensions/coding-agent.ts",
+      "./extensions/minitask.ts",
+      "./extensions/fresh-history.ts"
+    ]
+  }
+}

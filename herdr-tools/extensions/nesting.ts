@@ -11,7 +11,7 @@ function parseInheritedDepth(value: string | undefined): number | undefined {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
-const PROCESS_SENTINEL = Symbol.for("pi-ant:nesting-initialized");
+const PROCESS_SENTINEL = Symbol.for("pi-herdr:nesting-initialized");
 
 function getCurrentDepth(): number {
   const existing = parseInheritedDepth(process.env[NESTING_ENV]);

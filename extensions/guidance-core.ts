@@ -7,7 +7,7 @@ export const RESULT_OPEN = "<pi-guidance-result>";
 export const RESULT_CLOSE = "</pi-guidance-result>";
 
 const GuidanceChoice = Type.Object({
-  label: Type.String({ description: "Short option label" }),
+  label: Type.String({ description: "Option label" }),
   description: Type.Optional(
     Type.String({ description: "Enough context to understand the choice" }),
   ),
@@ -45,7 +45,7 @@ export const PRESENT_GUIDANCE_PARAMS = Type.Object({
   ),
   notes: Type.Optional(
     Type.String({
-      description: "Short extra notes; keep details in artifact files",
+      description: "Material caveats or next actions not captured elsewhere; keep supporting detail in artifact files",
     }),
   ),
 });
@@ -81,7 +81,7 @@ export function validateGuidance(params: PresentGuidanceParams): string[] {
   }
 
   if (params.status === "CONTINUE_WORK" && nonEmpty(params.nextPrompt)) {
-    const nextPrompt = params.nextPrompt.toLowerCase();
+    const nextPrompt = (params.nextPrompt ?? "").toLowerCase();
     if (!nextPrompt.includes("workboard.md")) {
       errors.push(
         "CONTINUE_WORK nextPrompt must include an explicit workboard.md update instruction",

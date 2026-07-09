@@ -1,6 +1,10 @@
 # pi-ant
 
-Personal set of tiny pi extensions for orchestration and misc development tools.
+Personal set of tiny pi extensions for misc development tools. Orchestration
+lives in sibling subprojects loaded as separate pi packages: `tmux-tools/` for
+legacy tmux-backed workflows and `herdr-tools/` for Herdr-backed workflows.
+Herdr exposes interactive session forking as the user command `/herdr-fork`;
+structured worker orchestration remains LLM-callable tools.
 
 ## Agent tools
 
@@ -8,23 +12,16 @@ These are the pi tools registered by this package:
 
 - `ask` — ask the user interactive multiple-choice or free-form questions.
 - `browser` — control persistent Chromium/Firefox sessions through `bin/browser-io`, including navigation, awaited JavaScript eval, and before/after screenshots under `/tmp/browser-io`.
-- `call` — run a delegated task in a forked current-context tmux pi worker; the worker's final assistant message becomes the compact `call` tool result.
-- `coding-agent` — run a task in a named persistent fresh-context tmux worker; waits for the task result and keeps the worker alive for follow-up work.
-- `minitask` — run an isolated one-shot fresh-context tmux worker without this session's context.
-- `semaphore_wait` — block until one or more semaphore locks release, backed by `bin/pi-semaphore`; for direct interactive ssh/mosh/su panes created by `tmux-bash`, returns when a prompt-like cursor line is detected.
 - `sqlite` — run `sqlite3` against `AGENTS.db` in the current working directory; auto-enabled when that database exists.
-- `tmux-bash`, `tmux-capture`, `tmux-send`, `tmux-kill`, `tmux-fork` — low-level tmux pane and session-fork workflow tools backed by `bin/pi-tmux`.
 - Core `edit` and `write` are wrapped by `lints` to display post-write safety warnings.
-- Nested pi guard: `PI_NESTED` is initialized/incremented by the extension runtime; pi exits before work when nesting reaches 4.
 - `present_guidance` — validates structured guidance output for guidance-mode final answers. It is only registered for `PI_GUIDANCE=true` runs or dynamically inside `/ugo` guide-phase sessions.
+
+## Skills
+
+- `herdr` — copied from Herdr's `SKILL.md`; teaches agents running inside Herdr to use the `herdr ...` CLI for pane, workspace, wait, and agent coordination.
 
 ## Commands, snippets, and safety extensions
 
-- Semaphore lock commands: `/lock`, `/release`, `/wait`, `/lock-list`.
-- Worker commands: `/bobs-mode [on|off|status|toggle]` toggles Bob's mode and can restrict the root tool set to `call`, `coding-agent`, `ask`, and `minitask`; `/finish-call-now "message"` is a child-frame recovery command that overrides the active worker result with `message` and shuts down close-on-done workers. See `HOWTO-CALL-MODE.md`.
-- Tmux workflow commands: `/clear-stale`, `/tmux-list`, `/tmux-fork`.
-- Standalone helper: `bin/clear-stale` mirrors `/clear-stale` and is intended to be copied to `~/.local/bin/clear-stale`.
-- Tool worker model commands: `/set-tool-model` saves the current model as the favorite tool-worker override and enables it; `/tool-model` toggles that favorite override on/off for `call`, `coding-agent`, `minitask`, and spawned pi workers.
 - Complete context injection commands: `/read-complete`, `/bash-complete`.
 - SQLite workflow commands: `/sqlite-init`, `/agent-db`.
 - Context explorer commands: `/context-explorer`, `/context-explorer-stop`.
@@ -35,6 +32,7 @@ These are the pi tools registered by this package:
 - Git commit command: `/git-commit [message]` runs `git add -A && git commit -m <message>`, defaulting to `auto`.
 - Git worktree creation command: `/worktree <name>`.
 - Execution safety toggle: `/exec-lints`.
+- Tool profiles: `/tool-profile [coding|research|web|orchestration|full]` persists the ordinary-session active tool set. `research` is the default and includes coding, worker, browser, and web tools; `web` is an alias. `orchestration` adds Herdr panels and persistent/recent-history workers instead of web tools, while `full` enables both groups. Structured workers and Ugo keep their own tool control; dynamic tools such as `sqlite` and `present_guidance` remain active when applicable.
 - Workboard command/context: `/new-workboard` creates `workboard.md`; when `workboard.md` exists in the current working directory, it is autoloaded into agent context as active operational state. `/new-workflow` creates editable `workflow.md` guidance policy; `/ugo` and guidance mode also create it when missing. Cold ideas/backlog items belong in project files outside `workboard.md` until promoted to `needs-enrichment` or `ready`.
 - AGENTS.d auto-loading: when a `./AGENTS.d/` directory exists in the workspace, its top-level files and file-target symlinks are automatically loaded and injected into the system prompt before every agent start. Subdirectories are listed in a tree structure (at the end of the injected block) but their contents are not loaded. Symlinks show their resolved real path. Dangling symlinks appear in the tree listing but are excluded from content loading.
 - Guidance mode: `PI_GUIDANCE=true pi -p "inspect workboard.md and present_guidance"` loads editable `workflow.md` guidance policy and requires a structured `present_guidance` result. `bin/pi-guidance-loop` repeatedly runs guidance, executes `CONTINUE_WORK` prompts, applies `UPDATE_WORK` workboard updates, and stops on `REQUIRE_HUMAN_DECISION` or `EMPTY_WORKBOARD`.

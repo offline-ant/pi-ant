@@ -11,7 +11,7 @@ import { Type, type Static } from "typebox";
 const OPENAI_CODEX_PROVIDER = "openai-codex";
 const CODEX_SEARCH_URL = "https://chatgpt.com/backend-api/codex/alpha/search";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
-const DEFAULT_MODEL = "gpt-5.2";
+const DEFAULT_MODEL = "gpt-5.6-sol";
 const DEFAULT_MAX_OUTPUT_TOKENS = 8000;
 
 const WEB_SEARCH_PARAMS = Type.Object({
@@ -223,13 +223,8 @@ export default function (pi: ExtensionAPI) {
 		name: "web_search",
 		label: "Web Search",
 		description:
-			"Search the web using the OpenAI Codex web backend and the existing openai-codex OAuth token. " +
+			"Search the live web through the OpenAI Codex backend. Returns source-backed text whose linked sources should be cited; authentication and request failures throw. " +
 			`Output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
-		promptSnippet: "Search the live web through the OpenAI Codex web backend; no Ollama dependency",
-		promptGuidelines: [
-			"Use web_search when the user asks to search, browse, verify current information, or find recent/source-backed facts.",
-			"web_search returns source-backed web output from the Codex web backend; cite linked sources from the tool output in final answers when using it.",
-		],
 		parameters: WEB_SEARCH_PARAMS,
 		async execute(_toolCallId, params: WebSearchParams, signal, _onUpdate, ctx) {
 			const query = params.query.trim();
@@ -253,14 +248,8 @@ export default function (pi: ExtensionAPI) {
 		name: "web_fetch",
 		label: "Web Fetch",
 		description:
-			"Fetch and extract text content from a web page using the OpenAI Codex web backend and the existing openai-codex OAuth token. " +
+			"Fetch and extract source-backed text from one URL through the OpenAI Codex backend; use browser instead for visual inspection, login state, or JavaScript. Cite the fetched URL; invalid URLs, authentication, and request failures throw. " +
 			`Output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
-		promptSnippet: "Fetch and extract a web page through the OpenAI Codex web backend; no Ollama dependency",
-		promptGuidelines: [
-			"Use web_fetch when the user provides a specific URL or asks to inspect the contents of a web page without needing browser screenshots or JavaScript execution.",
-			"Use browser instead of web_fetch for pages that require visual inspection, screenshots, login state, or JavaScript evaluation.",
-			"web_fetch returns source-backed page content from the Codex web backend; cite the fetched URL in final answers when using it.",
-		],
 		parameters: WEB_FETCH_PARAMS,
 		async execute(_toolCallId, params: WebFetchParams, signal, _onUpdate, ctx) {
 			const url = params.url.trim();

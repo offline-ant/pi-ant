@@ -22,13 +22,12 @@
  *   — they can't scroll back to see the full output.
  * - `tail` inside remote/nested quoted commands and `tail` filtering `ssh` output
  *   are ignored because they may be needed to reduce remote output.
- * - In tmux-bash: the trailing `| tail …` is silently stripped and a warning
- *   is returned alongside the normal result.
- * - In bash: the command is blocked (once) with a message to use tmux-bash
+ * - In herdr-bash: the trailing `| tail …` is silently stripped.
+ * - In bash or herdr-send: the command is blocked once so the agent can retry
  *   without the `| tail -<n>`.
  * - Only triggers when a preceding pipe segment contains 'build' or 'check'.
  *
- * Covers bash, tmux-bash, and tmux-send tool calls.
+ * Covers bash, herdr-bash, and herdr-send tool calls.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -66,8 +65,8 @@ const PIPE_TAIL_RE = /\|\s*tail\s+-[^\|]*$/;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-type TmuxBashInput = { name: string; command: string };
-type TmuxSendInput = { name: string; text: string; enter?: boolean };
+type HerdrBashInput = { name: string; command: string };
+type HerdrSendInput = { target: string; text: string; enter?: boolean };
 type BashInput = { command: string };
 type ShellToken = { type: "word" | "operator"; text: string; start: number };
 type ShellInvocation = {
@@ -84,8 +83,8 @@ type ShellInvocation = {
  */
 function extractCommand(event: { toolName: string; input: unknown }): string | undefined {
   if (event.toolName === "bash") return (event.input as Partial<BashInput> | undefined)?.command;
-  if (event.toolName === "tmux-bash") return (event.input as Partial<TmuxBashInput> | undefined)?.command;
-  if (event.toolName === "tmux-send") return (event.input as Partial<TmuxSendInput> | undefined)?.text;
+  if (event.toolName === "herdr-bash") return (event.input as Partial<HerdrBashInput> | undefined)?.command;
+  if (event.toolName === "herdr-send") return (event.input as Partial<HerdrSendInput> | undefined)?.text;
   return undefined;
 }
 
@@ -364,12 +363,11 @@ export default function (pi: ExtensionAPI) {
 
     // pipe tail lint — only when a local preceding pipe segment contains 'build' or 'check'
     if (getBlockedLocalPipeTail(command)) {
-      if (event.toolName === "tmux-bash") {
-        // Silently strip the trailing `| tail …`
-        (event.input as TmuxBashInput).command = stripPipeTail(command);
+      if (event.toolName === "herdr-bash") {
+        (event.input as HerdrBashInput).command = stripPipeTail(command);
         return undefined;
       }
-      // bash / tmux-send: block first attempt, allow retry
+      // bash / herdr-send: block first attempt, allow retry
       if (warnedBashPipeTail) return undefined;
       warnedBashPipeTail = true;
       return {

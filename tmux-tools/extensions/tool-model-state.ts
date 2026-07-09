@@ -4,7 +4,7 @@ import * as path from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-export const TOOL_MODEL_STATE_CUSTOM_TYPE = "pi-ant:tool-model";
+export const TOOL_MODEL_STATE_CUSTOM_TYPE = "pi-tmux:tool-model";
 const TOOL_MODEL_FAVORITE_PATH = path.join(os.homedir(), ".pi", "agent", "tool-model-favorite.json");
 
 export const TOOL_MODEL_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;

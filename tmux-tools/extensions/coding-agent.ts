@@ -21,12 +21,11 @@ import {
   type WorkerArtifactPaths,
 } from "./worker-frame.ts";
 
-const REGISTRY_DIR = "/tmp/pi-ant-coding-agents";
+const REGISTRY_DIR = "/tmp/pi-tmux-coding-agents";
 const codingAgentParams = Type.Object({
   name: Type.String({ description: "Name of the persistent fresh-context worker pane." }),
   task: Type.String({ minLength: 1, description: "Task to run in the coding agent." }),
   folder: Type.Optional(Type.String({ description: "Working directory. Defaults to the current working directory." })),
-  retrospective: Type.Optional(Type.Boolean({ description: "Ask the worker for a no-tools retrospective after the main result and append it." })),
 });
 
 type CodingAgentParams = Static<typeof codingAgentParams>;
@@ -118,7 +117,7 @@ async function startWorker(pi: ExtensionAPI, _params: CodingAgentParams, name: s
   const session = SessionManager.create(cwd);
   const sessionFile = session.getSessionFile();
   if (!sessionFile) throw new Error("Could not create a persistent session for coding-agent.");
-  session.appendCustomEntry("pi-ant:coding-agent", { name, cwd, createdAt: new Date().toISOString() });
+  session.appendCustomEntry("pi-tmux:coding-agent", { name, cwd, createdAt: new Date().toISOString() });
   flushSessionFile(session, sessionFile);
 
   const requestedLockName = sanitizeWorkerName(`coding-${name}`);
@@ -165,7 +164,7 @@ function renderCodingAgentArgs(args: CodingAgentParams) {
   };
 }
 
-function formatCodingAgentResult(resultText: string, entry: RegistryEntry, paths: WorkerArtifactPaths, contextPercent: number | null | undefined, retrospective: boolean): string {
+function formatCodingAgentResult(resultText: string, entry: RegistryEntry, paths: WorkerArtifactPaths, contextPercent: number | null | undefined): string {
   const context = contextPercent === null || contextPercent === undefined ? "unknown" : `${contextPercent.toFixed(1)}%`;
   return [
     "## Result",
@@ -178,7 +177,7 @@ function formatCodingAgentResult(resultText: string, entry: RegistryEntry, paths
     `Session: ${entry.sessionFile}`,
     `Continue manually: pi --session ${entry.sessionFile}`,
     "",
-    formatWorkerMoreInfo(paths, retrospective),
+    formatWorkerMoreInfo(paths),
   ].join("\n");
 }
 
@@ -192,7 +191,7 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
       "Use coding-agent for fresh-context persistent worker tasks that may need follow-up work.",
       "Use call instead when the worker needs the current conversation context.",
       "The tool waits for the requested task to return; do not pair it with semaphore_wait for normal completion.",
-      "Use retrospective for broad/deep work where a second-pass observation is valuable.",
+      "Each task automatically runs a no-tools retrospective after the main result.",
     ],
     parameters: codingAgentParams,
     renderCall: renderCodingAgentArgs,
@@ -205,7 +204,6 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
 
       const releaseClaim = claimWorker(name);
       let paths: WorkerArtifactPaths | undefined;
-      const retrospective = params.retrospective === true;
       try {
         const id = makeWorkerId();
         paths = createWorkerArtifacts(id);
@@ -214,7 +212,6 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
           task: params.task,
           resultPath: paths.resultPath,
           statusPath: paths.statusPath,
-          retrospective,
           closeWhenDone: false,
         });
 
@@ -249,21 +246,20 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
           paths,
           sessionFile: entry.sessionFile,
           task: params.task,
-          retrospective,
           signal,
           onUpdate,
         });
         const resultText = formatWorkerResult(result);
-        if (result.isError) throw new Error(appendWorkerMoreInfo(resultText, paths, retrospective));
+        if (result.isError) throw new Error(appendWorkerMoreInfo(resultText, paths));
 
-        const responseText = formatCodingAgentResult(resultText, entry, paths, result.contextPercent, retrospective);
+        const responseText = formatCodingAgentResult(resultText, entry, paths, result.contextPercent);
         return {
           content: [{ type: "text", text: responseText }],
           details: { name, worker: entry, result, artifacts: paths, sessionCommand: `pi --session ${entry.sessionFile}` },
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        throw new Error(paths ? appendWorkerMoreInfo(message, paths, retrospective) : message);
+        throw new Error(paths ? appendWorkerMoreInfo(message, paths) : message);
       } finally {
         releaseClaim();
       }

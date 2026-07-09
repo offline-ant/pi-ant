@@ -288,13 +288,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "sqlite",
 		label: "SQLite",
-		description: `Run the sqlite3 CLI against ${DATABASE_FILE} in the current working directory. The tool forwards args and stdin directly to sqlite3. Output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
-		promptSnippet: `Run sqlite3 against ${DATABASE_FILE} in the current working directory`,
-		promptGuidelines: [
-			`Use sqlite to inspect or modify ${DATABASE_FILE} when the user asks about the local project database; pass SQL through stdin rather than shelling out.`,
-			`When creating or changing tables or views in ${DATABASE_FILE}, maintain the ${METADATA_TABLE} table so every table/view has a concise description row.`,
-			`${DATABASE_FILE} may be tracked in git as editable workflow state. Deleting or updating obsolete workflow rows is valid when requested by the user or required by the project workflow; do not treat rows as append-only history unless the project says so.`,
-		],
+		description: `Run sqlite3 against ${DATABASE_FILE}, forwarding args and stdin directly. Schema changes must maintain one concise ${METADATA_TABLE} description row per table/view. The database is editable workflow state, not append-only history. Returns stdout/stderr plus metadata warnings; missing databases and failed/killed commands throw. Output is truncated to ${DEFAULT_MAX_LINES} lines or ${formatSize(DEFAULT_MAX_BYTES)}.`,
 		parameters: SQLITE_PARAMS,
 		async execute(_toolCallId, params: SqliteParams, signal, _onUpdate, ctx) {
 			if (!(await databaseExists(ctx.cwd))) {

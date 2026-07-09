@@ -2,15 +2,13 @@ import * as fs from "node:fs";
 import { SessionManager, type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
-import { flushSessionFile, runTmux } from "./tmux-helpers.ts";
+import { flushSessionFile, sendTextToPane, startHerdrPiPane } from "./herdr-helpers.ts";
 import { getToolModelCliArgs } from "./tool-model-state.ts";
 import {
   appendWorkerMoreInfo,
   createWorkerArtifacts,
-  formatWorkerMoreInfo,
   formatWorkerResult,
   makeWorkerId,
-  parseActualLockName,
   sanitizeWorkerName,
   waitForWorkerReady,
   waitForWorkerResult,
@@ -22,31 +20,16 @@ const CALL_TOOL = "call";
 const CODING_AGENT_TOOL = "coding-agent";
 const ASK_TOOL = "ask";
 const MINITASK_TOOL = "minitask";
-const REMOVED_CALL_CONTROL_TOOLS = new Set(["finish_call", "return"]);
-const ROOT_STATE_CUSTOM_TYPE = "pi-ant:call-state";
-const CALL_RUNTIME_CUSTOM_TYPE = "pi-ant:call-runtime";
-const DESIGN_PRINCIPLES_PROMPT = [
-  "Note our design principles: Do the hard part first, clean up as you go, leave no dead code or overcomplicated abstractions behind,",
-  "being broken between phases is fine, cost of change is 0, avoid quick fixes / hacks, the well-designed long-term architecture end state is critical.",
-  "Clear, consistent names are important; immediately refactor and rename things to best describe reality.",
-].join(" ");
+const FRESH_HISTORY_TOOL = "fresh-history";
+const UNAVAILABLE_WORKER_TOOLS = new Set(["finish_call", "return", "herdr-fork"]);
+const ROOT_STATE_CUSTOM_TYPE = "pi-herdr:call-state";
+const CALL_RUNTIME_CUSTOM_TYPE = "pi-herdr:call-runtime";
 
 const callParams = Type.Object({
   task: Type.String({
     minLength: 1,
-    description: "Task to complete in a forked tmux call frame using the current conversation context.",
+    description: "Task to complete in a forked Herdr call frame using the current conversation context.",
   }),
-  complex: Type.Optional(
-    Type.Boolean({
-      description: "Allow this call frame to use call for substantial delegated subtasks.",
-    }),
-  ),
-  retrospective: Type.Optional(
-    Type.Boolean({
-      description:
-        "After the main result is ready, ask the call frame for no-tools long-term observations and append them to the result. Choose true mainly when the call is likely to read or inspect more than about 5 files, perform a deep code dive, or uncover design/naming/architecture cleanup opportunities; choose false for small, narrow, or mechanical tasks.",
-    }),
-  ),
 });
 
 type CallParams = Static<typeof callParams>;
@@ -59,7 +42,6 @@ interface RootCallState {
 interface CallRuntimeState {
   id: string;
   task: string;
-  complex: boolean;
   parentSession: string;
   childSession: string;
   parentCwd: string;
@@ -83,12 +65,10 @@ interface CallToolDetails {
   artifactDir: string;
   requestPath: string;
   resultMarkdownPath: string;
-  retrospectiveMarkdownPath?: string;
+  retrospectiveMarkdownPath: string;
   sessionFile: string;
   sessionCommand: string;
   task: string;
-  complex: boolean;
-  retrospective: boolean;
   elapsedMs?: number;
   status?: string;
 }
@@ -112,7 +92,7 @@ function getCustomStateEntries(ctx: ExtensionContext): CustomStateEntryLike[] {
 }
 
 function stripControlTools(tools: string[]): string[] {
-  return tools.filter((tool) => tool !== CALL_TOOL && !REMOVED_CALL_CONTROL_TOOLS.has(tool));
+  return tools.filter((tool) => tool !== CALL_TOOL && !UNAVAILABLE_WORKER_TOOLS.has(tool));
 }
 
 function parseRootCallState(value: unknown): RootCallState | undefined {
@@ -139,7 +119,6 @@ function parseCallRuntime(value: unknown): CallRuntimeState | undefined {
   if (
     typeof value.id !== "string" ||
     typeof value.task !== "string" ||
-    typeof value.complex !== "boolean" ||
     typeof value.parentSession !== "string" ||
     typeof value.childSession !== "string" ||
     typeof value.parentCwd !== "string" ||
@@ -154,7 +133,6 @@ function parseCallRuntime(value: unknown): CallRuntimeState | undefined {
   return {
     id: value.id,
     task: value.task,
-    complex: value.complex,
     parentSession: value.parentSession,
     childSession: value.childSession,
     parentCwd: value.parentCwd,
@@ -185,12 +163,12 @@ function uniqueTools(tools: string[]): string[] {
 }
 
 function rootActiveTools(state: RootCallState): string[] {
-  if (state.bobsMode) return [CALL_TOOL, CODING_AGENT_TOOL, ASK_TOOL, MINITASK_TOOL];
+  if (state.bobsMode) return [CALL_TOOL, CODING_AGENT_TOOL, ASK_TOOL, MINITASK_TOOL, FRESH_HISTORY_TOOL];
   return uniqueTools([...state.rootTools, CALL_TOOL]);
 }
 
 function runtimeActiveTools(runtime: CallRuntimeState): string[] {
-  return uniqueTools([...runtime.workerTools, ...(runtime.complex ? [CALL_TOOL] : [])]);
+  return uniqueTools([...runtime.workerTools, CALL_TOOL]);
 }
 
 function renderCallArgs(args: CallParams) {
@@ -204,10 +182,11 @@ function renderCallArgs(args: CallParams) {
   };
 }
 
-function callFrameInstructions(task: string, includeDesignPrinciples: boolean): string {
+function callFrameInstructions(task: string): string {
   return [
-    "You have stepped inside a call frame. Use the available tools to complete the task below. When the task is complete, answer with only the exact result text for the caller, or the cause of failure. That final assistant message is returned to the parent call frame.",
-    ...(includeDesignPrinciples ? ["", DESIGN_PRINCIPLES_PROMPT] : []),
+    "You have stepped into a call frame. The parent has delegated the task below to this frame.",
+    "Complete it here using the available tools. Do not call `call` merely to delegate the same task again; the parent's instruction to use `call` has already been fulfilled. Use nested `call` only for a genuinely separate subtask.",
+    "When complete, return only the exact parent-facing result or blocker.",
     "",
     "Task:",
     task,
@@ -215,13 +194,9 @@ function callFrameInstructions(task: string, includeDesignPrinciples: boolean): 
 }
 
 function statusText(rootState: RootCallState | undefined, runtime: CallRuntimeState | undefined): string | undefined {
-  if (runtime) return `call:child${runtime.complex ? ":complex" : ""}`;
+  if (runtime) return "call:child";
   if (!rootState) return undefined;
   return rootState.bobsMode ? "bobs:on" : undefined;
-}
-
-function isTmuxAvailable(): boolean {
-  return !!process.env.TMUX;
 }
 
 function getPreCallLeafId(ctx: ExtensionContext, toolCallId: string): string | null {
@@ -259,12 +234,10 @@ function createCallDetails(paths: WorkerArtifactPaths, id: string, actualLockNam
     artifactDir: paths.artifactDir,
     requestPath: paths.requestPath,
     resultMarkdownPath: paths.resultMarkdownPath,
-    ...(params.retrospective === true ? { retrospectiveMarkdownPath: paths.retrospectiveMarkdownPath } : {}),
+    retrospectiveMarkdownPath: paths.retrospectiveMarkdownPath,
     sessionFile,
     sessionCommand: `pi --session ${sessionFile}`,
     task: params.task,
-    complex: params.complex === true,
-    retrospective: params.retrospective === true,
     status: "finished",
   };
 }
@@ -304,14 +277,14 @@ export default function (pi: ExtensionAPI) {
 
     if (runtime) {
       ctx.ui.setWidget("call", [
-        `tmux call frame${runtime.complex ? " (complex)" : ""}`,
+        "Herdr call frame",
         `task: ${runtime.task.slice(0, 160)}${runtime.task.length > 160 ? "…" : ""}`,
       ]);
       return;
     }
 
     if (rootState?.bobsMode) {
-      ctx.ui.setWidget("call", ["bobs-mode: root tools restricted to call, coding-agent, ask, and minitask"]);
+      ctx.ui.setWidget("call", ["bobs-mode: root tools restricted to call, coding-agent, ask, minitask, and fresh-history"]);
       return;
     }
 
@@ -333,26 +306,20 @@ export default function (pi: ExtensionAPI) {
     signal: AbortSignal | undefined,
     onUpdate: AgentToolUpdateCallback | undefined,
   ): Promise<{ resultText: string; details: CallToolDetails }> {
-    if (!isTmuxAvailable()) {
-      throw new Error("call requires tmux; start pi inside a tmux session to use tmux-backed call frames.");
-    }
-
     const parentSession = ctx.sessionManager.getSessionFile();
     if (!parentSession || !fs.existsSync(parentSession)) {
-      throw new Error("Current session is not persisted; cannot fork a tmux call frame.");
+      throw new Error("Current session is not persisted; cannot fork a Herdr call frame.");
     }
 
     const callId = makeWorkerId();
     const requestedLockName = sanitizeWorkerName(`call-${callId}`);
-    const paths = createWorkerArtifacts(callId);
-    const retrospective = params.retrospective === true;
+    const paths = createWorkerArtifacts();
     try {
       writeWorkerRequest(paths, {
         id: callId,
-        task: callFrameInstructions(params.task, params.complex === true || retrospective),
+        task: callFrameInstructions(params.task),
         resultPath: paths.resultPath,
         statusPath: paths.statusPath,
-        retrospective,
         closeWhenDone: true,
       });
 
@@ -379,7 +346,6 @@ export default function (pi: ExtensionAPI) {
       const runtime: CallRuntimeState = {
         id: callId,
         task: params.task,
-        complex: params.complex === true,
         parentSession,
         childSession: childSessionFile,
         parentCwd: ctx.cwd,
@@ -391,29 +357,17 @@ export default function (pi: ExtensionAPI) {
       forked.appendCustomEntry(CALL_RUNTIME_CUSTOM_TYPE, runtime);
       flushSessionFile(forked, childSessionFile);
 
-      const startResult = await runTmux(
-        pi,
-        [
-          "session-agent",
-          requestedLockName,
-          targetCwd,
-          childSessionFile,
-          "--status-only",
-          ...getToolModelCliArgs(ctx),
-        ],
-        signal,
-      );
-      const startText = [startResult.stdout.trim(), startResult.stderr.trim()].filter(Boolean).join("\n");
-      if (startResult.code !== 0) {
-        throw new Error(startText || "Failed to start tmux call frame.");
-      }
+      const started = await startHerdrPiPane(pi, {
+        name: requestedLockName,
+        cwd: targetCwd,
+        sessionFile: childSessionFile,
+        piArgs: getToolModelCliArgs(ctx),
+        placement: "tab",
+      }, signal);
 
-      const actualLockName = parseActualLockName(startText, requestedLockName);
+      const actualLockName = started.paneId;
       await waitForWorkerReady(pi, actualLockName, 10_000, signal);
-      const sendResult = await runTmux(pi, ["send", actualLockName, `/worker-run ${paths.requestPath}`], signal);
-      if (sendResult.code !== 0) {
-        throw new Error(sendResult.stdout.trim() || sendResult.stderr.trim() || "Failed to send worker request to call frame.");
-      }
+      await sendTextToPane(pi, actualLockName, `/worker-run ${paths.requestPath}`, true, signal);
 
       const { result, details } = await waitForWorkerResult(pi, {
         id: callId,
@@ -422,42 +376,27 @@ export default function (pi: ExtensionAPI) {
         paths,
         sessionFile: childSessionFile,
         task: params.task,
-        retrospective,
         signal,
         onUpdate,
       });
-      const resultText = formatWorkerResult(result);
-      if (result.isError) throw new Error(appendWorkerMoreInfo(resultText, paths, retrospective));
+      if (result.isError) throw new Error(appendWorkerMoreInfo(result.result, paths));
 
       return {
-        resultText: `${resultText}\n\n${formatWorkerMoreInfo(paths, retrospective)}`,
+        resultText: formatWorkerResult(result),
         details: { ...createCallDetails(paths, callId, actualLockName, requestedLockName, childSessionFile, params), elapsedMs: details.elapsedMs },
       };
     } catch (error) {
-      throw new Error(appendWorkerMoreInfo(error instanceof Error ? error.message : String(error), paths, retrospective));
+      throw new Error(appendWorkerMoreInfo(error instanceof Error ? error.message : String(error), paths));
     }
   }
 
   pi.registerTool({
     name: CALL_TOOL,
     label: "Call",
-    description: "Run a delegated task in a forked tmux pi worker and return its result. Uses /tool-model when configured. Set retrospective when the task is likely to inspect more than about 5 files or do a deep design/code dive.",
-    promptSnippet: "Run a delegated task in a forked tmux pi worker and return its result.",
-    promptGuidelines: [
-      "Use call for delegated operational work when the user asks for a separate worker or when current conversation context matters.",
-      "Use call as the only tool call in its assistant turn; sibling tool work is not included in the forked worker context.",
-      "When the user asks to use call for a plan, range, or phases, act as coordinator: split the work into the fewest cohesive focused batches and invoke call separately for each. Do not pass the whole plan to one call unless it is truly atomic or the user explicitly asks for a single call.",
-      "Use call.complex only when the worker may need delegated subtasks with nested call frames.",
-      "Use call.retrospective when the delegated task is likely to inspect more than about 5 files, perform a deep code/design dive, or expose long-term architecture/naming cleanup observations; leave it off for small, narrow tasks.",
-    ],
+    description: "Run one delegated task in a forked worker with the current conversation context. Call it alone in a turn because sibling tool results are not included. Returns the result and automatic retrospective; failures throw with recovery details.",
     parameters: callParams,
     renderCall: renderCallArgs,
     async execute(toolCallId, params: CallParams, signal, onUpdate, ctx) {
-      const runtime = resolveRuntime(ctx);
-      if (runtime && !runtime.complex) {
-        throw new Error("This call frame is not complex; nested call is disabled.");
-      }
-
       const { resultText, details } = await startForkedCall(ctx, params, toolCallId, signal, onUpdate);
       return {
         content: [{ type: "text", text: resultText }],
@@ -500,7 +439,7 @@ export default function (pi: ExtensionAPI) {
         appendRootState(next);
         applyTools(next, undefined);
         updateUi(ctx, next, undefined);
-        ctx.ui.notify("bobs-mode on: root tools restricted to call, coding-agent, ask, and minitask.", "info");
+        ctx.ui.notify("bobs-mode on: root tools restricted to call, coding-agent, ask, minitask, and fresh-history.", "info");
         return;
       }
 
@@ -526,26 +465,20 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (event) => {
-    const runtime = currentRuntime;
-    if (runtime) {
+    if (currentRuntime) {
       return {
-        systemPrompt: [
-          event.systemPrompt,
-          "You are running inside a tmux call frame. Complete the worker request you were given and return the parent-facing result as your final assistant message.",
-        ].join("\n\n"),
+        systemPrompt: `${event.systemPrompt}\n\nYou are inside a Herdr call frame. The current worker request is the task delegated by the parent. Complete that task in this frame and return its parent-facing result. Do not re-delegate the same task through call.`,
       };
     }
 
     const state = currentRootState;
-    if (state?.bobsMode) {
-      const workerTools = state.rootTools.length > 0
-        ? ` A call frame will have access to these tools: ${state.rootTools.map((tool) => `\`${tool}\``).join(", ")}.`
-        : "";
-      return {
-        systemPrompt: `${event.systemPrompt}\n\nTreat the root conversation as an orchestration thread, not a work thread. Default to call for any task, continuation, status check, recommendation, or question whose answer is not already fully available from compact root context. Use coding-agent for fresh-context persistent worker tasks. Use minitask for isolated fresh-context review or small independent questions that do not need this session's context. Use ask directly when a user decision or clarification is needed.${workerTools} Do not give generic next-step options when current project/session state is unknown; call a tmux-backed worker to inspect and return a compact recommendation. Answer directly only for purely conversational/conceptual questions or when recent compact worker results already contain all needed facts.`,
-      };
-    }
+    if (!state?.bobsMode) return undefined;
 
-    return undefined;
+    const workerTools = state.rootTools.length > 0
+      ? ` Call workers receive these tools: ${state.rootTools.map((tool) => `\`${tool}\``).join(", ")}.`
+      : "";
+    return {
+      systemPrompt: `${event.systemPrompt}\n\nRoot orchestration mode: delegate repository or environment work rather than doing it here. Use call for current context, coding-agent for persistent fresh context, minitask for isolated work, fresh-history for a recent excerpt, and ask for required decisions. Answer directly only when no inspection or tool work is needed.${workerTools}`,
+    };
   });
 }

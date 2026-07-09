@@ -2,14 +2,13 @@ import * as path from "node:path";
 import { SessionManager, type AgentToolUpdateCallback, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
-import { flushSessionFile, runTmux } from "./tmux-helpers.ts";
+import { closePane, flushSessionFile, sendTextToPane, startHerdrPiPane } from "./herdr-helpers.ts";
 import { getToolModelCliArgs } from "./tool-model-state.ts";
 import {
   createWorkerArtifacts,
   formatWorkerMoreInfo,
   formatWorkerResult,
   makeWorkerId,
-  parseActualLockName,
   sanitizeWorkerName,
   waitForWorkerReady,
   waitForWorkerResult,
@@ -24,11 +23,8 @@ const minitaskParams = Type.Object({
   simple: Type.Optional(
     Type.Boolean({
       description:
-        "Use for quick rote tasks, like verifying whether a pattern is used in a file. Without /tool-model, runs pi with --provider openai-codex --model gpt-5.3-codex-spark, retrying with --thinking off if that exits nonzero, then falling back to deepseek/deepseek-v4-pro if Spark still fails. When /tool-model is set, that model is used instead.",
+        "Use for quick rote tasks. Without /tool-model, tries GPT-5.6 Sol with thinking off, then low. With /tool-model, uses that override.",
     }),
-  ),
-  retrospective: Type.Optional(
-    Type.Boolean({ description: "Ask the worker for a no-tools retrospective after the main answer and append it." }),
   ),
 });
 
@@ -43,41 +39,26 @@ interface MinitaskRunResult {
   moreInfo?: string;
 }
 
-function isTmuxAvailable(): boolean {
-  return !!process.env.TMUX;
-}
-
 function buildPiAttempts(simple: boolean, baseArgs: string[]): string[][] {
   if (!simple) return [baseArgs];
   return [
-    ["--provider", "openai-codex", "--model", "gpt-5.3-codex-spark", ...baseArgs],
-    ["--provider", "openai-codex", "--model", "gpt-5.3-codex-spark", "--thinking", "off", ...baseArgs],
-    ["--provider", "deepseek", "--model", "deepseek-v4-pro", ...baseArgs],
+    ["--provider", "openai-codex", "--model", "gpt-5.6-sol", "--thinking", "off", ...baseArgs],
+    ["--provider", "openai-codex", "--model", "gpt-5.6-sol", "--thinking", "low", ...baseArgs],
   ];
 }
 
 function formatMinitaskResult(result: MinitaskRunResult): string {
-  const exitLabel = result.exitCode === 0 ? "" : ` (exit code ${result.exitCode})`;
-  const sessionLines = result.sessionFile
-    ? ["", "## Session", `Reopen manually: pi --session ${result.sessionFile}`]
-    : [];
-  const moreInfoLines = result.moreInfo ? ["", "---", result.moreInfo] : [];
-  return [
-    "## Task",
-    result.task,
-    "",
-    `## Answer${exitLabel}`,
-    result.answer || "(no output)",
-    ...sessionLines,
-    ...moreInfoLines,
-  ].join("\n");
+  const answer = result.answer || "(no output)";
+  if (result.exitCode === 0) return answer;
+  const recovery = result.moreInfo ? `\n\n${result.moreInfo}` : "";
+  return `Minitask failed (exit code ${result.exitCode}):\n${answer}${recovery}`;
 }
 
 function renderMinitaskArgs(args: MinitaskParams) {
   const payloadValue = args.task === undefined
     ? args
-    : args.simple === true || args.retrospective === true
-      ? { task: args.task, ...(args.simple === true ? { simple: true } : {}), ...(args.retrospective === true ? { retrospective: true } : {}) }
+    : args.simple === true
+      ? { task: args.task, simple: true }
       : args.task;
   const payload = JSON.stringify(payloadValue, null, 2) ?? String(payloadValue);
   const lines = ["minitask(", ...payload.split("\n").map((line) => `  ${line}`), ")"];
@@ -98,15 +79,13 @@ async function runMinitaskAttempt(
   onUpdate: AgentToolUpdateCallback | undefined,
 ): Promise<MinitaskRunResult> {
   const id = makeWorkerId();
-  const paths = createWorkerArtifacts(id);
-  const retrospective = params.retrospective === true;
-  const moreInfo = formatWorkerMoreInfo(paths, retrospective);
+  const paths = createWorkerArtifacts();
+  const moreInfo = formatWorkerMoreInfo(paths);
   writeWorkerRequest(paths, {
     id,
     task: params.task,
     resultPath: paths.resultPath,
     statusPath: paths.statusPath,
-    retrospective,
     closeWhenDone: true,
   });
 
@@ -115,37 +94,26 @@ async function runMinitaskAttempt(
   if (!sessionFile) {
     return { task: params.task, answer: "Could not create a persistent session for minitask.", exitCode: 1, args, moreInfo };
   }
-  session.appendCustomEntry("pi-ant:minitask", { id, createdAt: new Date().toISOString() });
+  session.appendCustomEntry("pi-herdr:minitask", { id, createdAt: new Date().toISOString() });
   flushSessionFile(session, sessionFile);
 
   const requestedLockName = sanitizeWorkerName(`minitask-${path.basename(cwd)}-${id}`);
-  const startResult = await runTmux(pi, [
-    "session-agent",
-    requestedLockName,
-    cwd,
-    sessionFile,
-    "--status-only",
-    ...args,
-  ], signal);
-  const startText = [startResult.stdout.trim(), startResult.stderr.trim()].filter(Boolean).join("\n");
-  if (startResult.code !== 0) {
-    return { task: params.task, answer: startText || "Failed to start minitask worker.", exitCode: 1, args, sessionFile, moreInfo };
+  let actualLockName = "";
+  try {
+    const started = await startHerdrPiPane(pi, {
+      name: requestedLockName,
+      cwd,
+      sessionFile,
+      piArgs: args,
+      placement: "tab",
+    }, signal);
+    actualLockName = started.paneId;
+  } catch (error) {
+    return { task: params.task, answer: error instanceof Error ? error.message : String(error), exitCode: 1, args, sessionFile, moreInfo };
   }
-
-  const actualLockName = parseActualLockName(startText, requestedLockName);
   try {
     await waitForWorkerReady(pi, actualLockName, 10_000, signal);
-    const sendResult = await runTmux(pi, ["send", actualLockName, `/worker-run ${paths.requestPath}`], signal);
-    if (sendResult.code !== 0) {
-      return {
-        task: params.task,
-        answer: sendResult.stdout.trim() || sendResult.stderr.trim() || "Failed to send minitask request.",
-        exitCode: 1,
-        args,
-        sessionFile,
-        moreInfo,
-      };
-    }
+    await sendTextToPane(pi, actualLockName, `/worker-run ${paths.requestPath}`, true, signal);
 
     const { result } = await waitForWorkerResult(pi, {
       id,
@@ -154,7 +122,6 @@ async function runMinitaskAttempt(
       paths,
       sessionFile,
       task: params.task,
-      retrospective,
       signal,
       onUpdate,
     });
@@ -169,7 +136,7 @@ async function runMinitaskAttempt(
   } catch (error) {
     return { task: params.task, answer: error instanceof Error ? error.message : String(error), exitCode: 1, args, sessionFile, moreInfo };
   } finally {
-    await runTmux(pi, ["kill", actualLockName]).catch(() => undefined);
+    if (actualLockName) await closePane(pi, actualLockName).catch(() => undefined);
   }
 }
 
@@ -177,17 +144,10 @@ export default function minitaskExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "minitask",
     label: "Minitask",
-    description:
-      "Run one isolated small task or question about this project/environment with a fresh tmux worker. " +
-      "Uses /tool-model when configured. " +
-      "For multiple independent tasks, call this tool multiple times in parallel; do not put dependent followups here because each run has no shared context.",
+    description: "Run one isolated task in an ephemeral fresh-context worker and wait for completion. Independent calls may run in parallel; dependent follow-ups need another worker type. Returns the answer and automatic retrospective; failures are reported in the returned text.",
     parameters: minitaskParams,
     renderCall: renderMinitaskArgs,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      if (!isTmuxAvailable()) {
-        throw new Error("minitask requires tmux; start pi inside a tmux session to use tmux-backed minitasks.");
-      }
-
       const toolModelArgs = getToolModelCliArgs(ctx);
       let result: MinitaskRunResult | undefined;
       const attempts = buildPiAttempts(params.simple === true && toolModelArgs.length === 0, toolModelArgs);
@@ -201,7 +161,6 @@ export default function minitaskExtension(pi: ExtensionAPI): void {
         content: [{ type: "text", text: formatMinitaskResult(finalResult) }],
         details: {
           simple: params.simple === true,
-          retrospective: params.retrospective === true,
           result: finalResult,
           args: finalResult.args,
         },
