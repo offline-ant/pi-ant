@@ -3,7 +3,7 @@ import { SessionManager, type AgentToolUpdateCallback, type ExtensionAPI, type E
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { flushSessionFile, sendTextToPane, startHerdrPiPane } from "./herdr-helpers.ts";
-import { getToolModelCliArgs } from "./tool-model-state.ts";
+import { getSubagentModelCliArgs } from "./subagent-model-state.ts";
 import {
   appendWorkerMoreInfo,
   createWorkerArtifacts,
@@ -18,13 +18,9 @@ import {
 import { WORKER_DESIGN_PRINCIPLES } from "./worker-principles.ts";
 
 const CALL_TOOL = "call";
-const CODING_AGENT_TOOL = "coding-agent";
-const ASK_TOOL = "ask";
-const MINITASK_TOOL = "minitask";
-const FRESH_HISTORY_TOOL = "fresh-history";
 const UNAVAILABLE_WORKER_TOOLS = new Set(["finish_call", "return", "herdr-fork"]);
-const ROOT_STATE_CUSTOM_TYPE = "pi-herdr:call-state";
 const CALL_RUNTIME_CUSTOM_TYPE = "pi-herdr:call-runtime";
+const TOOL_CONTROL_EVENT = "pi-ant:tool-control-changed";
 
 const callParams = Type.Object({
   task: Type.String({
@@ -34,11 +30,6 @@ const callParams = Type.Object({
 });
 
 type CallParams = Static<typeof callParams>;
-
-interface RootCallState {
-  bobsMode: boolean;
-  rootTools: string[];
-}
 
 interface CallRuntimeState {
   id: string;
@@ -96,24 +87,6 @@ function stripControlTools(tools: string[]): string[] {
   return tools.filter((tool) => tool !== CALL_TOOL && !UNAVAILABLE_WORKER_TOOLS.has(tool));
 }
 
-function parseRootCallState(value: unknown): RootCallState | undefined {
-  if (!isRecord(value)) return undefined;
-  const rootTools = stringArray(value.rootTools);
-  if (typeof value.bobsMode !== "boolean" || rootTools === undefined) return undefined;
-  return { bobsMode: value.bobsMode, rootTools: stripControlTools(rootTools) };
-}
-
-function getLatestRootState(ctx: ExtensionContext): RootCallState | undefined {
-  const entries = getCustomStateEntries(ctx);
-  for (let index = entries.length - 1; index >= 0; index--) {
-    const entry = entries[index];
-    if (entry.customType !== ROOT_STATE_CUSTOM_TYPE) continue;
-    const state = parseRootCallState(entry.data);
-    if (state) return state;
-  }
-  return undefined;
-}
-
 function parseCallRuntime(value: unknown): CallRuntimeState | undefined {
   if (!isRecord(value)) return undefined;
   const workerTools = stringArray(value.workerTools);
@@ -155,17 +128,8 @@ function getLatestCallRuntime(ctx: ExtensionContext): CallRuntimeState | undefin
   return undefined;
 }
 
-function defaultRootState(activeTools: string[]): RootCallState {
-  return { bobsMode: false, rootTools: stripControlTools(activeTools) };
-}
-
 function uniqueTools(tools: string[]): string[] {
   return [...new Set(tools)];
-}
-
-function rootActiveTools(state: RootCallState): string[] {
-  if (state.bobsMode) return [CALL_TOOL, CODING_AGENT_TOOL, ASK_TOOL, MINITASK_TOOL, FRESH_HISTORY_TOOL];
-  return uniqueTools([...state.rootTools, CALL_TOOL]);
 }
 
 function runtimeActiveTools(runtime: CallRuntimeState): string[] {
@@ -196,10 +160,8 @@ function callFrameInstructions(task: string): string {
   ].join("\n");
 }
 
-function statusText(rootState: RootCallState | undefined, runtime: CallRuntimeState | undefined): string | undefined {
-  if (runtime) return "call:child";
-  if (!rootState) return undefined;
-  return rootState.bobsMode ? "bobs:on" : undefined;
+function statusText(runtime: CallRuntimeState | undefined): string | undefined {
+  return runtime ? "call:child" : undefined;
 }
 
 function getPreCallLeafId(ctx: ExtensionContext, toolCallId: string): string | null {
@@ -222,10 +184,13 @@ function getPreCallLeafId(ctx: ExtensionContext, toolCallId: string): string | n
   return leaf.id;
 }
 
-function captureWorkerTools(pi: ExtensionAPI, rootState: RootCallState, runtime: CallRuntimeState | undefined): string[] {
+function captureWorkerTools(
+  pi: ExtensionAPI,
+  runtime: CallRuntimeState | undefined,
+  delegatedRootTools: string[] | undefined,
+): string[] {
   if (runtime) return stripControlTools(runtime.workerTools);
-  if (rootState.bobsMode) return stripControlTools(rootState.rootTools);
-  return stripControlTools(pi.getActiveTools());
+  return stripControlTools(delegatedRootTools ?? pi.getActiveTools());
 }
 
 function createCallDetails(paths: WorkerArtifactPaths, id: string, actualLockName: string, requestedLockName: string, sessionFile: string, params: CallParams): CallToolDetails {
@@ -246,14 +211,14 @@ function createCallDetails(paths: WorkerArtifactPaths, id: string, actualLockNam
 }
 
 export default function (pi: ExtensionAPI) {
-  let currentRootState: RootCallState | undefined;
   let currentRuntime: CallRuntimeState | undefined;
+  let delegatedRootTools: string[] | undefined;
 
-  function resolveRootState(ctx: ExtensionContext): RootCallState | undefined {
-    const persisted = getLatestRootState(ctx);
-    currentRootState = persisted ?? currentRootState;
-    return currentRootState;
-  }
+  pi.events.on(TOOL_CONTROL_EVENT, (value: unknown) => {
+    if (!isRecord(value)) return;
+    const delegated = stringArray(value.delegatedTools);
+    delegatedRootTools = delegated ? stripControlTools(delegated) : undefined;
+  });
 
   function resolveRuntime(ctx: ExtensionContext): CallRuntimeState | undefined {
     const runtime = getLatestCallRuntime(ctx);
@@ -261,21 +226,12 @@ export default function (pi: ExtensionAPI) {
     return runtime;
   }
 
-  function appendRootState(state: RootCallState): void {
-    currentRootState = state;
-    pi.appendEntry(ROOT_STATE_CUSTOM_TYPE, state);
+  function applyRuntimeTools(runtime: CallRuntimeState | undefined): void {
+    if (runtime) pi.setActiveTools(runtimeActiveTools(runtime));
   }
 
-  function applyTools(rootState: RootCallState | undefined, runtime: CallRuntimeState | undefined): void {
-    if (runtime) {
-      pi.setActiveTools(runtimeActiveTools(runtime));
-      return;
-    }
-    pi.setActiveTools(rootActiveTools(rootState ?? defaultRootState(pi.getActiveTools())));
-  }
-
-  function updateUi(ctx: ExtensionContext, rootState: RootCallState | undefined, runtime: CallRuntimeState | undefined): void {
-    const status = statusText(rootState, runtime);
+  function updateUi(ctx: ExtensionContext, runtime: CallRuntimeState | undefined): void {
+    const status = statusText(runtime);
     ctx.ui.setStatus("call", status ? ctx.ui.theme.fg("accent", status) : undefined);
 
     if (runtime) {
@@ -286,20 +242,13 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    if (rootState?.bobsMode) {
-      ctx.ui.setWidget("call", ["bobs-mode: root tools restricted to call, coding-agent, ask, minitask, and fresh-history"]);
-      return;
-    }
-
     ctx.ui.setWidget("call", undefined);
   }
 
   function refresh(ctx: ExtensionContext): void {
-    const rootState = resolveRootState(ctx) ?? defaultRootState(pi.getActiveTools());
     const runtime = resolveRuntime(ctx);
-    currentRootState = rootState;
-    applyTools(rootState, runtime);
-    updateUi(ctx, rootState, runtime);
+    applyRuntimeTools(runtime);
+    updateUi(ctx, runtime);
   }
 
   async function startForkedCall(
@@ -328,9 +277,8 @@ export default function (pi: ExtensionAPI) {
 
       const targetCwd = ctx.cwd;
       const preCallLeafId = getPreCallLeafId(ctx, toolCallId);
-      const rootState = resolveRootState(ctx) ?? defaultRootState(pi.getActiveTools());
       const parentRuntime = resolveRuntime(ctx);
-      const workerTools = captureWorkerTools(pi, rootState, parentRuntime);
+      const workerTools = captureWorkerTools(pi, parentRuntime, delegatedRootTools);
       if (workerTools.length === 0) {
         throw new Error("Cannot start call frame: no worker tools are available after stripping call control tools.");
       }
@@ -364,7 +312,7 @@ export default function (pi: ExtensionAPI) {
         name: requestedLockName,
         cwd: targetCwd,
         sessionFile: childSessionFile,
-        piArgs: getToolModelCliArgs(ctx),
+        piArgs: getSubagentModelCliArgs(ctx),
         placement: "tab",
       }, signal);
 
@@ -408,57 +356,6 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerCommand("bobs-mode", {
-    description: "Toggle Bob's mode: /bobs-mode [on|off|status|toggle]",
-    getArgumentCompletions: (prefix) => {
-      const actions = ["on", "off", "status", "toggle"];
-      const matches = actions
-        .filter((action) => action.startsWith(prefix.trim().toLowerCase()))
-        .map((action) => ({ value: action, label: action }));
-      return matches.length > 0 ? matches : null;
-    },
-    handler: async (args, ctx) => {
-      await ctx.waitForIdle();
-      const runtime = resolveRuntime(ctx);
-      if (runtime) {
-        ctx.ui.notify("bobs-mode is controlled by the parent outside this call frame.", "warning");
-        return;
-      }
-
-      const rawAction = args?.trim().toLowerCase();
-      const state = resolveRootState(ctx) ?? defaultRootState(pi.getActiveTools());
-      const action = !rawAction || rawAction === "toggle" ? (state.bobsMode ? "off" : "on") : rawAction;
-
-      if (action === "status") {
-        ctx.ui.notify(`bobs-mode: ${state.bobsMode ? "on" : "off"}`, "info");
-        return;
-      }
-
-      if (action === "on") {
-        const next: RootCallState = {
-          bobsMode: true,
-          rootTools: stripControlTools(state.bobsMode ? state.rootTools : pi.getActiveTools()),
-        };
-        appendRootState(next);
-        applyTools(next, undefined);
-        updateUi(ctx, next, undefined);
-        ctx.ui.notify("bobs-mode on: root tools restricted to call, coding-agent, ask, minitask, and fresh-history.", "info");
-        return;
-      }
-
-      if (action === "off") {
-        const next: RootCallState = { ...state, bobsMode: false };
-        appendRootState(next);
-        applyTools(next, undefined);
-        updateUi(ctx, next, undefined);
-        ctx.ui.notify("bobs-mode off: root tools restored.", "info");
-        return;
-      }
-
-      ctx.ui.notify("Usage: /bobs-mode [on|off|status|toggle]", "warning");
-    },
-  });
-
   pi.on("session_start", async (_event, ctx) => {
     refresh(ctx);
   });
@@ -468,20 +365,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("before_agent_start", async (event) => {
-    if (currentRuntime) {
-      return {
-        systemPrompt: `${event.systemPrompt}\n\nYou are inside a Herdr call frame. The current worker request is the task delegated by the parent. Complete that task in this frame and return its parent-facing result. Do not re-delegate the same task through call.`,
-      };
-    }
-
-    const state = currentRootState;
-    if (!state?.bobsMode) return undefined;
-
-    const workerTools = state.rootTools.length > 0
-      ? ` Call workers receive these tools: ${state.rootTools.map((tool) => `\`${tool}\``).join(", ")}.`
-      : "";
+    if (!currentRuntime) return undefined;
     return {
-      systemPrompt: `${event.systemPrompt}\n\nRoot orchestration mode: delegate repository or environment work rather than doing it here. Use call for current context, coding-agent for persistent fresh context, minitask for isolated work, fresh-history for a recent excerpt, and ask for required decisions. Answer directly only when no inspection or tool work is needed.${workerTools}`,
+      systemPrompt: `${event.systemPrompt}\n\nYou are inside a Herdr call frame. The current worker request is the task delegated by the parent. Complete that task in this frame and return its parent-facing result. Do not re-delegate the same task through call.`,
     };
   });
 }

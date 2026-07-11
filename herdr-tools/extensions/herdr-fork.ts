@@ -5,7 +5,7 @@
 import * as fs from "node:fs";
 import { SessionManager, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { flushSessionFile, resolveCwd, startHerdrPiPane, writePromptFile } from "./herdr-helpers.ts";
-import { getToolModelCliArgs } from "./tool-model-state.ts";
+import { getSubagentModelCliArgs } from "./subagent-model-state.ts";
 
 const FORK_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const HERDR_FORK = process.env.PI_HERDR_FORK === "true";
@@ -239,7 +239,7 @@ export default function herdrForkExtension(pi: ExtensionAPI): void {
           ctx.ui.notify(validationError, "error");
           return;
         }
-        piArgs = resolvePiArgs(input, getToolModelCliArgs(ctx));
+        piArgs = resolvePiArgs(input, getSubagentModelCliArgs(ctx));
       } catch (error) {
         ctx.ui.notify(errorMessage(error), "error");
         return;
