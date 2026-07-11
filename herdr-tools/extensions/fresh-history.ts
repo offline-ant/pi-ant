@@ -3,7 +3,7 @@ import { SessionManager, type AgentToolUpdateCallback, type ExtensionAPI, type E
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { closePane, flushSessionFile, sendTextToPane, startHerdrPiPane } from "./herdr-helpers.ts";
-import { getToolModelCliArgs } from "./tool-model-state.ts";
+import { getSubagentModelCliArgs } from "./subagent-model-state.ts";
 import {
   createWorkerArtifacts,
   formatWorkerMoreInfo,
@@ -189,14 +189,14 @@ async function runFreshHistory(
   const sessionFile = session.getSessionFile();
   const parentSession = ctx.sessionManager.getSessionFile() ?? undefined;
   if (!sessionFile) {
-    return { prompt: params.prompt, answer: "Could not create a persistent session for fresh-history.", exitCode: 1, args: getToolModelCliArgs(ctx), requestedHistory: params.history, includedHistory: historyItems.length, parentSession, moreInfo };
+    return { prompt: params.prompt, answer: "Could not create a persistent session for fresh-history.", exitCode: 1, args: getSubagentModelCliArgs(ctx), requestedHistory: params.history, includedHistory: historyItems.length, parentSession, moreInfo };
   }
   session.appendCustomEntry("pi-herdr:fresh-history", { id, requestedHistory: params.history, includedHistory: historyItems.length, parentSession, createdAt: new Date().toISOString() });
   flushSessionFile(session, sessionFile);
 
   const requestedLockName = sanitizeWorkerName(`fresh-history-${path.basename(ctx.cwd)}-${id}`);
   let actualLockName = "";
-  const args = getToolModelCliArgs(ctx);
+  const args = getSubagentModelCliArgs(ctx);
   try {
     const started = await startHerdrPiPane(pi, {
       name: requestedLockName,

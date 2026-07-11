@@ -47,16 +47,19 @@ Command:
 
 - `call` — run a delegated current-context task in a forked Herdr Pi worker in a separate tab and return the result.
 - `coding-agent` — run a task in a named persistent fresh-context Herdr worker in a separate tab.
-- `minitask` — run one isolated fresh-context task in an ephemeral Herdr worker in a separate tab.
+- `minitask` — run one isolated fresh-conversation task in an ephemeral Herdr worker in a separate tab. It loads normal project/global startup context by default; pass `context: "clean"` to keep the requested working directory while disabling discovered context files, skills, prompt templates, extensions, and custom system prompts.
 - `fresh-history` — run one task in an ephemeral fresh Herdr worker seeded with only recent user requests and direct assistant replies. Tool calls/results are omitted, and the prompt includes the parent Pi session file plus session history root for critical recovery.
 
 After saving the main result, each structured worker runs a no-tools retrospective. The parent receives both outputs, including `everything was ok` when there are no additional observations; `result.md` and `retrospective.md` retain them separately.
 
+Clean minitasks explicitly load only the internal worker-frame extension needed by the result protocol. Consequently, models/providers registered exclusively by other extensions are unavailable in that mode; use the default `project` context when those runtime extensions are required.
+
 Commands:
 
-- `/bobs-mode [on|off|status|toggle]` — restrict root tools to orchestration tools.
 - `/finish-call-now "message"` — child-frame recovery command for active worker requests.
-- `/set-tool-model`, `/tool-model` — configure model overrides for spawned Pi workers.
+- `/set-subagent-model`, `/subagent-model` — configure model overrides for spawned Pi workers, including `/herdr-fork` unless it supplies explicit Pi arguments.
+
+Root orchestration behavior is the `bobs` profile in the main package's `/tools` selector. It restricts root tools to delegation and gives `call` workers the deterministic Research tool profile.
 
 ## Runtime state
 

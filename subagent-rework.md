@@ -57,10 +57,10 @@ Workers return the main result followed by the automatic retrospective, includin
 
 ## Context and tools
 
-- `call` inherits the current conversation and the active parent tool profile, excluding unavailable control tools.
-- Fresh workers load normal project/global instructions, remove persistent/one-shot worker tools, and retain bounded nested `call` support.
-- `/tool-model` optionally overrides the model used by spawned workers.
-- The root `/tool-profile` command controls ordinary-session tool exposure without changing structured-worker tool control.
+- `call` inherits the current conversation and ordinary active parent tools, excluding unavailable control tools. Under the `bobs` profile it instead receives the deterministic Research tool profile.
+- Fresh workers normally load project/global startup context, remove persistent/one-shot worker tools, and retain bounded nested `call` support. `minitask` uses this `project` context by default; its optional `clean` context keeps the working directory but disables discovered context files, skills, prompt templates, extensions, and custom system prompts, explicitly loading only the worker-frame extension required by the result protocol.
+- `/subagent-model` optionally overrides the model used by spawned workers, including `/herdr-fork` unless that command supplies explicit Pi arguments.
+- The root `/tools` selector controls branch-persistent ordinary-session tool exposure without changing structured-worker or Ugo tool ownership.
 
 ## Runtime state
 

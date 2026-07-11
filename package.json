@@ -1,6 +1,7 @@
 {
   "name": "pi-ant",
   "version": "1.0.0",
+  "type": "module",
   "description": "Ant's local pi extension package",
   "keywords": [
     "pi-package",
@@ -41,7 +42,7 @@
       "./extensions/fresh-pov-review.ts",
       "./extensions/vim.ts",
       "./extensions/agents-d.ts",
-      "./extensions/tool-profile.ts"
+      "./extensions/tools.ts"
     ]
   }
 }

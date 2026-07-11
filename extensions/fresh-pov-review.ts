@@ -9,7 +9,6 @@ import {
 
 const ENTRY_TYPE = "fresh-pov-review:result";
 const TOOL_NAME = "fresh_pov_review";
-const TOOL_STATE_TYPE = "fresh-pov-review:tool-state";
 
 const freshPovToolSchema = Type.Object({
 	file: Type.String({
@@ -26,11 +25,6 @@ type FreshPovToolParams = Static<typeof freshPovToolSchema>;
 interface ParsedCommand {
 	documentPath: string;
 	profile?: string;
-}
-
-interface ToolState {
-	enabled: boolean;
-	updatedAt: string;
 }
 
 interface ReviewMessageDetails {
@@ -135,26 +129,6 @@ function reviewMessageDetails(value: unknown): ReviewMessageDetails | undefined 
 	};
 }
 
-function latestToolState(ctx: ExtensionContext): boolean {
-	const branch = ctx.sessionManager.getBranch();
-	for (let index = branch.length - 1; index >= 0; index--) {
-		const entry = branch[index];
-		if (entry?.type !== "custom" || entry.customType !== TOOL_STATE_TYPE || !isRecord(entry.data)) continue;
-		if (typeof entry.data.enabled === "boolean") return entry.data.enabled;
-	}
-	return false;
-}
-
-function setToolActive(pi: ExtensionAPI, enabled: boolean): void {
-	const active = pi.getActiveTools();
-	const currentlyActive = active.includes(TOOL_NAME);
-	if (enabled && !currentlyActive) {
-		pi.setActiveTools([...active, TOOL_NAME]);
-	} else if (!enabled && currentlyActive) {
-		pi.setActiveTools(active.filter((name) => name !== TOOL_NAME));
-	}
-}
-
 function formatParentResult(result: FreshPovRunResult): string {
 	return [
 		result.report,
@@ -218,35 +192,6 @@ export default function freshPovReviewExtension(pi: ExtensionAPI): void {
 			},
 		}));
 
-	pi.registerCommand("fresh-pov-tool", {
-		description: "Enable or disable the agent-callable fresh_pov_review tool: /fresh-pov-tool [on|off|status]",
-		getArgumentCompletions: (prefix) => {
-			const value = prefix.trim().toLowerCase();
-			const matches = ["on", "off", "status"]
-				.filter((option) => option.startsWith(value))
-				.map((option) => ({ value: option, label: option }));
-			return matches.length > 0 ? matches : null;
-		},
-		handler: async (args, ctx) => {
-			await ctx.waitForIdle();
-			const action = args.trim().toLowerCase() || "status";
-			if (action === "status") {
-				ctx.ui.notify(`fresh_pov_review tool: ${pi.getActiveTools().includes(TOOL_NAME) ? "on" : "off"}`, "info");
-				return;
-			}
-			if (action !== "on" && action !== "off") {
-				ctx.ui.notify("Usage: /fresh-pov-tool [on|off|status]", "warning");
-				return;
-			}
-			const enabled = action === "on";
-			pi.appendEntry(TOOL_STATE_TYPE, {
-				enabled,
-				updatedAt: new Date().toISOString(),
-			} satisfies ToolState);
-			setToolActive(pi, enabled);
-			ctx.ui.notify(`fresh_pov_review tool ${enabled ? "enabled" : "disabled"} for this session`, "info");
-		},
-	});
 
 	pi.registerCommand("fresh-pov-review", {
 		description: "Review a document sequentially in an isolated no-context agent: /fresh-pov-review <path> [--profile <text>]",
@@ -283,10 +228,4 @@ export default function freshPovReviewExtension(pi: ExtensionAPI): void {
 			}
 		},
 	});
-
-	const refreshToolState = (ctx: ExtensionContext): void => {
-		setToolActive(pi, latestToolState(ctx));
-	};
-	pi.on("session_start", async (_event, ctx) => refreshToolState(ctx));
-	pi.on("session_tree", async (_event, ctx) => refreshToolState(ctx));
 }

@@ -1,32 +1,32 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-  createClearedToolModelState,
-  createToolModelState,
-  formatToolModel,
-  getFavoriteToolModelState,
-  getToolModelState,
-  saveFavoriteToolModelState,
-  TOOL_MODEL_STATE_CUSTOM_TYPE,
-  type ToolModelState,
-  type ToolModelThinkingLevel,
-} from "./tool-model-state.ts";
+  createClearedSubagentModelState,
+  createSubagentModelState,
+  formatSubagentModel,
+  getFavoriteSubagentModelState,
+  getSubagentModelState,
+  saveFavoriteSubagentModelState,
+  SUBAGENT_MODEL_STATE_CUSTOM_TYPE,
+  type SubagentModelState,
+  type SubagentModelThinkingLevel,
+} from "./subagent-model-state.ts";
 
-type ToolModelCommandAction = "toggle" | "status" | "clear";
+type SubagentModelCommandAction = "toggle" | "status" | "clear";
 
-function parseToolModelCommand(args: string | undefined): ToolModelCommandAction {
+function parseSubagentModelCommand(args: string | undefined): SubagentModelCommandAction {
   const trimmed = (args ?? "").trim().toLowerCase();
   if (trimmed.length === 0) return "toggle";
   if (trimmed === "status") return "status";
   if (trimmed === "off" || trimmed === "clear" || trimmed === "unset") return "clear";
-  throw new Error("Usage: /tool-model [status|off]");
+  throw new Error("Usage: /subagent-model [status|off]");
 }
 
-function parseSetToolModelCommand(args: string | undefined): "set" | "status" {
+function parseSetSubagentModelCommand(args: string | undefined): "set" | "status" {
   const trimmed = (args ?? "").trim().toLowerCase();
   if (trimmed.length === 0) return "set";
   if (trimmed === "status") return "status";
-  throw new Error("Usage: /set-tool-model [status]");
+  throw new Error("Usage: /set-subagent-model [status]");
 }
 
 async function getAvailableModels(ctx: ExtensionContext): Promise<Model<Api>[]> {
@@ -45,81 +45,81 @@ async function resolveCurrentModel(ctx: ExtensionContext): Promise<Model<Api>> {
   return current;
 }
 
-async function resolveStoredModel(ctx: ExtensionContext, state: ToolModelState): Promise<Model<Api>> {
+async function resolveStoredModel(ctx: ExtensionContext, state: SubagentModelState): Promise<Model<Api>> {
   const availableModels = await getAvailableModels(ctx);
   const model = availableModels.find((candidate) => candidate.provider === state.provider && candidate.id === state.modelId);
-  if (!model) throw new Error(`Favorite tool-model is not available: ${formatToolModel(state)}`);
+  if (!model) throw new Error(`Favorite subagent-model is not available: ${formatSubagentModel(state)}`);
   return model;
 }
 
 function statusLine(ctx: ExtensionContext): string {
-  const state = getToolModelState(ctx);
-  const favorite = getFavoriteToolModelState(ctx);
-  if (!state && !favorite) return "tool-model: unset; favorite: unset";
-  if (!state) return `tool-model: unset; favorite: ${formatToolModel(favorite)}`;
-  return `tool-model: ${formatToolModel(state)}; favorite: ${formatToolModel(favorite ?? state)}`;
+  const state = getSubagentModelState(ctx);
+  const favorite = getFavoriteSubagentModelState(ctx);
+  if (!state && !favorite) return "subagent-model: unset; favorite: unset";
+  if (!state) return `subagent-model: unset; favorite: ${formatSubagentModel(favorite)}`;
+  return `subagent-model: ${formatSubagentModel(state)}; favorite: ${formatSubagentModel(favorite ?? state)}`;
 }
 
 function updateUi(ctx: ExtensionContext): void {
-  const state = getToolModelState(ctx);
-  ctx.ui.setStatus("tool-model", state ? ctx.ui.theme.fg("accent", `tool:${formatToolModel(state)}`) : undefined);
+  const state = getSubagentModelState(ctx);
+  ctx.ui.setStatus("subagent-model", state ? ctx.ui.theme.fg("accent", `subagent:${formatSubagentModel(state)}`) : undefined);
 }
 
-function appendToolModel(
+function appendSubagentModel(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   model: Model<Api>,
-  thinkingLevel?: ToolModelThinkingLevel,
+  thinkingLevel?: SubagentModelThinkingLevel,
   verb = "set",
   notify = true,
-): ToolModelState {
-  const state = createToolModelState(model, thinkingLevel);
-  pi.appendEntry(TOOL_MODEL_STATE_CUSTOM_TYPE, state);
+): SubagentModelState {
+  const state = createSubagentModelState(model, thinkingLevel);
+  pi.appendEntry(SUBAGENT_MODEL_STATE_CUSTOM_TYPE, state);
   updateUi(ctx);
-  if (notify) ctx.ui.notify(`tool-model ${verb}: ${formatToolModel(state)}`, "info");
+  if (notify) ctx.ui.notify(`subagent-model ${verb}: ${formatSubagentModel(state)}`, "info");
   return state;
 }
 
-function clearToolModel(pi: ExtensionAPI, ctx: ExtensionContext): void {
-  pi.appendEntry(TOOL_MODEL_STATE_CUSTOM_TYPE, createClearedToolModelState());
+function clearSubagentModel(pi: ExtensionAPI, ctx: ExtensionContext): void {
+  pi.appendEntry(SUBAGENT_MODEL_STATE_CUSTOM_TYPE, createClearedSubagentModelState());
   updateUi(ctx);
-  const favorite = getFavoriteToolModelState(ctx);
-  const suffix = favorite ? ` /tool-model restores favorite ${formatToolModel(favorite)}.` : " Use /set-tool-model to choose a favorite.";
-  ctx.ui.notify(`tool-model cleared; tool workers will use normal pi model selection.${suffix}`, "info");
+  const favorite = getFavoriteSubagentModelState(ctx);
+  const suffix = favorite ? ` /subagent-model restores favorite ${formatSubagentModel(favorite)}.` : " Use /set-subagent-model to choose a favorite.";
+  ctx.ui.notify(`subagent-model cleared; spawned subagents will use normal pi model selection.${suffix}`, "info");
 }
 
-function saveFavoriteToolModel(ctx: ExtensionContext, state: ToolModelState): void {
+function saveFavoriteSubagentModel(ctx: ExtensionContext, state: SubagentModelState): void {
   try {
-    saveFavoriteToolModelState(state);
+    saveFavoriteSubagentModelState(state);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    ctx.ui.notify(`tool-model favorite was not saved: ${message}`, "warning");
+    ctx.ui.notify(`subagent-model favorite was not saved: ${message}`, "warning");
   }
 }
 
-async function enableFavoriteToolModel(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
-  const favorite = getFavoriteToolModelState(ctx);
+async function enableFavoriteSubagentModel(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+  const favorite = getFavoriteSubagentModelState(ctx);
   if (!favorite) {
     const model = await resolveCurrentModel(ctx);
-    const state = appendToolModel(pi, ctx, model, pi.getThinkingLevel(), "favorite set", false);
-    saveFavoriteToolModel(ctx, state);
-    ctx.ui.notify(`No favorite tool-model. Setting ${formatToolModel(state)} as favorite; change favorite with /set-tool-model.`, "warning");
+    const state = appendSubagentModel(pi, ctx, model, pi.getThinkingLevel(), "favorite set", false);
+    saveFavoriteSubagentModel(ctx, state);
+    ctx.ui.notify(`No favorite subagent-model. Setting ${formatSubagentModel(state)} as favorite; change favorite with /set-subagent-model.`, "warning");
     return;
   }
 
   const model = await resolveStoredModel(ctx, favorite);
-  appendToolModel(pi, ctx, model, favorite.thinkingLevel, "enabled");
+  appendSubagentModel(pi, ctx, model, favorite.thinkingLevel, "enabled");
 }
 
-async function setFavoriteToolModel(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+async function setFavoriteSubagentModel(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
   const model = await resolveCurrentModel(ctx);
-  const state = appendToolModel(pi, ctx, model, pi.getThinkingLevel(), "favorite set");
-  saveFavoriteToolModel(ctx, state);
+  const state = appendSubagentModel(pi, ctx, model, pi.getThinkingLevel(), "favorite set");
+  saveFavoriteSubagentModel(ctx, state);
 }
 
 export default function (pi: ExtensionAPI) {
-  pi.registerCommand("tool-model", {
-    description: "Toggle the favorite model override used by tool-spawned workers. Usage: /tool-model [status|off]",
+  pi.registerCommand("subagent-model", {
+    description: "Toggle the favorite model override used by spawned subagents. Usage: /subagent-model [status|off]",
     getArgumentCompletions: (prefix) => {
       const actions = ["status", "off", "clear", "unset"];
       const trimmed = prefix.trim().toLowerCase();
@@ -131,9 +131,9 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       await ctx.waitForIdle();
 
-      let action: ToolModelCommandAction;
+      let action: SubagentModelCommandAction;
       try {
-        action = parseToolModelCommand(args);
+        action = parseSubagentModelCommand(args);
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
         return;
@@ -145,21 +145,21 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (action === "clear" || getToolModelState(ctx)) {
-        clearToolModel(pi, ctx);
+      if (action === "clear" || getSubagentModelState(ctx)) {
+        clearSubagentModel(pi, ctx);
         return;
       }
 
       try {
-        await enableFavoriteToolModel(pi, ctx);
+        await enableFavoriteSubagentModel(pi, ctx);
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
     },
   });
 
-  pi.registerCommand("set-tool-model", {
-    description: "Set the current model as the favorite tool-worker override and enable it. Usage: /set-tool-model [status]",
+  pi.registerCommand("set-subagent-model", {
+    description: "Set the current model as the favorite subagent override and enable it. Usage: /set-subagent-model [status]",
     getArgumentCompletions: (prefix) => {
       const actions = ["status"];
       const trimmed = prefix.trim().toLowerCase();
@@ -173,7 +173,7 @@ export default function (pi: ExtensionAPI) {
 
       let action: "set" | "status";
       try {
-        action = parseSetToolModelCommand(args);
+        action = parseSetSubagentModelCommand(args);
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
         return;
@@ -186,7 +186,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       try {
-        await setFavoriteToolModel(pi, ctx);
+        await setFavoriteSubagentModel(pi, ctx);
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }

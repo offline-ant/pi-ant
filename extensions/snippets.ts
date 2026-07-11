@@ -7,6 +7,9 @@ export interface PromptSnippet {
 export const PRINCIPLES_SUFFIX =
   "Prefer the smallest clean long-term design. Prefer straightforward solutions over preemptive defensiveness; before adding a new choice or mechanism, establish that it is required. Do structural work first; remove stale code and avoid shims, duplicate mechanisms, and speculative abstractions. Rename unclear concepts to match reality.";
 
+export const EDIT_PRINCIPLES_SUFFIX =
+  "Note our edit principels: Write for humans, not completeness checkers. Text never written is never wrong; omission is often better than another qualification. State the main point early and cut anything that does not serve the document's job. Prefer direct verbs, concrete nouns, visible actors, and plain terms. Let each paragraph do one thing. Make the strongest useful claim plainly, then narrow it where the exception matters instead of burdening every sentence with caveats. Name genuine uncertainty precisely. Structure for skimming, vary sentence rhythm naturally, and avoid canned transitions, artificial symmetry, significance puffery, and tidy conclusions that add nothing. Do not polish text that should be deleted.";
+
 export const CUT_SUFFIX =
   "Before continuing, restate the outer problem and separate essential from accidental complexity. Identify duplicate mechanisms, misplaced state or authority, and things that should not exist. If the current direction has the wrong shape, pause and propose the simpler boundary before editing; ask only about material design choices.";
 
@@ -66,6 +69,11 @@ export const SNIPPETS: PromptSnippet[] = [
     key: "principles",
     value: PRINCIPLES_SUFFIX,
     description: "Insert the design principles suffix",
+  },
+  {
+    key: "edit-principles",
+    value: EDIT_PRINCIPLES_SUFFIX,
+    description: "Insert the writing and editing principles suffix",
   },
   {
     key: "cut",

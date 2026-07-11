@@ -4,7 +4,7 @@ import { SessionManager, type AgentToolUpdateCallback, type ExtensionAPI, type E
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { flushSessionFile, paneExists as herdrPaneExists, sendTextToPane, startHerdrPiPane } from "./herdr-helpers.ts";
-import { getToolModelCliArgs } from "./tool-model-state.ts";
+import { getSubagentModelCliArgs } from "./subagent-model-state.ts";
 import {
   appendWorkerMoreInfo,
   createWorkerArtifacts,
@@ -122,7 +122,7 @@ async function startWorker(pi: ExtensionAPI, _params: CodingAgentParams, name: s
     name: requestedLockName,
     cwd,
     sessionFile,
-    piArgs: getToolModelCliArgs(ctx),
+    piArgs: getSubagentModelCliArgs(ctx),
     placement: "tab",
   }, signal);
 

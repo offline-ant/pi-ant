@@ -1,9 +1,11 @@
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { SessionManager, type AgentToolUpdateCallback, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
 import { closePane, flushSessionFile, resolveCwd, sendTextToPane, startHerdrPiPane } from "./herdr-helpers.ts";
-import { getToolModelCliArgs } from "./tool-model-state.ts";
+import { getSubagentModelCliArgs } from "./subagent-model-state.ts";
 import {
   createWorkerArtifacts,
   formatWorkerMoreInfo,
@@ -16,16 +18,26 @@ import {
 } from "./worker-frame.ts";
 import { WORKER_DESIGN_PRINCIPLES } from "./worker-principles.ts";
 
+const MINITASK_CONTEXTS = ["project", "clean"] as const;
+const WORKER_FRAME_EXTENSION_PATH = fileURLToPath(new URL("./worker-frame.ts", import.meta.url));
+
 const minitaskParams = Type.Object({
   task: Type.String({
     minLength: 1,
     description: "One question or small task to answer with a single isolated pi worker.",
   }),
   folder: Type.Optional(Type.String({ description: "Working directory. Defaults to the current working directory." })),
+  context: Type.Optional(
+    StringEnum(MINITASK_CONTEXTS, {
+      description:
+        "Startup context. 'project' (default) loads normal project/global resources. 'clean' keeps the working directory but disables discovered context files, skills, prompt templates, extensions, and custom system prompts; extension-registered model providers are unavailable.",
+      default: "project",
+    }),
+  ),
   simple: Type.Optional(
     Type.Boolean({
       description:
-        "Use for quick rote tasks. Without /tool-model, tries GPT-5.6 Sol with thinking off, then low. With /tool-model, uses that override.",
+        "Use for quick rote tasks. Without /subagent-model, tries GPT-5.6 Sol with thinking off, then low. With /subagent-model, uses that override.",
     }),
   ),
 });
@@ -49,6 +61,23 @@ function buildPiAttempts(simple: boolean, baseArgs: string[]): string[][] {
   ];
 }
 
+function contextCliArgs(context: MinitaskParams["context"]): string[] {
+  if ((context ?? "project") === "project") return [];
+  return [
+    "--no-context-files",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-extensions",
+    "--no-approve",
+    "--system-prompt",
+    "",
+    "--append-system-prompt",
+    "",
+    "--extension",
+    WORKER_FRAME_EXTENSION_PATH,
+  ];
+}
+
 function formatMinitaskResult(result: MinitaskRunResult): string {
   const answer = result.answer || "(no output)";
   if (result.exitCode === 0) return answer;
@@ -59,7 +88,7 @@ function formatMinitaskResult(result: MinitaskRunResult): string {
 function renderMinitaskArgs(args: MinitaskParams) {
   const payloadValue = args.task === undefined
     ? args
-    : args.folder !== undefined || args.simple === true
+    : args.folder !== undefined || args.context !== undefined || args.simple === true
       ? args
       : args.task;
   const payload = JSON.stringify(payloadValue, null, 2) ?? String(payloadValue);
@@ -96,7 +125,11 @@ async function runMinitaskAttempt(
   if (!sessionFile) {
     return { task: params.task, answer: "Could not create a persistent session for minitask.", exitCode: 1, args, moreInfo };
   }
-  session.appendCustomEntry("pi-herdr:minitask", { id, createdAt: new Date().toISOString() });
+  session.appendCustomEntry("pi-herdr:minitask", {
+    id,
+    context: params.context ?? "project",
+    createdAt: new Date().toISOString(),
+  });
   flushSessionFile(session, sessionFile);
 
   const requestedLockName = sanitizeWorkerName(`minitask-${path.basename(cwd)}-${id}`);
@@ -146,14 +179,15 @@ export default function minitaskExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "minitask",
     label: "Minitask",
-    description: "Run one isolated task in an ephemeral fresh-context worker and wait for completion. Independent calls may run in parallel; dependent follow-ups need another worker type. Returns the answer and automatic retrospective; failures are reported in the returned text.",
+    description: "Run one isolated task in an ephemeral fresh-conversation worker and wait for completion. Project/global startup context loads by default; use context='clean' for an independent review without discovered instructions or extensions. Independent calls may run in parallel; dependent follow-ups need another worker type. Returns the answer and automatic retrospective; failures are reported in the returned text.",
     parameters: minitaskParams,
     renderCall: renderMinitaskArgs,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const cwd = resolveCwd(ctx.cwd, params.folder);
-      const toolModelArgs = getToolModelCliArgs(ctx);
+      const subagentModelArgs = getSubagentModelCliArgs(ctx);
+      const workerArgs = [...subagentModelArgs, ...contextCliArgs(params.context)];
       let result: MinitaskRunResult | undefined;
-      const attempts = buildPiAttempts(params.simple === true && toolModelArgs.length === 0, toolModelArgs);
+      const attempts = buildPiAttempts(params.simple === true && subagentModelArgs.length === 0, workerArgs);
       for (const args of attempts) {
         result = await runMinitaskAttempt(pi, params, cwd, args, signal, onUpdate);
         if (result.exitCode === 0) break;
@@ -164,6 +198,7 @@ export default function minitaskExtension(pi: ExtensionAPI): void {
         content: [{ type: "text", text: formatMinitaskResult(finalResult) }],
         details: {
           cwd,
+          context: params.context ?? "project",
           simple: params.simple === true,
           result: finalResult,
           args: finalResult.args,
