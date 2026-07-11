@@ -5,7 +5,7 @@ export interface PromptSnippet {
 }
 
 export const PRINCIPLES_SUFFIX =
-  "Prefer the smallest clean long-term design. Do structural work first; remove stale code and avoid shims, duplicate mechanisms, and speculative abstractions. Rename unclear concepts to match reality.";
+  "Prefer the smallest clean long-term design. Prefer straightforward solutions over preemptive defensiveness; before adding a new choice or mechanism, establish that it is required. Do structural work first; remove stale code and avoid shims, duplicate mechanisms, and speculative abstractions. Rename unclear concepts to match reality.";
 
 export const CUT_SUFFIX =
   "Before continuing, restate the outer problem and separate essential from accidental complexity. Identify duplicate mechanisms, misplaced state or authority, and things that should not exist. If the current direction has the wrong shape, pause and propose the simpler boundary before editing; ask only about material design choices.";

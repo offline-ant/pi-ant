@@ -12,6 +12,7 @@ These are the pi tools registered by this package:
 
 - `ask` — ask the user interactive multiple-choice or free-form questions.
 - `browser` — control persistent Chromium/Firefox sessions through `bin/browser-io`, including navigation, awaited JavaScript eval, and before/after screenshots under `/tmp/browser-io`.
+- `fresh_pov_review` — run an isolated sequential document review with per-unit source text and friction progress. It is inactive by default and can be exposed to the agent for the current session with `/fresh-pov-tool on`.
 - `sqlite` — run `sqlite3` against `AGENTS.db` in the current working directory; auto-enabled when that database exists.
 - Core `edit` and `write` are wrapped by `lints` to display post-write safety warnings.
 - `present_guidance` — validates structured guidance output for guidance-mode final answers. It is only registered for `PI_GUIDANCE=true` runs or dynamically inside `/ugo` guide-phase sessions.
@@ -26,6 +27,7 @@ These are the pi tools registered by this package:
 - SQLite workflow commands: `/sqlite-init`, `/agent-db`.
 - Context explorer commands: `/context-explorer`, `/context-explorer-stop`.
 - Prompt history command: `/prompt-history`.
+- Fresh-ingress review commands: `/fresh-pov-review <document-path> [--profile <reader profile>]` runs a persistent isolated agent with no discovered context, skills, prompts, extensions, or built-in tools; `/fresh-pov-tool [on|off|status]` controls whether the parent agent can call `fresh_pov_review({ file, prompt? })`. The tool is inactive by default and therefore consumes no model context until enabled. Both entry points reveal Markdown in visually coherent 3–6-sentence reading units, show each consumed source unit with its recorded friction and current reader thinking/output, and save the full session, metadata, and final review under `scratch/fresh-pov/` in the active working directory. Slash-command results are inserted into the current agent context; tool results enter it normally as tool output.
 - Vim conversation edit command: `/vim` — opens the current conversation transcript in `$VISUAL`/`$EDITOR`/`vim`; changed lines are sent as the next user message.
 - Reflection memory checkpoint command: `/reflect`.
 - Working-directory switch command: `/cwd <path>`.

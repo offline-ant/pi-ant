@@ -7,7 +7,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 export const TOOL_MODEL_STATE_CUSTOM_TYPE = "pi-herdr:tool-model";
 const TOOL_MODEL_FAVORITE_PATH = path.join(os.homedir(), ".pi", "agent", "tool-model-favorite.json");
 
-export const TOOL_MODEL_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const TOOL_MODEL_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ToolModelThinkingLevel = (typeof TOOL_MODEL_THINKING_LEVELS)[number];
 
 export interface ToolModelState {

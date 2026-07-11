@@ -15,6 +15,7 @@ import {
   writeWorkerRequest,
   type WorkerArtifactPaths,
 } from "./worker-frame.ts";
+import { WORKER_DESIGN_PRINCIPLES } from "./worker-principles.ts";
 
 const CALL_TOOL = "call";
 const CODING_AGENT_TOOL = "coding-agent";
@@ -187,6 +188,8 @@ function callFrameInstructions(task: string): string {
     "You have stepped into a call frame. The parent has delegated the task below to this frame.",
     "Complete it here using the available tools. Do not call `call` merely to delegate the same task again; the parent's instruction to use `call` has already been fulfilled. Use nested `call` only for a genuinely separate subtask.",
     "When complete, return only the exact parent-facing result or blocker.",
+    "",
+    WORKER_DESIGN_PRINCIPLES,
     "",
     "Task:",
     task,

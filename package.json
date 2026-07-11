@@ -38,6 +38,7 @@
       "./extensions/browser.ts",
       "./extensions/web.ts",
       "./extensions/prompt-history.ts",
+      "./extensions/fresh-pov-review.ts",
       "./extensions/vim.ts",
       "./extensions/agents-d.ts",
       "./extensions/tool-profile.ts"
