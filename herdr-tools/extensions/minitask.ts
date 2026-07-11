@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { SessionManager, type AgentToolUpdateCallback, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
-import { closePane, flushSessionFile, sendTextToPane, startHerdrPiPane } from "./herdr-helpers.ts";
+import { closePane, flushSessionFile, resolveCwd, sendTextToPane, startHerdrPiPane } from "./herdr-helpers.ts";
 import { getToolModelCliArgs } from "./tool-model-state.ts";
 import {
   createWorkerArtifacts,
@@ -14,12 +14,14 @@ import {
   waitForWorkerResult,
   writeWorkerRequest,
 } from "./worker-frame.ts";
+import { WORKER_DESIGN_PRINCIPLES } from "./worker-principles.ts";
 
 const minitaskParams = Type.Object({
   task: Type.String({
     minLength: 1,
     description: "One question or small task to answer with a single isolated pi worker.",
   }),
+  folder: Type.Optional(Type.String({ description: "Working directory. Defaults to the current working directory." })),
   simple: Type.Optional(
     Type.Boolean({
       description:
@@ -57,8 +59,8 @@ function formatMinitaskResult(result: MinitaskRunResult): string {
 function renderMinitaskArgs(args: MinitaskParams) {
   const payloadValue = args.task === undefined
     ? args
-    : args.simple === true
-      ? { task: args.task, simple: true }
+    : args.folder !== undefined || args.simple === true
+      ? args
       : args.task;
   const payload = JSON.stringify(payloadValue, null, 2) ?? String(payloadValue);
   const lines = ["minitask(", ...payload.split("\n").map((line) => `  ${line}`), ")"];
@@ -83,7 +85,7 @@ async function runMinitaskAttempt(
   const moreInfo = formatWorkerMoreInfo(paths);
   writeWorkerRequest(paths, {
     id,
-    task: params.task,
+    task: [WORKER_DESIGN_PRINCIPLES, "", "Task:", params.task].join("\n"),
     resultPath: paths.resultPath,
     statusPath: paths.statusPath,
     closeWhenDone: true,
@@ -148,11 +150,12 @@ export default function minitaskExtension(pi: ExtensionAPI): void {
     parameters: minitaskParams,
     renderCall: renderMinitaskArgs,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const cwd = resolveCwd(ctx.cwd, params.folder);
       const toolModelArgs = getToolModelCliArgs(ctx);
       let result: MinitaskRunResult | undefined;
       const attempts = buildPiAttempts(params.simple === true && toolModelArgs.length === 0, toolModelArgs);
       for (const args of attempts) {
-        result = await runMinitaskAttempt(pi, params, ctx.cwd, args, signal, onUpdate);
+        result = await runMinitaskAttempt(pi, params, cwd, args, signal, onUpdate);
         if (result.exitCode === 0) break;
       }
 
@@ -160,6 +163,7 @@ export default function minitaskExtension(pi: ExtensionAPI): void {
       return {
         content: [{ type: "text", text: formatMinitaskResult(finalResult) }],
         details: {
+          cwd,
           simple: params.simple === true,
           result: finalResult,
           args: finalResult.args,
