@@ -8,9 +8,9 @@ import { flushSessionFile, resolveCwd, startHerdrPiPane, writePromptFile } from 
 import { getSubagentModelCliArgs } from "./subagent-model-state.ts";
 
 const FORK_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
-const HERDR_FORK = process.env.PI_HERDR_FORK === "true";
-const FORK_BLOCK_MESSAGE = "This process is already a Herdr fork; /herdr-fork is unavailable here.";
-const FORK_SYSTEM_PROMPT = "This is a Herdr fork, not the controlling session. Complete the assigned task and report the result; do not invoke /herdr-fork.";
+const IS_HERDR_FORK = process.env.PI_HERDR_FORK === "true";
+const FORK_SYSTEM_PROMPT =
+  "You are running in an interactive Herdr fork, not the original controlling session. Continue assisting the user in this forked session.";
 
 interface HerdrForkInput {
   name: string;
@@ -217,7 +217,7 @@ async function runPendingFork(pi: ExtensionAPI, id: string, ctx: ExtensionComman
 
 export default function herdrForkExtension(pi: ExtensionAPI): void {
   pi.on("before_agent_start", (event) => {
-    if (!HERDR_FORK) return undefined;
+    if (!IS_HERDR_FORK) return undefined;
     return { systemPrompt: `${event.systemPrompt}\n\n${FORK_SYSTEM_PROMPT}` };
   });
 
@@ -225,11 +225,6 @@ export default function herdrForkExtension(pi: ExtensionAPI): void {
     description:
       "Fork the current session into a new pi agent in a Herdr tab. Usage: /herdr-fork <name> [folder] [--pi-args <args>] [-- <prompt>]",
     handler: async (args, ctx) => {
-      if (HERDR_FORK) {
-        ctx.ui.notify(FORK_BLOCK_MESSAGE, "warning");
-        return;
-      }
-
       let input: HerdrForkInput;
       let piArgs: string[];
       try {
@@ -254,11 +249,6 @@ export default function herdrForkExtension(pi: ExtensionAPI): void {
   pi.registerCommand("herdr-fork-run", {
     description: "Internal follow-up command for queued Herdr forks.",
     handler: async (args, ctx) => {
-      if (HERDR_FORK) {
-        ctx.ui.notify(FORK_BLOCK_MESSAGE, "warning");
-        return;
-      }
-
       await runPendingFork(pi, args.trim(), ctx);
     },
   });

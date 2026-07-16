@@ -35,13 +35,13 @@ import {
 const REQUIRED_DYNAMIC_TOOLS = ["present_guidance", "sqlite"] as const;
 const SAVED_DEFAULT_PATH = path.join(getAgentDir(), "tool-selection.json");
 const STRUCTURED_WORKER_TYPES = new Set([
-  "pi-herdr:call-runtime",
+  "pi-herdr:delegate-runtime",
+  "pi-herdr:delegate",
   "pi-herdr:coding-agent",
-  "pi-herdr:minitask",
   "pi-herdr:fresh-history",
 ]);
 const BOBS_INSTRUCTIONS =
-  "Root orchestration mode: delegate repository or environment work rather than doing it here. Use call for current context, coding-agent for persistent fresh context, minitask for isolated work, fresh-history for a recent excerpt, and ask for required decisions. Answer directly only when no inspection or tool work is needed. Call workers receive the deterministic Research tool profile.";
+  "Root orchestration mode: delegate repository or environment work rather than doing it here. Use delegate with context='inherit' when the task depends on context established in the current conversation, context='project' for a self-contained task in a blank conversation with project guidance, and context='clean' for independent fresh-eyes work. A project task must include all relevant conversation-specific requirements, decisions, paths, findings, and constraints. Use coding-agent for persistent fresh context, fresh-history for a recent excerpt, and ask for required decisions. Answer directly only when no inspection or tool work is needed. Inherited delegates receive the deterministic Research tool profile.";
 
 type Tab = "tools" | "profiles";
 

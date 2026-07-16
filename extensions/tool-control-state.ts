@@ -2,18 +2,17 @@ export const TOOL_CONTROL_STATE_TYPE = "pi-ant:tool-control";
 export const TOOL_CONTROL_EVENT = "pi-ant:tool-control-changed";
 
 const CORE_TOOLS = ["read", "bash", "edit", "write", "grep"] as const;
-const WORKER_TOOLS = ["ask", "call", "minitask"] as const;
+const WORKER_TOOLS = ["ask", "delegate"] as const;
 const WEB_TOOLS = ["browser", "web_search", "web_fetch"] as const;
 const ORCHESTRATION_TOOLS = [
   "herdr-bash",
   "herdr-capture",
   "herdr-send",
-  "herdr-close",
   "coding-agent",
   "fresh-history",
 ] as const;
 const OPTIONAL_BUILTIN_TOOLS = ["find", "ls"] as const;
-const BOBS_ROOT_TOOLS = ["call", "coding-agent", "ask", "minitask", "fresh-history"] as const;
+const BOBS_ROOT_TOOLS = ["delegate", "coding-agent", "ask", "fresh-history"] as const;
 
 export const TOOL_PROFILES = {
   coding: {
@@ -44,7 +43,7 @@ export const TOOL_PROFILES = {
   },
   bobs: {
     label: "Bob's",
-    description: "Delegation-only root; delegated call workers receive the Research profile",
+    description: "Delegation-only root; inherited delegates receive the Research profile",
     tools: [...BOBS_ROOT_TOOLS],
     delegatedTools: [...CORE_TOOLS, ...WORKER_TOOLS, ...WEB_TOOLS],
   },

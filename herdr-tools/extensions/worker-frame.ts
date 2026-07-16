@@ -7,17 +7,24 @@ import { paneExists, readPane } from "./herdr-helpers.ts";
 
 const WORKER_ROOT_PREFIX = "pi-herdr-worker-";
 const WORKER_RUN_COMMAND = "worker-run";
-const FINISH_CALL_NOW_COMMAND = "finish-call-now";
+const SUBMIT_WORKER_COMMAND = "worker-submit";
+const FINISH_WORKER_NOW_COMMAND = "finish-worker-now";
 const RESULT_POLL_INTERVAL_MS = 250;
 const PROGRESS_UPDATE_INTERVAL_MS = 5000;
 const PANE_STATE_POLL_INTERVAL_MS = 1000;
 const PANE_MISSING_GRACE_MS = 5000;
+
+const MAIN_RESULT_PROMPT_PREFIX =
+  "Complete the worker task and return only the parent-facing result or blocker.";
 
 const RETROSPECTIVE_PROMPT = [
   "The main result has already been saved for the parent. Do not repeat it, do not continue the task, and do not call tools.",
   "Return only substantial observations you noticed outside the task, or important details not included in the main result, that are worth preserving.",
   "If there is nothing substantial, return exactly: everything was ok",
 ].join("\n");
+
+const SUPERVISION_CONTEXT =
+  "A human is supervising this worker. Respond normally to their latest request. Replies remain in this worker until the human uses /worker-submit.";
 
 export interface WorkerRequestFile {
   id: string;
@@ -39,7 +46,7 @@ export interface WorkerResultFile {
 
 export interface WorkerStatusFile {
   id?: string;
-  state: "idle" | "running" | "retrospective" | "error" | "closed";
+  state: "idle" | "running" | "supervised" | "retrospective" | "error" | "closed";
   resultPath?: string;
   sessionFile?: string;
   contextPercent?: number | null;
@@ -56,10 +63,17 @@ export interface WorkerArtifactPaths {
   retrospectiveMarkdownPath: string;
 }
 
+type WorkerPhase = "result" | "retrospective";
+type WorkerCapture = "automatic" | "supervised";
+
 interface ActiveWorkerRequest {
   request: WorkerRequestFile;
   priorTools: string[];
+  phase: WorkerPhase;
+  capture: WorkerCapture;
+  candidate?: string;
   mainResult?: string;
+  submitting: boolean;
   retryFailureTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -86,12 +100,12 @@ function isFreshWorkerSession(ctx: ExtensionContext): boolean {
   return ctx.sessionManager.getBranch().some((entry) => {
     return isRecord(entry)
       && entry.type === "custom"
-      && (entry.customType === "pi-herdr:coding-agent" || entry.customType === "pi-herdr:minitask" || entry.customType === "pi-herdr:fresh-history");
+      && (entry.customType === "pi-herdr:delegate" || entry.customType === "pi-herdr:coding-agent" || entry.customType === "pi-herdr:fresh-history");
   });
 }
 
 function stripSubagentTools(tools: string[]): string[] {
-  return tools.filter((tool) => tool !== "call" && tool !== "coding-agent" && tool !== "minitask" && tool !== "fresh-history");
+  return tools.filter((tool) => tool !== "delegate" && tool !== "coding-agent" && tool !== "fresh-history");
 }
 
 function isWorkerRequestFile(value: unknown): value is WorkerRequestFile {
@@ -175,7 +189,7 @@ function atomicWriteJson(filePath: string, payload: unknown): void {
   fs.renameSync(tmp, filePath);
 }
 
-function parseFinishText(args: string | undefined): string {
+function parseCommandText(args: string | undefined): string {
   const trimmed = (args ?? "").trim();
   if (trimmed.length < 2) return trimmed;
   const first = trimmed[0];
@@ -383,8 +397,12 @@ export async function waitForWorkerResult(
     if (options.onUpdate && elapsedMs - lastProgressAt >= PROGRESS_UPDATE_INTERVAL_MS) {
       lastProgressAt = elapsedMs;
       const output = await captureWorkerOutput(pi, lastKnownPaneId ?? options.actualLockName, 12, options.signal);
+      const status = readWorkerStatus(options.paths.statusPath);
+      const progress = status?.state === "supervised"
+        ? `Worker ${options.actualLockName} is supervised and waiting for /worker-submit (${Math.floor(elapsedMs / 1000)}s elapsed).`
+        : `Waiting for worker ${options.actualLockName} (${Math.floor(elapsedMs / 1000)}s elapsed).`;
       options.onUpdate({
-        content: [{ type: "text", text: [`Waiting for worker ${options.actualLockName} (${Math.floor(elapsedMs / 1000)}s elapsed).`, `Session: ${options.sessionFile}`, "", output].join("\n") }],
+        content: [{ type: "text", text: [progress, `Session: ${options.sessionFile}`, "", output].join("\n") }],
         details: {
           id: options.id,
           lockName: options.actualLockName,
@@ -397,7 +415,7 @@ export async function waitForWorkerResult(
           sessionFile: options.sessionFile,
           task: options.task,
           elapsedMs,
-          status: "waiting",
+          status: status?.state ?? "waiting",
         },
       });
     }
@@ -455,6 +473,75 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     }
   }
 
+  function refreshWorkerUi(ctx: ExtensionContext): void {
+    const request = activeRequest;
+    if (!request) {
+      ctx.ui.setStatus("worker-frame", undefined);
+      ctx.ui.setWidget("worker-frame", undefined);
+      return;
+    }
+
+    if (request.capture === "supervised") {
+      const phase = request.phase === "result" ? "result" : "retrospective";
+      ctx.ui.setStatus("worker-frame", ctx.ui.theme.fg("warning", "worker:supervised"));
+      ctx.ui.setWidget("worker-frame", [
+        `Worker supervision (${phase})`,
+        request.candidate ? "Latest assistant reply is ready to submit." : "Assistant replies stay in this worker.",
+        "Use /worker-submit to send the latest reply to the parent.",
+      ]);
+      return;
+    }
+
+    const label = request.phase === "result" ? "worker:auto" : "worker:retrospective";
+    ctx.ui.setStatus("worker-frame", ctx.ui.theme.fg("accent", label));
+    ctx.ui.setWidget("worker-frame", undefined);
+  }
+
+  function writeActiveWorkerStatus(ctx: ExtensionContext, request: ActiveWorkerRequest): void {
+    const state = request.capture === "supervised"
+      ? "supervised"
+      : request.phase === "result" ? "running" : "retrospective";
+    writeWorkerStatus(request.request.statusPath, {
+      id: request.request.id,
+      state,
+      resultPath: request.request.resultPath,
+      sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
+      contextPercent: getContextPercent(ctx) ?? null,
+    });
+  }
+
+  function superviseWorker(ctx: ExtensionContext, request: ActiveWorkerRequest): void {
+    if (request.capture === "supervised") return;
+    clearRetryFailureTimer(request);
+    request.capture = "supervised";
+    if (request.phase === "retrospective") pi.setActiveTools(request.priorTools);
+    writeActiveWorkerStatus(ctx, request);
+    refreshWorkerUi(ctx);
+    ctx.ui.notify("Worker is now supervised. Replies stay here until /worker-submit sends one to the parent.", "info");
+  }
+
+  function beginHumanInput(ctx: ExtensionContext, request: ActiveWorkerRequest): void {
+    request.candidate = undefined;
+    if (request.capture === "automatic") {
+      superviseWorker(ctx, request);
+      return;
+    }
+    writeActiveWorkerStatus(ctx, request);
+    refreshWorkerUi(ctx);
+  }
+
+  function beginRetrospective(ctx: ExtensionContext, request: ActiveWorkerRequest, result: string): void {
+    request.mainResult = result;
+    request.phase = "retrospective";
+    request.capture = "automatic";
+    request.candidate = undefined;
+    writeTextArtifact(path.join(path.dirname(request.request.resultPath), "result.md"), result);
+    pi.setActiveTools([]);
+    writeActiveWorkerStatus(ctx, request);
+    refreshWorkerUi(ctx);
+    pi.sendUserMessage(RETROSPECTIVE_PROMPT, { deliverAs: "followUp" });
+  }
+
   function completeWorkerRequest(
     ctx: ExtensionContext,
     request: ActiveWorkerRequest,
@@ -467,6 +554,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     const shouldClose = request.request.closeWhenDone;
     activeRequest = undefined;
     pi.setActiveTools(request.priorTools);
+    refreshWorkerUi(ctx);
     if (shouldClose) ctx.shutdown();
   }
 
@@ -486,10 +574,31 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     refreshFreshWorkerTools(ctx);
+    refreshWorkerUi(ctx);
   });
 
   pi.on("session_tree", async (_event, ctx) => {
     refreshFreshWorkerTools(ctx);
+    refreshWorkerUi(ctx);
+  });
+
+  pi.on("input", async (event, ctx) => {
+    if (activeRequest && event.source !== "extension") {
+      beginHumanInput(ctx, activeRequest);
+    }
+    return { action: "continue" };
+  });
+
+  pi.on("context", async (event) => {
+    if (!activeRequest || activeRequest.capture !== "supervised") return undefined;
+    const supervisionMessage: typeof event.messages[number] = {
+      role: "custom",
+      customType: "pi-herdr:supervision",
+      content: SUPERVISION_CONTEXT,
+      display: false,
+      timestamp: Date.now(),
+    };
+    return { messages: [...event.messages, supervisionMessage] };
   });
 
   pi.on("agent_start", async () => {
@@ -529,24 +638,64 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
       activeRequest = {
         request: parsed,
         priorTools: pi.getActiveTools(),
+        phase: "result",
+        capture: "automatic",
+        submitting: false,
       };
-      writeWorkerStatus(parsed.statusPath, {
-        id: parsed.id,
-        state: "running",
-        resultPath: parsed.resultPath,
-        sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
-        contextPercent: getContextPercent(ctx) ?? null,
-      });
-      pi.sendUserMessage(parsed.task);
+      writeActiveWorkerStatus(ctx, activeRequest);
+      refreshWorkerUi(ctx);
+      pi.sendUserMessage(`${MAIN_RESULT_PROMPT_PREFIX}\n\n${parsed.task}`);
     },
   });
 
-  pi.registerCommand(FINISH_CALL_NOW_COMMAND, {
-    description: "Immediately finish the active worker with a message, bypassing retrospective. Usage: /finish-call-now \"message\"",
+  pi.registerCommand(SUBMIT_WORKER_COMMAND, {
+    description: "Submit the latest supervised assistant reply, or supplied text, to the parent. Usage: /worker-submit [message]",
     handler: async (args, ctx) => {
-      const message = parseFinishText(args);
+      const request = activeRequest;
+      if (!request) {
+        ctx.ui.notify("No active worker request to submit.", "warning");
+        return;
+      }
+      if (request.submitting) {
+        ctx.ui.notify("Worker submission is already waiting for the current turn.", "warning");
+        return;
+      }
+
+      request.submitting = true;
+      try {
+        superviseWorker(ctx, request);
+        await ctx.waitForIdle();
+        if (activeRequest !== request || fs.existsSync(request.request.resultPath)) {
+          ctx.ui.notify("Worker request is no longer active.", "warning");
+          return;
+        }
+
+        const submitted = parseCommandText(args) || request.candidate;
+        if (!submitted) {
+          ctx.ui.notify("No assistant reply is ready. Wait for a reply or pass a message to /worker-submit.", "warning");
+          return;
+        }
+
+        if (request.phase === "result") {
+          beginRetrospective(ctx, request, submitted);
+          ctx.ui.notify("Submitted worker result; running retrospective.", "info");
+          return;
+        }
+
+        completeWorkerRequest(ctx, request, request.mainResult ?? "", false, submitted);
+        ctx.ui.notify("Submitted worker retrospective.", "info");
+      } finally {
+        request.submitting = false;
+      }
+    },
+  });
+
+  pi.registerCommand(FINISH_WORKER_NOW_COMMAND, {
+    description: "Immediately finish the active worker with a message, bypassing retrospective. Usage: /finish-worker-now \"message\"",
+    handler: async (args, ctx) => {
+      const message = parseCommandText(args);
       if (!message) {
-        ctx.ui.notify("Usage: /finish-call-now \"message\"", "warning");
+        ctx.ui.notify("Usage: /finish-worker-now \"message\"", "warning");
         return;
       }
       if (!ctx.isIdle()) {
@@ -559,7 +708,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
         ctx.ui.notify("No active worker request to finish.", "warning");
         return;
       }
-      completeWorkerRequest(ctx, activeRequest, message, false, "retrospective bypassed by /finish-call-now.");
+      completeWorkerRequest(ctx, activeRequest, message, false, "retrospective bypassed by /finish-worker-now.");
       ctx.ui.notify("Finished worker request with override result.", "info");
     },
   });
@@ -569,7 +718,17 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     const message = latestAssistantMessage(event.messages);
     if (!message) return;
 
-    if (activeRequest.mainResult !== undefined) {
+    if (activeRequest.capture === "supervised") {
+      if (message.stopReason !== "stop") return;
+      const candidate = assistantTextContent(message);
+      if (!candidate) return;
+      activeRequest.candidate = candidate;
+      writeActiveWorkerStatus(ctx, activeRequest);
+      refreshWorkerUi(ctx);
+      return;
+    }
+
+    if (activeRequest.phase === "retrospective") {
       if (message.stopReason === "aborted" || message.stopReason === "toolUse") return;
       if (isRetryableAssistantFailure(message)) {
         const request = activeRequest;
@@ -603,17 +762,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      activeRequest.mainResult = result;
-      writeTextArtifact(path.join(path.dirname(activeRequest.request.resultPath), "result.md"), result);
-      writeWorkerStatus(activeRequest.request.statusPath, {
-        id: activeRequest.request.id,
-        state: "retrospective",
-        resultPath: activeRequest.request.resultPath,
-        sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
-        contextPercent: getContextPercent(ctx) ?? null,
-      });
-      pi.setActiveTools([]);
-      pi.sendUserMessage(RETROSPECTIVE_PROMPT, { deliverAs: "followUp" });
+      beginRetrospective(ctx, activeRequest, result);
       return;
     }
 
@@ -634,20 +783,6 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
 
   pi.on("turn_end", async (_event, ctx) => {
     if (!activeRequest) return;
-    writeWorkerStatus(activeRequest.request.statusPath, {
-      id: activeRequest.request.id,
-      state: activeRequest.mainResult === undefined ? "running" : "retrospective",
-      resultPath: activeRequest.request.resultPath,
-      sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
-      contextPercent: getContextPercent(ctx) ?? null,
-    });
-  });
-
-  pi.on("before_agent_start", async (event) => {
-    if (!activeRequest) return undefined;
-    if (activeRequest.mainResult !== undefined) {
-      return { systemPrompt: `${event.systemPrompt}\n\nThe main result is saved. Do not call tools or continue the task; answer only the retrospective prompt.` };
-    }
-    return { systemPrompt: `${event.systemPrompt}\n\nComplete the worker task and return only the parent-facing result or blocker.` };
+    writeActiveWorkerStatus(ctx, activeRequest);
   });
 }

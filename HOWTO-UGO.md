@@ -126,7 +126,7 @@ needs-enrichment -> ready -> implementing -> needs-distill
 The selected section shapes the prompt it emits:
 
 - `needs-enrichment`: gather missing context without implementing. A new or
-  materially changed plan must receive a minitask review in the same pass;
+  materially changed plan must receive a `delegate` review with `context: "clean"` in the same pass;
   executable work moves to `ready`, while material unresolved questions move to
   `needs-decision` with a `scratch/decisions/` artifact.
 - `ready`: emit the lightest safe implementation/execution prompt.

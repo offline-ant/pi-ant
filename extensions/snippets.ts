@@ -5,7 +5,7 @@ export interface PromptSnippet {
 }
 
 export const PRINCIPLES_SUFFIX =
-  "Prefer the smallest clean long-term design. Prefer straightforward solutions over preemptive defensiveness; before adding a new choice or mechanism, establish that it is required. Do structural work first; remove stale code and avoid shims, duplicate mechanisms, and speculative abstractions. Rename unclear concepts to match reality.";
+  "Note our principles: Prefer the smallest clean long-term design. Treat the cost of change as zero and optimize for the clean end state. We have no users or legacy state to preserve: do not write compatibility code or parsers for obsolete formats. Prefer straightforward solutions over preemptive defensiveness; before adding a new choice or mechanism, establish that it is required. Do the hard part first; remove stale code and avoid shims, duplicate mechanisms, and speculative abstractions. Code not written cannot be wrong; delete anything that does not need to exist. Simplify as far as possible without worsening asymptotic complexity. Rename unclear concepts to match reality.";
 
 export const EDIT_PRINCIPLES_SUFFIX =
   "Note our edit principels: Write for humans, not completeness checkers. Text never written is never wrong; omission is often better than another qualification. State the main point early and cut anything that does not serve the document's job. Prefer direct verbs, concrete nouns, visible actors, and plain terms. Let each paragraph do one thing. Make the strongest useful claim plainly, then narrow it where the exception matters instead of burdening every sentence with caveats. Name genuine uncertainty precisely. Structure for skimming, vary sentence rhythm naturally, and avoid canned transitions, artificial symmetry, significance puffery, and tidy conclusions that add nothing. Do not polish text that should be deleted.";
@@ -16,14 +16,14 @@ export const CUT_SUFFIX =
 export const SIMPLIFY_SUFFIX =
   "Before changing anything, propose what can be deleted, inlined, merged, renamed, or not built. Prefer the smallest clean end state over options, compatibility layers, and abstractions that do not pull their weight. Show concrete simplifications and ask about material design choices; wait for approval before implementing them.";
 
-export const MINI_REVIEW_SUFFIX =
-  "Ask minitask for a generic review of this, just issues and potential improvements. Then you evaluate its suggestions: apply clearly good ones, ignore bad ones, and ask me about anything uncertain.";
+export const DELEGATE_REVIEW_SUFFIX =
+  "Use delegate with context='clean' for a generic review of this, requesting only issues and potential improvements. Then evaluate its suggestions: apply clearly good ones, ignore bad ones, and ask me about anything uncertain.";
 
 export const TS_SUFFIX = "Thoughts? Suggestions?";
 
-export const CALL_PROGRESS_SNIPPET = `Use call to execute the feasible plan. Start with one cohesive call; add serial calls only after a result exposes remaining work, a blocker, or a handoff. Never run dependent or overlapping edits in parallel.
+export const DELEGATE_PROGRESS_SNIPPET = `Use delegate with context='inherit' to execute the feasible plan. Start with one cohesive delegate; add serial delegates only after a result exposes remaining work, a blocker, or a handoff. Never run dependent or overlapping edits in parallel.
 
-Each call should make the in-scope code/docs changes, run relevant checks, and update workboard.md when applicable. If it materially changes a plan, review that plan with minitask and triage the result before execution. Move unresolved material choices to needs-decision with a scratch/decisions artifact.
+Each delegate should make the in-scope code/docs changes, run relevant checks, and update workboard.md when applicable. If it materially changes a plan, review that plan with delegate context='clean' and triage the result before execution. Move unresolved material choices to needs-decision with a scratch/decisions artifact.
 
 Verify each returned result before continuing. Finish with the parent-facing outcome: required changed files, checks, evidence, caveats, blockers, and next actions. Omit introductions, repetition, and optional background first. Stop only when feasible scope is complete or a real decision/external blocker is documented.`;
 
@@ -50,7 +50,7 @@ Return the recommended shape, avoided abstractions/shims, state ownership, seman
 
 export const ENRICH_SNIPPET = `Perform an enrichment pass only. Do not implement source changes or authority-doc changes.
 
-Read the relevant required-reading, handoff, plans, and current code/docs for this topic. If you write or materially change a plan, ask minitask for a generic review of the plan before finishing, then triage the review in the same pass: apply clearly good suggestions, ignore bad ones, and split real unresolved questions into needs-decision with a scratch/decisions artifact.
+Read the relevant required-reading, handoff, plans, and current code/docs for this topic. If you write or materially change a plan, use delegate with context='clean' for a generic review before finishing, then triage the review in the same pass: apply clearly good suggestions, ignore bad ones, and split real unresolved questions into needs-decision with a scratch/decisions artifact.
 
 Return the factual state with file references, stale/contradictory docs, open design questions, local versus human decisions, overcomplication risks, and the exact workboard.md update. Preserve evidence, caveats, blockers, and next actions; omit introductions and repetition. Usually move executable work to ready and material unresolved choices to needs-decision.
 
@@ -86,9 +86,9 @@ export const SNIPPETS: PromptSnippet[] = [
     description: "Insert the simplification/deletion review suffix",
   },
   {
-    key: "mini-review",
-    value: MINI_REVIEW_SUFFIX,
-    description: "Insert the minitask review suffix",
+    key: "delegate-review",
+    value: DELEGATE_REVIEW_SUFFIX,
+    description: "Insert the clean delegate review suffix",
   },
   {
     key: "ts",
@@ -96,9 +96,9 @@ export const SNIPPETS: PromptSnippet[] = [
     description: "Insert the thoughts/suggestions suffix",
   },
   {
-    key: "call-progress",
-    value: CALL_PROGRESS_SNIPPET,
-    description: "Insert call-frame progress instructions",
+    key: "delegate-progress",
+    value: DELEGATE_PROGRESS_SNIPPET,
+    description: "Insert inherited delegate progress instructions",
   },
   {
     key: "supervise",

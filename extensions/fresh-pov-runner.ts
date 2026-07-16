@@ -6,6 +6,7 @@ import {
 	DefaultResourceLoader,
 	defineTool,
 	getAgentDir,
+	ModelRuntime,
 	SessionManager,
 	SettingsManager,
 	type ExtensionAPI,
@@ -297,13 +298,17 @@ export async function runFreshPovReview(
 	});
 	await resourceLoader.reload();
 
+	const modelRuntime = await ModelRuntime.create();
+	const registeredProvider = ctx.modelRegistry.getRegisteredProviderConfig(model.provider);
+	if (registeredProvider) modelRuntime.registerProvider(model.provider, registeredProvider);
+
 	const sessionManager = SessionManager.create(ctx.cwd, artifactDir);
 	const { session } = await createAgentSession({
 		cwd: ctx.cwd,
 		agentDir: getAgentDir(),
 		model,
 		thinkingLevel: pi.getThinkingLevel(),
-		modelRegistry: ctx.modelRegistry,
+		modelRuntime,
 		tools: [READING_TOOL_NAME],
 		customTools: [readingTool],
 		resourceLoader,

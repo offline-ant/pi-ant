@@ -2,9 +2,8 @@
 
 ## Public tools
 
-- `call`: forks the current conversation before the tool call, runs one task in a temporary Herdr worker, returns the result, and closes the worker.
+- `delegate`: runs one task in a temporary Herdr worker with required `context: "inherit" | "project" | "clean"`. Inherit forks before the tool call; project and clean create blank conversations. Independent fresh-context calls may run in parallel.
 - `coding-agent`: runs tasks serially in a named persistent fresh-context Herdr worker and keeps the worker available for follow-up tasks.
-- `minitask`: runs one isolated task in a temporary fresh-context Herdr worker. Independent calls may run in parallel.
 - `fresh-history`: runs one isolated task with a requested excerpt of recent user requests and direct assistant replies. Tool activity is omitted.
 
 `/herdr-fork` is a user command for opening an interactive forked session. It is not an LLM-callable tool.
@@ -46,19 +45,23 @@ interface WorkerResultFile {
 
 Workers return the main result followed by the automatic retrospective, including `everything was ok` when there are no additional observations.
 
+A structured request starts with automatic result capture. Normal human input sent directly in the worker changes the request to supervised capture before the input is delivered, so conversational replies no longer complete the parent request. `/worker-submit` submits the latest assistant reply (or explicit supplied text) for the pending result or retrospective phase. Submitting a main result starts a fresh automatic retrospective. Worker status reports supervised requests to both the child UI and the waiting parent.
+
 ## Retry and failure behavior
 
 - Retryable provider failures do not immediately write a result. The parent keeps waiting while Pi restarts the request.
 - If retry does not restart within the grace period, the worker writes an error result.
 - A missing pane is tolerated briefly during startup. A pane that disappears after becoming live is a worker failure.
-- Cancelling `call` closes its temporary pane.
+- Cancelling `delegate` closes its temporary pane in every context mode.
 - Cancelling `coding-agent` stops the parent wait but leaves the persistent worker available.
-- `/finish-call-now "message"` aborts the active worker turn, writes the supplied result immediately, and records that the retrospective was bypassed.
+- `/worker-submit [message]` waits for the current turn to settle, then submits the latest supervised reply or supplied text through the normal result/retrospective protocol.
+- `/finish-worker-now "message"` aborts the active worker turn, writes the supplied result immediately, and records that the retrospective was bypassed.
 
 ## Context and tools
 
-- `call` inherits the current conversation and ordinary active parent tools, excluding unavailable control tools. Under the `bobs` profile it instead receives the deterministic Research tool profile.
-- Fresh workers normally load project/global startup context, remove persistent/one-shot worker tools, and retain bounded nested `call` support. `minitask` uses this `project` context by default; its optional `clean` context keeps the working directory but disables discovered context files, skills, prompt templates, extensions, and custom system prompts, explicitly loading only the worker-frame extension required by the result protocol.
+- `delegate` with `context: "inherit"` inherits the current conversation and ordinary active parent tools, excluding unavailable control tools. Use it when the task depends on context established in the current conversation. Under the `bobs` profile it instead receives the deterministic Research tool profile. It retains `delegate` for bounded nested delegation.
+- `delegate` with `context: "project"` creates a blank conversation with normal project/global startup resources but no conversation history. Its task must include all relevant conversation-specific requirements, decisions, paths, findings, and constraints. `context: "clean"` also creates a blank conversation but disables discovered context files, skills, prompt templates, extensions, and custom system prompts, explicitly loading only the worker-frame extension required by the result protocol. Fresh delegates remove one-shot and persistent worker tools.
+- Above 50% parent context usage, the first inherited delegate on a conversation branch returns a model-visible recommendation to use `project` and does not start a worker. Retrying `inherit` proceeds without another warning. Unknown context usage does not trigger the check.
 - `/subagent-model` optionally overrides the model used by spawned workers, including `/herdr-fork` unless that command supplies explicit Pi arguments.
 - The root `/tools` selector controls branch-persistent ordinary-session tool exposure without changing structured-worker or Ugo tool ownership.
 
