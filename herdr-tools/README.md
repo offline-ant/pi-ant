@@ -18,16 +18,15 @@ Use Herdr's `SKILL.md` / agent instructions for general pane, tab, workspace, re
 
 - panel tools for long-running commands and log capture
 - the `/herdr-fork` command for an interactive current-session fork
-- Pi-specific worker tools (`call`, `coding-agent`, `minitask`, `fresh-history`)
+- Pi-specific worker tools (`delegate`, `coding-agent`, `fresh-history`)
 
 ## Panel tools
 
 Use these tools for long-running commands and interactive panel control:
 
 - `herdr-bash` — create a named Herdr panel and run a command in it. Use for servers, watchers, long builds, and background processes.
-- `herdr-capture` — capture output from a named Herdr panel or pane id. By default it returns new output since the last capture when possible.
-- `herdr-send` — send text or a command to a named Herdr panel or pane id. Use for Ctrl-C/restarts or interactive prompts.
-- `herdr-close` — close a named Herdr panel or pane id and remove it from the local registry.
+- `herdr-capture` — capture output from a named Herdr panel, pane id, or stable terminal id. By default it returns new output since the last capture when possible. Pass `close: true` to capture final output and close the panel.
+- `herdr-send` — send text, a command, or key presses such as `ctrl+c` to a named Herdr panel, pane id, or stable terminal id.
 
 Command:
 
@@ -35,31 +34,40 @@ Command:
 
 `herdr-bash` always opens a new tab in the current workspace. It intentionally has no placement/direction knobs; if you need custom layout, use Herdr CLI/skill operations directly.
 
-`herdr-bash` accepts an optional `waitFor` readiness check. Prefer that over separate polling when you are starting a server and need to wait for `ready`, `listening`, or a local URL.
+`herdr-bash` accepts an optional `waitFor` readiness check. Prefer that over separate polling when you are starting a server and need to wait for `ready`, `listening`, or a local URL. Panel names are unique while their registered pane is alive, preventing accidental orphan tabs.
 
 ## Session fork
 
-`/herdr-fork <name> [folder] [--pi-args <args>] [-- <prompt>]` forks the current session into a new interactive Pi agent in a separate Herdr tab. If `prompt` is omitted, the forked tab opens idle.
+`/herdr-fork <name> [folder] [--pi-args <args>] [-- <prompt>]` forks the current session into a new interactive Pi agent in a separate Herdr tab. If `prompt` is omitted, the forked tab opens idle. Interactive forks can create further forks, subject to the global Pi nesting-depth limit.
 
-`herdr-fork` is intentionally a user command, not an LLM-callable tool. Use it when the user wants an interactive tab continuing from the current session. Use `call`, `coding-agent`, `minitask`, or `fresh-history` when the parent needs a structured worker result.
+`herdr-fork` is intentionally a user command, not an LLM-callable tool. Use it when the user wants an interactive tab continuing from the current session. Use `delegate`, `coding-agent`, or `fresh-history` when the parent needs a structured worker result.
 
 ## Worker tools
 
-- `call` — run a delegated current-context task in a forked Herdr Pi worker in a separate tab and return the result.
+- `delegate` — run one ephemeral task with an explicit required context mode:
+  - `inherit` forks immediately before the tool call and preserves the parent conversation, working directory, and delegated tool policy. Use it when the task depends on context established in the current conversation.
+  - `project` creates a blank conversation and loads normal project/global startup resources. Its task must be self-contained because it receives no conversation history; include all relevant requirements, decisions, paths, findings, and constraints.
+  - `clean` creates a blank conversation in the requested working directory while disabling discovered context files, skills, prompt templates, extensions, and custom system prompts.
 - `coding-agent` — run a task in a named persistent fresh-context Herdr worker in a separate tab.
-- `minitask` — run one isolated fresh-conversation task in an ephemeral Herdr worker in a separate tab. It loads normal project/global startup context by default; pass `context: "clean"` to keep the requested working directory while disabling discovered context files, skills, prompt templates, extensions, and custom system prompts.
 - `fresh-history` — run one task in an ephemeral fresh Herdr worker seeded with only recent user requests and direct assistant replies. Tool calls/results are omitted, and the prompt includes the parent Pi session file plus session history root for critical recovery.
+
+`context` is required on `delegate`. Workers use normal Pi model selection unless `/subagent-model` supplies an override. `folder` may select another working directory for `project`/`clean`; inherited delegates accept only the parent's current directory. Independent `project`/`clean` delegates may run in parallel. Inherited delegates fork before their own tool-call message, so sibling tool results are not present in the worker.
+
+When the parent conversation is over 50% of its context window, the first inherited delegate on a conversation branch is not started. Its tool result recommends a self-contained `project` delegate instead. Retrying with `inherit` proceeds normally, and the warning is not repeated on that branch. The check is skipped when Pi cannot determine current context usage.
 
 After saving the main result, each structured worker runs a no-tools retrospective. The parent receives both outputs, including `everything was ok` when there are no additional observations; `result.md` and `retrospective.md` retain them separately.
 
-Clean minitasks explicitly load only the internal worker-frame extension needed by the result protocol. Consequently, models/providers registered exclusively by other extensions are unavailable in that mode; use the default `project` context when those runtime extensions are required.
+Typing a normal message directly in an active worker automatically puts that request under human supervision. Subsequent replies stay in the worker instead of completing the parent request. `/worker-submit` sends the latest assistant reply to the parent-facing protocol; while the main result is pending it submits that result and starts the automatic retrospective, and while a retrospective is pending it submits that retrospective. `/worker-submit <message>` supplies explicit text instead. The child status and the waiting parent progress both identify supervised requests.
+
+Clean delegates explicitly load only the internal worker-frame extension needed by the result protocol. Consequently, models/providers registered exclusively by other extensions are unavailable in that mode; use `project` when those runtime extensions are required.
 
 Commands:
 
-- `/finish-call-now "message"` — child-frame recovery command for active worker requests.
+- `/worker-submit [message]` — submit the latest supervised reply or explicit text, preserving the normal retrospective protocol.
+- `/finish-worker-now "message"` — recovery command that immediately returns explicit text and bypasses retrospective.
 - `/set-subagent-model`, `/subagent-model` — configure model overrides for spawned Pi workers, including `/herdr-fork` unless it supplies explicit Pi arguments.
 
-Root orchestration behavior is the `bobs` profile in the main package's `/tools` selector. It restricts root tools to delegation and gives `call` workers the deterministic Research tool profile.
+Root orchestration behavior is the `bobs` profile in the main package's `/tools` selector. It restricts root tools to delegation and gives inherited `delegate` workers the deterministic Research tool profile.
 
 ## Runtime state
 

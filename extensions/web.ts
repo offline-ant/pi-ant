@@ -1,9 +1,9 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import {
-	AuthStorage,
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	formatSize,
+	readStoredCredential,
 	truncateHead,
 } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
@@ -81,8 +81,6 @@ interface CodexWebResult {
 	truncated: boolean;
 }
 
-const authStorage = AuthStorage.create();
-
 function decodeBase64Url(value: string): string {
 	const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
 	return Buffer.from(padded, "base64").toString("utf8");
@@ -104,20 +102,17 @@ function accountIdFromJwt(token: string): string | undefined {
 }
 
 function currentAccountId(token: string): string | undefined {
-	const credential = authStorage.getAll()[OPENAI_CODEX_PROVIDER] as OAuthCredential | undefined;
+	const credential = readStoredCredential(OPENAI_CODEX_PROVIDER) as OAuthCredential | undefined;
 	if (credential?.type === "oauth" && typeof credential.accountId === "string" && credential.accountId.length > 0) {
 		return credential.accountId;
 	}
 	return accountIdFromJwt(token);
 }
 
-async function getCodexAuth(): Promise<CodexAuth> {
-	authStorage.reload();
-	const token = await authStorage.getApiKey(OPENAI_CODEX_PROVIDER, { includeFallback: false });
-	const errors = authStorage.drainErrors();
+async function getCodexAuth(modelRegistry: ModelRegistry): Promise<CodexAuth> {
+	const token = await modelRegistry.getApiKeyForProvider(OPENAI_CODEX_PROVIDER);
 	if (!token) {
-		const suffix = errors.length > 0 ? ` Last auth error: ${errors.at(-1)?.message}` : "";
-		throw new Error(`No OpenAI Codex OAuth token found. Run /login and select ChatGPT Plus/Pro (Codex Subscription).${suffix}`);
+		throw new Error("No OpenAI Codex OAuth token found. Run /login and select ChatGPT Plus/Pro (Codex Subscription).");
 	}
 
 	const accountId = currentAccountId(token);
@@ -145,8 +140,12 @@ function modelForRequest(ctxModel: { provider: string; id: string } | undefined)
 	return DEFAULT_MODEL;
 }
 
-async function postCodexSearch(request: SearchRequest, signal?: AbortSignal): Promise<string> {
-	const auth = await getCodexAuth();
+async function postCodexSearch(
+	request: SearchRequest,
+	modelRegistry: ModelRegistry,
+	signal?: AbortSignal,
+): Promise<string> {
+	const auth = await getCodexAuth(modelRegistry);
 	const response = await fetch(CODEX_SEARCH_URL, {
 		method: "POST",
 		headers: {
@@ -196,7 +195,12 @@ function truncateOutput(output: string): { text: string; truncated: boolean } {
 	return { text, truncated: truncation.truncated };
 }
 
-async function runCodexWeb(commands: SearchCommands, model: string, signal?: AbortSignal): Promise<CodexWebResult> {
+async function runCodexWeb(
+	commands: SearchCommands,
+	model: string,
+	modelRegistry: ModelRegistry,
+	signal?: AbortSignal,
+): Promise<CodexWebResult> {
 	const request: SearchRequest = {
 		id: requestId(),
 		model,
@@ -207,7 +211,7 @@ async function runCodexWeb(commands: SearchCommands, model: string, signal?: Abo
 		},
 		max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
 	};
-	const output = await postCodexSearch(request, signal);
+	const output = await postCodexSearch(request, modelRegistry, signal);
 	const truncated = truncateOutput(output);
 	return {
 		url: CODEX_SEARCH_URL,
@@ -235,6 +239,7 @@ export default function (pi: ExtensionAPI) {
 					response_length: chooseResponseLength(params.max_results),
 				},
 				modelForRequest(ctx.model),
+				ctx.modelRegistry,
 				signal,
 			);
 			return {
@@ -269,6 +274,7 @@ export default function (pi: ExtensionAPI) {
 					response_length: "long",
 				},
 				modelForRequest(ctx.model),
+				ctx.modelRegistry,
 				signal,
 			);
 			return {

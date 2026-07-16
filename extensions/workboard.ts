@@ -23,7 +23,7 @@ unpromoted ideas in a separate backlog. Delete obsolete state and stale scratch
 files; git history preserves history.
 
 Guidance policy lives in \`workflow.md\`. Move entries as their state changes.
-Plan changes require a minitask review before executable work moves to \`ready\`;
+Plan changes require a clean-context delegate review before executable work moves to \`ready\`;
 material unresolved choices move to \`needs-decision\`.
 
 Entry shape:

@@ -33,9 +33,9 @@ test("active tools filter unavailable entries and add required tools", () => {
 
 test("Bob's profile has deterministic delegated research tools", () => {
   const state = createProfileState("bobs", "now");
-  const event = eventForState(state, ["call", "coding-agent", "ask", "minitask", "fresh-history", "read", "bash", "web_search"]);
-  assert.deepEqual(event.enabledTools, ["call", "coding-agent", "ask", "minitask", "fresh-history"]);
-  assert.deepEqual(event.delegatedTools, ["read", "bash", "ask", "call", "minitask", "web_search"]);
+  const event = eventForState(state, ["delegate", "coding-agent", "ask", "fresh-history", "read", "bash", "web_search"]);
+  assert.deepEqual(event.enabledTools, ["delegate", "coding-agent", "ask", "fresh-history"]);
+  assert.deepEqual(event.delegatedTools, ["read", "bash", "ask", "delegate", "web_search"]);
 });
 
 test("stored state parsing rejects malformed values and removes duplicates", () => {

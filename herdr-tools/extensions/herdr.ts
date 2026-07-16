@@ -6,10 +6,12 @@ import { Type, type Static } from "typebox";
 import {
   closePane,
   commandText,
+  getPane,
   resolveCwd,
   runHerdr,
   runHerdrJson,
   runInPane,
+  sendKeysToPane,
   sendTextToPane,
   shellQuote,
   type HerdrPaneInfo,
@@ -19,7 +21,12 @@ const STATE_DIR = path.join(os.tmpdir(), "pi-herdr-panels");
 const PANEL_REGISTRY = path.join(STATE_DIR, "panels.json");
 const DEFAULT_CAPTURE_LINES = 500;
 
-const captureState = new Map<string, string>();
+interface CaptureCursor {
+  text: string;
+  totalRows?: number;
+}
+
+const captureState = new Map<string, CaptureCursor>();
 
 interface PanelRegistryEntry {
   name: string;
@@ -79,28 +86,42 @@ function forgetPanel(target: string): void {
   writeRegistry(registry);
 }
 
+function clearCaptureState(...targets: string[]): void {
+  for (const key of [...captureState.keys()]) {
+    if (targets.some((target) => target !== "" && (key.startsWith(`${target}:`) || key.includes(`:${target}:`)))) {
+      captureState.delete(key);
+    }
+  }
+}
+
 async function listPanes(pi: ExtensionAPI, signal?: AbortSignal): Promise<HerdrPaneInfo[]> {
   const response = await runHerdrJson(pi, ["pane", "list"], signal);
   return Array.isArray(response?.result?.panes) ? response.result.panes : [];
 }
 
-async function resolvePanelTarget(pi: ExtensionAPI, target: string, signal?: AbortSignal): Promise<{ paneId: string; name?: string; entry?: PanelRegistryEntry }> {
+async function resolvePanelTarget(pi: ExtensionAPI, target: string, signal?: AbortSignal): Promise<{ pane: HerdrPaneInfo; name?: string }> {
   const safe = sanitizeName(target);
   const registry = readRegistry();
   const entry = registry[safe] ?? registry[target];
-  if (!entry) return { paneId: target };
-
-  const panes = await listPanes(pi, signal).catch(() => []);
-  const byTerminal = entry.terminalId ? panes.find((pane) => pane.terminal_id === entry.terminalId) : undefined;
-  if (byTerminal?.pane_id) {
-    if (byTerminal.pane_id !== entry.paneId) {
-      rememberPanel({ ...entry, paneId: byTerminal.pane_id });
-      return { paneId: byTerminal.pane_id, name: entry.name, entry: { ...entry, paneId: byTerminal.pane_id } };
-    }
-    return { paneId: byTerminal.pane_id, name: entry.name, entry };
+  const panes = await listPanes(pi, signal);
+  if (!entry) {
+    const pane = panes.find((candidate) => candidate.pane_id === target || candidate.terminal_id === target);
+    if (!pane) throw new Error(`Herdr pane '${target}' is not running.`);
+    return { pane };
   }
-  if (panes.some((pane) => pane.pane_id === entry.paneId)) return { paneId: entry.paneId, name: entry.name, entry };
-  return { paneId: entry.paneId, name: entry.name, entry };
+
+  const pane = entry.terminalId
+    ? panes.find((candidate) => candidate.terminal_id === entry.terminalId)
+    : panes.find((candidate) => candidate.pane_id === entry.paneId);
+  if (!pane?.pane_id) {
+    forgetPanel(entry.name);
+    clearCaptureState(entry.name, entry.paneId, entry.terminalId ?? "");
+    throw new Error(`Herdr panel '${entry.name}' is no longer running.`);
+  }
+  if (pane.pane_id !== entry.paneId) {
+    rememberPanel({ ...entry, paneId: pane.pane_id });
+  }
+  return { pane, name: entry.name };
 }
 
 function buildBashPanelCommand(name: string, userCommand: string): string {
@@ -126,19 +147,62 @@ async function readPanelOutput(pi: ExtensionAPI, paneId: string, lines: number, 
   return text;
 }
 
-function diffSinceLast(key: string, current: string): string {
-  const previous = captureState.get(key);
-  captureState.set(key, current);
+function paneTotalRows(pane: HerdrPaneInfo): number | undefined {
+  const maxOffset = pane.scroll?.max_offset_from_bottom;
+  const viewportRows = pane.scroll?.viewport_rows;
+  return typeof maxOffset === "number" && typeof viewportRows === "number" ? maxOffset + viewportRows : undefined;
+}
+
+function trailingLines(text: string, count: number): string {
+  if (count <= 0) return "";
+  return text.split("\n").slice(-count).join("\n");
+}
+
+function outputAfterOverlap(previous: string, current: string): string | undefined {
+  const previousLines = previous.split("\n");
+  const currentLines = current.split("\n");
+  const maxOverlap = Math.min(previousLines.length, currentLines.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap--) {
+    const previousStart = previousLines.length - overlap;
+    let matches = true;
+    for (let index = 0; index < overlap; index++) {
+      if (previousLines[previousStart + index] !== currentLines[index]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return currentLines.slice(overlap).join("\n");
+  }
+  return undefined;
+}
+
+function diffSinceLast(previous: CaptureCursor | undefined, current: string, totalRows: number | undefined): string {
   if (!previous) return current || "(no output)";
-  if (current === previous) return "(no new output)";
-  if (current.startsWith(previous)) return current.slice(previous.length).trimStart() || "(no new output)";
-  const index = current.indexOf(previous);
-  if (index >= 0) return current.slice(index + previous.length).trimStart() || "(no new output)";
-  return current || "(no output; previous capture scrolled out of retained recent output)";
+  const rowDelta = totalRows !== undefined && previous.totalRows !== undefined
+    ? totalRows - previous.totalRows
+    : undefined;
+  let output: string;
+  if (current === previous.text) {
+    output = rowDelta !== undefined && rowDelta > 0
+      ? trailingLines(current, Math.min(rowDelta, DEFAULT_CAPTURE_LINES))
+      : "(no new output)";
+  } else if (current.startsWith(previous.text)) {
+    output = current.slice(previous.text.length).trimStart() || "(no new output)";
+  } else {
+    const previousIndex = current.indexOf(previous.text);
+    const overlap = previousIndex < 0 ? outputAfterOverlap(previous.text, current) : undefined;
+    if (previousIndex >= 0) output = current.slice(previousIndex + previous.text.length).trimStart() || "(no new output)";
+    else if (overlap !== undefined) output = overlap || "(no new output)";
+    else if (rowDelta !== undefined && rowDelta > 0) output = trailingLines(current, Math.min(rowDelta, DEFAULT_CAPTURE_LINES));
+    else output = current || "(no output; previous capture scrolled out of retained recent output)";
+  }
+  return rowDelta !== undefined && rowDelta > DEFAULT_CAPTURE_LINES
+    ? `[${rowDelta} new terminal rows; showing the last ${DEFAULT_CAPTURE_LINES}.]\n\n${output}`
+    : output;
 }
 
 const herdrBashParams = Type.Object({
-  name: Type.String({ description: "Name for the Herdr panel. Reuse this name with herdr-capture, herdr-send, and herdr-close." }),
+  name: Type.String({ description: "Name for the Herdr panel. Reuse this name with herdr-capture and herdr-send." }),
   command: Type.String({ description: "Command to run in the panel. Intended for long-running processes such as servers, watchers, and builds." }),
   folder: Type.Optional(Type.String({ description: "Working directory. Defaults to the current working directory." })),
   waitFor: Type.Optional(Type.Object({
@@ -151,22 +215,19 @@ type HerdrBashParams = Static<typeof herdrBashParams>;
 
 const herdrCaptureParams = Type.Object({
   target: Type.String({ description: "Panel name or Herdr pane id." }),
-  lines: Type.Optional(Type.Number({ description: `Number of recent lines to read. Defaults to ${DEFAULT_CAPTURE_LINES}. Passing lines returns the whole requested window and updates the new-output cursor.` })),
+  lines: Type.Optional(Type.Integer({ minimum: 1, description: `Number of recent lines to read. Defaults to ${DEFAULT_CAPTURE_LINES}. Passing lines returns the whole requested window and updates the new-output cursor.` })),
   source: Type.Optional(Type.Union([Type.Literal("visible"), Type.Literal("recent"), Type.Literal("recent-unwrapped")], { description: "Read source. Defaults to recent." })),
+  close: Type.Optional(Type.Boolean({ description: "Close the panel after capturing its final output. Defaults to false." })),
 });
 type HerdrCaptureParams = Static<typeof herdrCaptureParams>;
 
 const herdrSendParams = Type.Object({
-  target: Type.String({ description: "Panel name or Herdr pane id." }),
-  text: Type.String({ description: "Text or command to send." }),
-  enter: Type.Optional(Type.Boolean({ description: "Whether to press Enter after sending text. Defaults to true." })),
+  target: Type.String({ description: "Panel name, Herdr pane id, or stable terminal id." }),
+  text: Type.Optional(Type.String({ description: "Literal text or a command to send." })),
+  keys: Type.Optional(Type.Array(Type.String(), { minItems: 1, description: "Key presses to send instead of text, such as ['ctrl+c'] or ['Escape']." })),
+  enter: Type.Optional(Type.Boolean({ description: "Whether to press Enter after sending text. Defaults to true. Not valid with keys." })),
 });
 type HerdrSendParams = Static<typeof herdrSendParams>;
-
-const herdrCloseParams = Type.Object({
-  target: Type.String({ description: "Panel name or Herdr pane id." }),
-});
-type HerdrCloseParams = Static<typeof herdrCloseParams>;
 
 export default function herdrPanelToolsExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
@@ -183,6 +244,18 @@ export default function herdrPanelToolsExtension(pi: ExtensionAPI): void {
     async execute(_toolCallId, params: HerdrBashParams, signal, _onUpdate, ctx) {
       const name = validatePanelName(params.name);
       const cwd = resolveCwd(ctx.cwd, params.folder);
+      const existing = readRegistry()[name];
+      if (existing) {
+        const panes = await listPanes(pi, signal);
+        const livePane = existing.terminalId
+          ? panes.find((pane) => pane.terminal_id === existing.terminalId)
+          : panes.find((pane) => pane.pane_id === existing.paneId);
+        if (livePane) {
+          throw new Error(`Herdr panel '${name}' is already running at ${livePane.pane_id}. Close it before reusing the name.`);
+        }
+        forgetPanel(name);
+        clearCaptureState(name, existing.paneId, existing.terminalId ?? "");
+      }
       const tabResponse = await runHerdrJson(pi, [
         "tab",
         "create",
@@ -209,10 +282,16 @@ export default function herdrPanelToolsExtension(pi: ExtensionAPI): void {
         if (params.waitFor.regex === true) args.push("--regex");
         if (params.waitFor.timeoutMs !== undefined) args.push("--timeout", String(Math.max(0, Math.ceil(params.waitFor.timeoutMs))));
         const waitResult = await runHerdr(pi, args, signal);
-        waitText = commandText(waitResult);
         if (waitResult.code !== 0) {
+          const failure = commandText(waitResult);
           const recent = await readPanelOutput(pi, pane.pane_id, 80, "recent", signal).catch((error) => String(error));
-          throw new Error([`Started panel '${name}' at ${pane.pane_id}, but readiness wait failed.`, waitText, "", "Recent output:", recent].join("\n"));
+          throw new Error([`Started panel '${name}' at ${pane.pane_id}, but readiness wait failed.`, failure, "", "Recent output:", recent].join("\n"));
+        }
+        try {
+          const response = JSON.parse(waitResult.stdout) as { result?: { matched_line?: unknown } };
+          waitText = typeof response.result?.matched_line === "string" ? response.result.matched_line : commandText(waitResult);
+        } catch {
+          waitText = commandText(waitResult);
         }
       }
 
@@ -231,46 +310,60 @@ export default function herdrPanelToolsExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "herdr-capture",
     label: "Herdr Capture",
-    description: "Read a named Herdr panel or pane. Without lines, returns output since the previous capture when possible; with lines, returns that complete window. Resolution and read failures throw.",
+    description: "Read a named Herdr panel or pane. Without lines, returns output since the previous capture when possible; with lines, returns that complete window. Set close to capture final output and close the panel. Resolution, read, and close failures throw.",
     parameters: herdrCaptureParams,
     async execute(_toolCallId, params: HerdrCaptureParams, signal) {
       const resolved = await resolvePanelTarget(pi, params.target, signal);
       const source = params.source ?? "recent";
       const lines = params.lines ?? DEFAULT_CAPTURE_LINES;
-      const current = await readPanelOutput(pi, resolved.paneId, lines, source, signal);
-      const key = `${resolved.name ?? params.target}:${resolved.paneId}:${source}`;
-      const text = params.lines === undefined ? diffSinceLast(key, current) : current;
-      if (params.lines !== undefined) captureState.set(key, current);
-      return { content: [{ type: "text", text }], details: { paneId: resolved.paneId, name: resolved.name, lines, source } };
+      const current = await readPanelOutput(pi, resolved.pane.pane_id, lines, source, signal);
+      const latestPane = await getPane(pi, resolved.pane.pane_id, signal) ?? resolved.pane;
+      const stablePaneId = latestPane.terminal_id ?? resolved.pane.terminal_id ?? resolved.pane.pane_id;
+      const key = `${stablePaneId}:${source}`;
+      const totalRows = paneTotalRows(latestPane);
+      const previous = captureState.get(key);
+      const text = params.lines === undefined ? diffSinceLast(previous, current, totalRows) : current;
+
+      if (params.close === true) {
+        await closePane(pi, resolved.pane.pane_id, signal);
+        forgetPanel(params.target);
+        forgetPanel(resolved.pane.pane_id);
+        clearCaptureState(params.target, resolved.name ?? "", resolved.pane.pane_id, stablePaneId);
+      } else {
+        captureState.set(key, { text: current, totalRows });
+      }
+
+      return {
+        content: [{ type: "text", text }],
+        details: { paneId: resolved.pane.pane_id, name: resolved.name, lines, source, closed: params.close === true },
+      };
     },
   });
 
   pi.registerTool({
     name: "herdr-send",
     label: "Herdr Send",
-    description: "Send text to a named Herdr panel or pane, pressing Enter unless disabled. Returns the resolved target acknowledgement; resolution or send failures throw.",
+    description: "Send either text or key presses to a named Herdr panel or pane. Text presses Enter unless disabled; keys supports values such as ctrl+c and Escape. Exactly one of text or keys is required.",
     parameters: herdrSendParams,
     async execute(_toolCallId, params: HerdrSendParams, signal) {
-      const resolved = await resolvePanelTarget(pi, params.target, signal);
-      await sendTextToPane(pi, resolved.paneId, params.text, params.enter !== false, signal);
-      return { content: [{ type: "text", text: `Sent to ${resolved.name ?? resolved.paneId}.` }], details: { paneId: resolved.paneId, name: resolved.name, enter: params.enter !== false } };
-    },
-  });
-
-  pi.registerTool({
-    name: "herdr-close",
-    label: "Herdr Close",
-    description: "Close a named Herdr panel or pane and remove its registry/capture state. Returns the closed target acknowledgement; resolution or close failures throw.",
-    parameters: herdrCloseParams,
-    async execute(_toolCallId, params: HerdrCloseParams, signal) {
-      const resolved = await resolvePanelTarget(pi, params.target, signal);
-      await closePane(pi, resolved.paneId, signal);
-      forgetPanel(params.target);
-      forgetPanel(resolved.paneId);
-      for (const key of [...captureState.keys()]) {
-        if (key.startsWith(`${params.target}:`) || key.includes(`:${resolved.paneId}:`)) captureState.delete(key);
+      if ((params.text === undefined) === (params.keys === undefined)) {
+        throw new Error("Exactly one of text or keys is required.");
       }
-      return { content: [{ type: "text", text: `Closed ${resolved.name ?? resolved.paneId}.` }], details: { paneId: resolved.paneId, name: resolved.name } };
+      if (params.keys !== undefined && params.enter !== undefined) {
+        throw new Error("enter is only valid when sending text.");
+      }
+
+      const resolved = await resolvePanelTarget(pi, params.target, signal);
+      if (params.keys !== undefined) {
+        await sendKeysToPane(pi, resolved.pane.pane_id, params.keys, signal);
+      } else {
+        await sendTextToPane(pi, resolved.pane.pane_id, params.text ?? "", params.enter !== false, signal);
+      }
+      const target = resolved.name ?? resolved.pane.pane_id;
+      return {
+        content: [{ type: "text", text: params.keys ? `Sent keys to ${target}.` : `Sent text to ${target}.` }],
+        details: { paneId: resolved.pane.pane_id, name: resolved.name, keys: params.keys, enter: params.keys ? undefined : params.enter !== false },
+      };
     },
   });
 

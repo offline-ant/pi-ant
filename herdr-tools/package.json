@@ -1,6 +1,7 @@
 {
   "name": "herdr-tools",
   "version": "1.0.0",
+  "type": "module",
   "description": "Herdr-backed pi orchestration tools and worker workflows",
   "keywords": [
     "pi-package",
@@ -22,9 +23,8 @@
       "./extensions/worker-frame.ts",
       "./extensions/herdr.ts",
       "./extensions/herdr-fork.ts",
-      "./extensions/call.ts",
+      "./extensions/delegate.ts",
       "./extensions/coding-agent.ts",
-      "./extensions/minitask.ts",
       "./extensions/fresh-history.ts"
     ]
   }

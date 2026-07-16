@@ -22,6 +22,10 @@ export interface HerdrPaneInfo {
   cwd?: string;
   foreground_cwd?: string;
   focused?: boolean;
+  scroll?: {
+    max_offset_from_bottom?: number;
+    viewport_rows?: number;
+  };
 }
 
 export interface StartedHerdrPane {
@@ -165,6 +169,11 @@ export async function sendTextToPane(pi: ExtensionAPI, paneId: string, text: str
   if (result.code !== 0) throw new Error(commandText(result));
 }
 
+export async function sendKeysToPane(pi: ExtensionAPI, paneId: string, keys: string[], signal?: AbortSignal): Promise<void> {
+  const result = await runHerdr(pi, ["pane", "send-keys", paneId, ...keys], signal);
+  if (result.code !== 0) throw new Error(commandText(result));
+}
+
 export async function closePane(pi: ExtensionAPI, paneId: string, signal?: AbortSignal): Promise<void> {
   const result = await runHerdr(pi, ["pane", "close", paneId], signal);
   if (result.code !== 0) throw new Error(commandText(result));
@@ -215,7 +224,12 @@ export async function startHerdrPiPane(
       ...Object.entries(env).map(([key, value]) => envAssignment(key, value)),
       shellJoin(commandArgs),
     ].join(" ");
-    await runInPane(pi, pane.pane_id, command, signal);
+    try {
+      await runInPane(pi, pane.pane_id, command, signal);
+    } catch (error) {
+      await closePane(pi, pane.pane_id).catch(() => undefined);
+      throw error;
+    }
     return {
       paneId: pane.pane_id,
       terminalId: pane.terminal_id,
