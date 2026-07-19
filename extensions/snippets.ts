@@ -17,7 +17,7 @@ export const SIMPLIFY_SUFFIX =
   "Before changing anything, propose what can be deleted, inlined, merged, renamed, or not built. Prefer the smallest clean end state over options, compatibility layers, and abstractions that do not pull their weight. Show concrete simplifications and ask about material design choices; wait for approval before implementing them.";
 
 export const DELEGATE_REVIEW_SUFFIX =
-  "Use delegate with context='clean' for a generic review of this, requesting only issues and potential improvements. Then evaluate its suggestions: apply clearly good ones, ignore bad ones, and ask me about anything uncertain.";
+  "Use delegate with context='project' for a generic review of this, requesting only issues and potential improvements. Then evaluate its suggestions: apply clearly good ones, ignore bad ones, and ask me about anything uncertain.";
 
 export const TS_SUFFIX = "Thoughts? Suggestions?";
 
@@ -88,7 +88,7 @@ export const SNIPPETS: PromptSnippet[] = [
   {
     key: "delegate-review",
     value: DELEGATE_REVIEW_SUFFIX,
-    description: "Insert the clean delegate review suffix",
+    description: "Insert the project delegate review suffix",
   },
   {
     key: "ts",
