@@ -2,15 +2,12 @@ import * as path from "node:path";
 import { SessionManager, type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
-import { closePane, flushSessionFile, sendTextToPane, startHerdrPiPane } from "./herdr-helpers.ts";
-import { getSubagentModelCliArgs } from "./subagent-model-state.ts";
+import { closeHerdrAgent, flushSessionFile, modelCliArgs, promptHerdrAgent, startHerdrPiAgent, workerAgentName } from "./herdr-helpers.ts";
 import {
   createWorkerArtifacts,
   formatWorkerMoreInfo,
   formatWorkerResult,
   makeWorkerId,
-  sanitizeWorkerName,
-  waitForWorkerReady,
   waitForWorkerResult,
   writeWorkerRequest,
 } from "./worker-frame.ts";
@@ -185,39 +182,37 @@ async function runFreshHistory(
     closeWhenDone: true,
   });
 
+  const args = modelCliArgs(ctx.model, pi.getThinkingLevel());
   const session = SessionManager.create(ctx.cwd);
   const sessionFile = session.getSessionFile();
   const parentSession = ctx.sessionManager.getSessionFile() ?? undefined;
   if (!sessionFile) {
-    return { prompt: params.prompt, answer: "Could not create a persistent session for fresh-history.", exitCode: 1, args: getSubagentModelCliArgs(ctx), requestedHistory: params.history, includedHistory: historyItems.length, parentSession, moreInfo };
+    return { prompt: params.prompt, answer: "Could not create a persistent session for fresh-history.", exitCode: 1, args, requestedHistory: params.history, includedHistory: historyItems.length, parentSession, moreInfo };
   }
   session.appendCustomEntry("pi-herdr:fresh-history", { id, requestedHistory: params.history, includedHistory: historyItems.length, parentSession, createdAt: new Date().toISOString() });
   flushSessionFile(session, sessionFile);
 
-  const requestedLockName = sanitizeWorkerName(`fresh-history-${path.basename(ctx.cwd)}-${id}`);
-  let actualLockName = "";
-  const args = getSubagentModelCliArgs(ctx);
+  const agentName = workerAgentName("history", id);
+  let paneId = "";
   try {
-    const started = await startHerdrPiPane(pi, {
-      name: requestedLockName,
+    const started = await startHerdrPiAgent(pi, {
+      name: agentName,
       cwd: ctx.cwd,
       sessionFile,
       piArgs: args,
-      placement: "tab",
     }, signal);
-    actualLockName = started.paneId;
+    paneId = started.paneId;
   } catch (error) {
     return { prompt: params.prompt, answer: error instanceof Error ? error.message : String(error), exitCode: 1, args, requestedHistory: params.history, includedHistory: historyItems.length, parentSession, sessionFile, moreInfo };
   }
 
   try {
-    await waitForWorkerReady(pi, actualLockName, 10_000, signal);
-    await sendTextToPane(pi, actualLockName, `/worker-run ${paths.requestPath}`, true, signal);
+    await promptHerdrAgent(pi, agentName, `/worker-run ${paths.requestPath}`, signal);
 
     const { result } = await waitForWorkerResult(pi, {
       id,
-      actualLockName,
-      requestedLockName,
+      agentName,
+      paneId,
       paths,
       sessionFile,
       task: params.prompt,
@@ -238,7 +233,7 @@ async function runFreshHistory(
   } catch (error) {
     return { prompt: params.prompt, answer: error instanceof Error ? error.message : String(error), exitCode: 1, args, requestedHistory: params.history, includedHistory: historyItems.length, parentSession, sessionFile, moreInfo };
   } finally {
-    if (actualLockName) await closePane(pi, actualLockName).catch(() => undefined);
+    if (paneId) await closeHerdrAgent(pi, agentName, paneId).catch(() => undefined);
   }
 }
 
@@ -246,8 +241,9 @@ export default function freshHistoryExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: TOOL_NAME,
     label: "Fresh History",
-    description: "Run one task in an ephemeral fresh-context worker with a requested number of recent user requests and direct assistant replies; tool activity is omitted. Use when a small excerpt is enough, not for full-context or persistent follow-up work. Returns the answer and automatic retrospective; failures are reported in the returned text.",
+    description: "Run one task in an ephemeral fresh-context worker with a requested number of recent user requests and direct assistant replies; tool activity is omitted. Fresh-history calls run serially. Use when a small excerpt is enough, not for full-context or persistent follow-up work. Returns the answer and automatic retrospective; failures are reported in the returned text.",
     parameters: freshHistoryParams,
+    executionMode: "sequential",
     renderCall: renderFreshHistoryArgs,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const result = await runFreshHistory(pi, params, ctx, signal, onUpdate);

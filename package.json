@@ -38,6 +38,8 @@
       "./extensions/context-explorer.ts",
       "./extensions/browser.ts",
       "./extensions/web.ts",
+      "./extensions/audio.ts",
+      "./extensions/mail.ts",
       "./extensions/prompt-history.ts",
       "./extensions/fresh-pov-review.ts",
       "./extensions/vim.ts",
