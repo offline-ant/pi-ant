@@ -19,7 +19,6 @@
   "pi": {
     "extensions": [
       "./extensions/nesting.ts",
-      "./extensions/subagent-model.ts",
       "./extensions/worker-frame.ts",
       "./extensions/herdr.ts",
       "./extensions/herdr-fork.ts",

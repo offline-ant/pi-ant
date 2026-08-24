@@ -19,6 +19,7 @@ import * as http from "node:http";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── Constants ─────────────────────────────────────────────────────
@@ -50,7 +51,7 @@ const SKIP_EXTENSIONS = new Set([
 const MAX_FILES_FOR_API = 5000;
 
 // Resolve static files relative to this extension's directory
-const STATIC_DIR = __dirname;
+const STATIC_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 const MIME: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -103,12 +104,37 @@ function walkFiles(root: string): { path: string; size: number }[] {
   return results;
 }
 
+interface PendingRead {
+  absolutePath: string;
+  startLine: number;
+  requestedLineCount?: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function normalizedLineNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.trunc(value))
+    : fallback;
+}
+
+function readOutputLineCount(details: unknown): number | undefined {
+  if (!isRecord(details) || !isRecord(details.truncation)) return undefined;
+  const outputLines = details.truncation.outputLines;
+  return typeof outputLines === "number" && Number.isFinite(outputLines)
+    ? Math.max(0, Math.trunc(outputLines))
+    : undefined;
+}
+
 /**
- * Parse the current session file and collect read calls after the last compaction.
- * Returns a map of absolute path → read coverage percent (0-100).
+ * Parse the current session file and collect successful reads after the last
+ * compaction. Coverage uses the read tool's 1-indexed line ranges, not bytes.
  */
-function collectReads(sessionFile: string): Map<string, number> {
-  const reads: Map<string, { offsets: [number, number][] }> = new Map();
+export function collectReads(sessionFile: string, cwd: string): Map<string, number> {
+  const pendingReads = new Map<string, PendingRead>();
+  const rangesByPath = new Map<string, Array<[number, number]>>();
 
   let lines: string[];
   try {
@@ -117,88 +143,92 @@ function collectReads(sessionFile: string): Map<string, number> {
     return new Map();
   }
 
-  // Find the last compaction entry line index
   let lastCompactionIdx = -1;
-  for (let i = 0; i < lines.length; i++) {
+  for (let index = 0; index < lines.length; index++) {
     try {
-      const entry = JSON.parse(lines[i]!);
-      if (entry.type === "compaction") {
-        lastCompactionIdx = i;
-      }
+      const entry = JSON.parse(lines[index]!) as unknown;
+      if (isRecord(entry) && entry.type === "compaction") lastCompactionIdx = index;
     } catch { /* skip malformed */ }
   }
 
-  // Collect read calls from assistant messages after last compaction
-  for (let i = lastCompactionIdx + 1; i < lines.length; i++) {
+  for (let index = lastCompactionIdx + 1; index < lines.length; index++) {
     try {
-      const entry = JSON.parse(lines[i]!);
-      if (entry.type !== "message") continue;
-      const msg = entry.message;
-      if (!msg || msg.role !== "assistant") continue;
-      if (!Array.isArray(msg.content)) continue;
+      const entry = JSON.parse(lines[index]!) as unknown;
+      if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message)) continue;
+      const message = entry.message;
 
-      for (const block of msg.content) {
-        if (typeof block !== "object" || block === null) continue;
-        if (block.type !== "toolCall") continue;
-        if (block.name !== "read") continue;
+      if (message.role === "assistant" && Array.isArray(message.content)) {
+        for (const block of message.content) {
+          if (!isRecord(block) || block.type !== "toolCall" || block.name !== "read") continue;
+          if (typeof block.id !== "string" || !isRecord(block.arguments)) continue;
+          const filePath = block.arguments.path;
+          if (typeof filePath !== "string" || !filePath) continue;
+          const normalizedPath = filePath.startsWith("@") ? filePath.slice(1) : filePath;
 
-        const args = block.arguments || {};
-        const filePath: string | null = typeof args.path === "string" ? args.path : null;
-        if (!filePath) continue;
-
-        const abs = path.isAbsolute(filePath) ? filePath : path.resolve(SESSIONS_DIR, filePath);
-        const offset: number = typeof args.offset === "number" ? args.offset : 0;
-        const limit: number = typeof args.limit === "number" ? args.limit : Infinity;
-
-        const existing = reads.get(abs);
-        if (existing) {
-          existing.offsets.push([offset, limit]);
-        } else {
-          reads.set(abs, { offsets: [[offset, limit]] });
+          const offset = normalizedLineNumber(block.arguments.offset, 1);
+          const limit = block.arguments.limit === undefined
+            ? undefined
+            : normalizedLineNumber(block.arguments.limit, 0);
+          pendingReads.set(block.id, {
+            absolutePath: path.isAbsolute(normalizedPath) ? path.resolve(normalizedPath) : path.resolve(cwd, normalizedPath),
+            startLine: Math.max(1, offset),
+            requestedLineCount: limit,
+          });
         }
+        continue;
       }
+
+      if (
+        message.role !== "toolResult"
+        || message.toolName !== "read"
+        || typeof message.toolCallId !== "string"
+      ) {
+        continue;
+      }
+      const pending = pendingReads.get(message.toolCallId);
+      pendingReads.delete(message.toolCallId);
+      if (!pending || message.isError === true) continue;
+
+      const lineCount = readOutputLineCount(message.details) ?? pending.requestedLineCount ?? Infinity;
+      if (lineCount <= 0) continue;
+      const endLine = lineCount === Infinity ? Infinity : pending.startLine + lineCount;
+      const ranges = rangesByPath.get(pending.absolutePath) ?? [];
+      ranges.push([pending.startLine, endLine]);
+      rangesByPath.set(pending.absolutePath, ranges);
     } catch { /* skip malformed */ }
   }
 
-  // Calculate coverage percentages
   const result = new Map<string, number>();
-  for (const [absPath, { offsets }] of reads) {
-    let fileSize: number;
+  for (const [absolutePath, ranges] of rangesByPath) {
+    let totalLines: number;
     try {
-      fileSize = fs.statSync(absPath).size;
+      totalLines = fs.readFileSync(absolutePath, "utf8").split("\n").length;
     } catch {
       continue;
     }
-    if (fileSize === 0) {
-      result.set(absPath, 100);
-      continue;
-    }
 
-    const sorted = offsets
-      .map(([o, l]) => [o, Math.min(l, fileSize - o)] as [number, number])
-      .filter(([, l]) => l > 0)
-      .sort((a, b) => a[0] - b[0]);
-
+    const sorted = ranges
+      .map(([startLine, endLine]) => [
+        Math.min(totalLines, startLine - 1),
+        endLine === Infinity ? totalLines : Math.min(totalLines, endLine - 1),
+      ] as [number, number])
+      .filter(([start, end]) => end > start)
+      .sort((left, right) => left[0] - right[0]);
     if (sorted.length === 0) continue;
 
-    let covered = 0;
-    let currentStart = sorted[0]![0];
-    let currentEnd = sorted[0]![0] + sorted[0]![1];
-
-    for (let i = 1; i < sorted.length; i++) {
-      const [s, l] = sorted[i]!;
-      if (s <= currentEnd) {
-        currentEnd = Math.max(currentEnd, s + l);
+    let coveredLines = 0;
+    let [currentStart, currentEnd] = sorted[0]!;
+    for (const [start, end] of sorted.slice(1)) {
+      if (start <= currentEnd) {
+        currentEnd = Math.max(currentEnd, end);
       } else {
-        covered += currentEnd - currentStart;
-        currentStart = s;
-        currentEnd = s + l;
+        coveredLines += currentEnd - currentStart;
+        currentStart = start;
+        currentEnd = end;
       }
     }
-    covered += currentEnd - currentStart;
-
-    const pct = Math.min(100, Math.round((covered / fileSize) * 100));
-    result.set(absPath, pct);
+    coveredLines += currentEnd - currentStart;
+    result.set(absolutePath, Math.min(100, Math.round((coveredLines / totalLines) * 100)));
   }
 
   return result;
@@ -242,7 +272,7 @@ function handleRequest(
   // API
   if (req.url === "/api/data") {
     try {
-      const reads = collectReads(state.sessionFile);
+      const reads = collectReads(state.sessionFile, state.cwd);
       const files = walkFiles(state.cwd);
       const enriched = files.map((f) => {
         const absPath = path.resolve(state.cwd, f.path);

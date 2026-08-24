@@ -3,15 +3,12 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SessionManager, type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { cleanContextCliArgs, withoutDelegateTool, type DelegateContext } from "./delegate-policy.ts";
-import { closePane, flushSessionFile, resolveCwd, sendTextToPane, startHerdrPiPane } from "./herdr-helpers.ts";
-import { getSubagentModelCliArgs } from "./subagent-model-state.ts";
+import { closeHerdrAgent, flushSessionFile, modelCliArgs, promptHerdrAgent, resolveCwd, startHerdrPiAgent, workerAgentName } from "./herdr-helpers.ts";
 import {
   appendWorkerMoreInfo,
   createWorkerArtifacts,
   formatWorkerResult,
   makeWorkerId,
-  sanitizeWorkerName,
-  waitForWorkerReady,
   waitForWorkerResult,
   writeWorkerRequest,
   type WorkerArtifactPaths,
@@ -38,7 +35,6 @@ interface DelegateRuntimeState {
   childSession: string;
   parentCwd: string;
   childCwd: string;
-  lockName: string;
   workerTools: string[];
   createdAt: string;
 }
@@ -52,8 +48,8 @@ export interface DelegateRunDetails {
   id: string;
   context: DelegateContext;
   cwd: string;
-  lockName: string;
-  requestedLockName: string;
+  agentName: string;
+  paneId: string;
   sessionFile: string;
   sessionCommand: string;
   task: string;
@@ -104,7 +100,6 @@ function parseDelegateRuntime(value: unknown): DelegateRuntimeState | undefined 
     || typeof value.childSession !== "string"
     || typeof value.parentCwd !== "string"
     || typeof value.childCwd !== "string"
-    || typeof value.lockName !== "string"
     || workerTools === undefined
     || typeof value.createdAt !== "string"
   ) {
@@ -118,7 +113,6 @@ function parseDelegateRuntime(value: unknown): DelegateRuntimeState | undefined 
     childSession: value.childSession,
     parentCwd: value.parentCwd,
     childCwd: value.childCwd,
-    lockName: value.lockName,
     workerTools: withoutDelegateTool(workerTools),
     createdAt: value.createdAt,
   };
@@ -171,8 +165,8 @@ function makeRunDetails(options: {
   id: string;
   context: DelegateContext;
   cwd: string;
-  actualLockName: string;
-  requestedLockName: string;
+  agentName: string;
+  paneId: string;
   sessionFile: string;
   task: string;
   args: string[];
@@ -184,8 +178,8 @@ function makeRunDetails(options: {
     id: options.id,
     context: options.context,
     cwd: options.cwd,
-    lockName: options.actualLockName,
-    requestedLockName: options.requestedLockName,
+    agentName: options.agentName,
+    paneId: options.paneId,
     sessionFile: options.sessionFile,
     sessionCommand: `pi --session ${options.sessionFile}`,
     task: options.task,
@@ -244,9 +238,9 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
     ctx: ExtensionContext,
   ): Promise<DelegateRunOutput> {
     const id = makeWorkerId();
-    const requestedLockName = sanitizeWorkerName(`delegate-${id}`);
+    const agentName = workerAgentName("delegate", id);
     const paths = createWorkerArtifacts();
-    let actualLockName = "";
+    let paneId = "";
     try {
       writeWorkerRequest(paths, {
         id,
@@ -271,28 +265,25 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
         childSession: childSessionFile,
         parentCwd: ctx.cwd,
         childCwd: ctx.cwd,
-        lockName: requestedLockName,
         workerTools,
         createdAt: new Date().toISOString(),
       };
       forked.appendCustomEntry(DELEGATE_RUNTIME_CUSTOM_TYPE, runtime);
       flushSessionFile(forked, childSessionFile);
 
-      const started = await startHerdrPiPane(pi, {
-        name: requestedLockName,
+      const started = await startHerdrPiAgent(pi, {
+        name: agentName,
         cwd: ctx.cwd,
         sessionFile: childSessionFile,
         piArgs: args,
-        placement: "tab",
       }, signal);
-      actualLockName = started.paneId;
+      paneId = started.paneId;
 
-      await waitForWorkerReady(pi, actualLockName, 10_000, signal);
-      await sendTextToPane(pi, actualLockName, `/worker-run ${paths.requestPath}`, true, signal);
+      await promptHerdrAgent(pi, agentName, `/worker-run ${paths.requestPath}`, signal);
       const { result, details } = await waitForWorkerResult(pi, {
         id,
-        actualLockName,
-        requestedLockName,
+        agentName,
+        paneId,
         paths,
         sessionFile: childSessionFile,
         task: request.task,
@@ -307,8 +298,8 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
           id,
           context: "inherit",
           cwd: ctx.cwd,
-          actualLockName,
-          requestedLockName,
+          agentName,
+          paneId,
           sessionFile: childSessionFile,
           task: request.task,
           args,
@@ -320,7 +311,7 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
     } catch (error) {
       throw new Error(appendWorkerMoreInfo(error instanceof Error ? error.message : String(error), paths));
     } finally {
-      if (actualLockName) await closePane(pi, actualLockName).catch(() => undefined);
+      if (paneId) await closeHerdrAgent(pi, agentName, paneId).catch(() => undefined);
     }
   }
 
@@ -353,7 +344,7 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
       request,
       parentSession,
       workerTools,
-      getSubagentModelCliArgs(ctx),
+      modelCliArgs(ctx.model, pi.getThinkingLevel()),
       toolCallId,
       signal,
       onUpdate,
@@ -390,24 +381,22 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
     });
     flushSessionFile(session, sessionFile);
 
-    const requestedLockName = sanitizeWorkerName(`delegate-${path.basename(cwd)}-${id}`);
-    let actualLockName = "";
+    const agentName = workerAgentName("delegate", id);
+    let paneId = "";
     try {
-      const started = await startHerdrPiPane(pi, {
-        name: requestedLockName,
+      const started = await startHerdrPiAgent(pi, {
+        name: agentName,
         cwd,
         sessionFile,
         piArgs: args,
-        placement: "tab",
       }, signal);
-      actualLockName = started.paneId;
+      paneId = started.paneId;
 
-      await waitForWorkerReady(pi, actualLockName, 10_000, signal);
-      await sendTextToPane(pi, actualLockName, `/worker-run ${paths.requestPath}`, true, signal);
+      await promptHerdrAgent(pi, agentName, `/worker-run ${paths.requestPath}`, signal);
       const { result, details } = await waitForWorkerResult(pi, {
         id,
-        actualLockName,
-        requestedLockName,
+        agentName,
+        paneId,
         paths,
         sessionFile,
         task: request.task,
@@ -422,8 +411,8 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
           id,
           context: request.context,
           cwd,
-          actualLockName,
-          requestedLockName,
+          agentName,
+          paneId,
           sessionFile,
           task: request.task,
           args,
@@ -435,7 +424,7 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
     } catch (error) {
       throw new Error(appendWorkerMoreInfo(error instanceof Error ? error.message : String(error), paths));
     } finally {
-      if (actualLockName) await closePane(pi, actualLockName).catch(() => undefined);
+      if (paneId) await closeHerdrAgent(pi, agentName, paneId).catch(() => undefined);
     }
   }
 
@@ -447,7 +436,7 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
   ): Promise<DelegateRunOutput> {
     const cwd = resolveCwd(ctx.cwd, request.folder);
     const args = [
-      ...getSubagentModelCliArgs(ctx),
+      ...modelCliArgs(ctx.model, pi.getThinkingLevel()),
       ...cleanContextCliArgs(request.context, WORKER_FRAME_EXTENSION_PATH),
     ];
     return runFreshWorker(request, cwd, args, signal, onUpdate);

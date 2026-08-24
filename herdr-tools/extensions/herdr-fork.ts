@@ -3,11 +3,8 @@
  */
 
 import * as fs from "node:fs";
-import { SessionManager, type ExtensionAPI, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import { flushSessionFile, resolveCwd, startHerdrPiPane, writePromptFile } from "./herdr-helpers.ts";
-import { getSubagentModelCliArgs } from "./subagent-model-state.ts";
-
-const FORK_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { closeHerdrAgent, flushSessionFile, modelCliArgs, promptHerdrAgent, resolveCwd, startHerdrPiAgent, validateHerdrAgentName } from "./herdr-helpers.ts";
 const IS_HERDR_FORK = process.env.PI_HERDR_FORK === "true";
 const FORK_SYSTEM_PROMPT =
   "You are running in an interactive Herdr fork, not the original controlling session. Continue assisting the user in this forked session.";
@@ -16,30 +13,20 @@ interface HerdrForkInput {
   name: string;
   folder?: string;
   prompt?: string;
-  piArgs?: string;
 }
 
 interface SessionFileProvider {
   getSessionFile(): string | undefined;
 }
 
-interface PendingFork {
-  input: HerdrForkInput;
-  piArgs: string[];
-}
-
-const pendingForks = new Map<string, PendingFork>();
-
 function validateForkName(name: string): string | undefined {
-  if (!name) return "Usage: /herdr-fork <name> [folder] [--pi-args <args>] [-- <prompt>]";
-  if (/\s/.test(name)) return "herdr-fork name must not contain whitespace";
-  if (!FORK_NAME_PATTERN.test(name)) {
-    return "herdr-fork name must start with a letter or number and contain only letters, numbers, '.', '_', or '-'";
+  if (!name) return "Usage: /herdr-fork <name> [folder] [-- <prompt>]";
+  try {
+    validateHerdrAgentName(name);
+    return undefined;
+  } catch {
+    return "herdr-fork name must start with a lowercase letter, contain only lowercase letters, numbers, '_' or '-', and be at most 32 characters";
   }
-  if (name === "." || name === ".." || name.includes("..")) {
-    return "herdr-fork name must not be '.' or contain '..'";
-  }
-  return undefined;
 }
 
 function errorMessage(error: unknown): string {
@@ -101,44 +88,20 @@ function parseHerdrForkArgs(args: string): HerdrForkInput {
   const tokens = parseCommandLine(optionsText.trim());
   const name = tokens.shift() ?? "";
   let folder: string | undefined;
-  let piArgs: string | undefined;
 
   while (tokens.length > 0) {
     const token = tokens.shift();
     if (token === undefined) break;
-    if (token === "--pi-args") {
-      const value = tokens.shift();
-      if (value === undefined) throw new Error("--pi-args requires a value");
-      piArgs = value;
-      continue;
-    }
-    if (token.startsWith("--pi-args=")) {
-      piArgs = token.slice("--pi-args=".length);
-      continue;
-    }
-    if (token.startsWith("--")) {
-      throw new Error(`Unknown option: ${token}`);
-    }
-    if (folder !== undefined) {
-      throw new Error(`Unexpected extra argument: ${token}`);
-    }
+    if (token.startsWith("--")) throw new Error(`Unknown option: ${token}`);
+    if (folder !== undefined) throw new Error(`Unexpected extra argument: ${token}`);
     folder = token;
   }
 
-  return { name, folder, piArgs, prompt };
+  return { name, folder, prompt };
 }
 
 function validateInput(input: HerdrForkInput): string | undefined {
   return validateForkName(input.name.trim());
-}
-
-function resolvePiArgs(input: HerdrForkInput, defaultArgs: string[]): string[] {
-  const explicit = input.piArgs?.trim();
-  return explicit ? parseCommandLine(explicit) : defaultArgs;
-}
-
-function createPendingId(): string {
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 async function forkIntoHerdr(
@@ -167,52 +130,39 @@ async function forkIntoHerdr(
     throw new Error("Could not create a persistent fork session.");
   }
 
-  const promptFile = input.prompt && input.prompt.trim().length > 0 ? writePromptFile(input.prompt) : undefined;
+  const prompt = input.prompt?.trim() || undefined;
   forked.appendCustomEntry("pi-herdr:fork", {
     name,
     sourceCwd: cwd,
     targetCwd,
     parentSession,
     sessionFile,
-    promptFile,
+    prompt,
   });
   flushSessionFile(forked, sessionFile);
 
-  const started = await startHerdrPiPane(pi, {
+  const started = await startHerdrPiAgent(pi, {
     name,
     cwd: targetCwd,
     sessionFile,
     piArgs,
-    promptFile,
-    placement: "tab",
     env: { PI_HERDR_FORK: "true" },
   }, signal);
+  try {
+    if (prompt) await promptHerdrAgent(pi, started.agentName, prompt, signal);
+  } catch (error) {
+    await closeHerdrAgent(pi, started.agentName, started.paneId).catch(() => undefined);
+    throw error;
+  }
 
   return [
     `Started Herdr fork '${name}'.`,
+    `Agent: ${started.agentName}`,
     `Tab: ${started.tabId ?? "unknown"}`,
     `Pane: ${started.paneId}`,
     `Cwd: ${targetCwd}`,
     `Forked session: ${sessionFile}`,
-    promptFile ? `Prompt file: ${promptFile}` : undefined,
-  ].filter(Boolean).join("\n");
-}
-
-async function runPendingFork(pi: ExtensionAPI, id: string, ctx: ExtensionCommandContext): Promise<void> {
-  const pending = pendingForks.get(id);
-  if (!pending) {
-    ctx.ui.notify(`No pending herdr-fork request found for ${id}`, "error");
-    return;
-  }
-  pendingForks.delete(id);
-  await ctx.waitForIdle();
-
-  try {
-    const text = await forkIntoHerdr(pi, pending.input, ctx.cwd, ctx.sessionManager, pending.piArgs);
-    ctx.ui.notify(text, "info");
-  } catch (error) {
-    ctx.ui.notify(`herdr-fork failed: ${errorMessage(error)}`, "error");
-  }
+  ].join("\n");
 }
 
 export default function herdrForkExtension(pi: ExtensionAPI): void {
@@ -222,11 +172,9 @@ export default function herdrForkExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("herdr-fork", {
-    description:
-      "Fork the current session into a new pi agent in a Herdr tab. Usage: /herdr-fork <name> [folder] [--pi-args <args>] [-- <prompt>]",
+    description: "Fork the current session into a new Pi agent in a Herdr tab. Usage: /herdr-fork <name> [folder] [-- <prompt>]",
     handler: async (args, ctx) => {
       let input: HerdrForkInput;
-      let piArgs: string[];
       try {
         input = parseHerdrForkArgs(args);
         const validationError = validateInput(input);
@@ -234,22 +182,19 @@ export default function herdrForkExtension(pi: ExtensionAPI): void {
           ctx.ui.notify(validationError, "error");
           return;
         }
-        piArgs = resolvePiArgs(input, getSubagentModelCliArgs(ctx));
       } catch (error) {
         ctx.ui.notify(errorMessage(error), "error");
         return;
       }
 
-      const id = createPendingId();
-      pendingForks.set(id, { input, piArgs });
-      await runPendingFork(pi, id, ctx);
-    },
-  });
-
-  pi.registerCommand("herdr-fork-run", {
-    description: "Internal follow-up command for queued Herdr forks.",
-    handler: async (args, ctx) => {
-      await runPendingFork(pi, args.trim(), ctx);
+      await ctx.waitForIdle();
+      try {
+        const piArgs = modelCliArgs(ctx.model, pi.getThinkingLevel());
+        const text = await forkIntoHerdr(pi, input, ctx.cwd, ctx.sessionManager, piArgs);
+        ctx.ui.notify(text, "info");
+      } catch (error) {
+        ctx.ui.notify(`herdr-fork failed: ${errorMessage(error)}`, "error");
+      }
     },
   });
 }

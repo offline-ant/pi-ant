@@ -7,6 +7,7 @@ import {
   closePane,
   commandText,
   getPane,
+  paneWaitOutputArgs,
   resolveCwd,
   runHerdr,
   runHerdrJson,
@@ -38,6 +39,10 @@ interface PanelRegistryEntry {
 }
 
 type PanelRegistry = Record<string, PanelRegistryEntry>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
 
 function ensureStateDir(): void {
   fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
@@ -94,9 +99,14 @@ function clearCaptureState(...targets: string[]): void {
   }
 }
 
+function responseResult(response: unknown): Record<string, unknown> | undefined {
+  return isRecord(response) && isRecord(response.result) ? response.result : undefined;
+}
+
 async function listPanes(pi: ExtensionAPI, signal?: AbortSignal): Promise<HerdrPaneInfo[]> {
-  const response = await runHerdrJson(pi, ["pane", "list"], signal);
-  return Array.isArray(response?.result?.panes) ? response.result.panes : [];
+  const panes = responseResult(await runHerdrJson(pi, ["pane", "list"], signal))?.panes;
+  if (!Array.isArray(panes)) return [];
+  return panes.filter((pane): pane is HerdrPaneInfo => isRecord(pane) && typeof pane.pane_id === "string");
 }
 
 async function resolvePanelTarget(pi: ExtensionAPI, target: string, signal?: AbortSignal): Promise<{ pane: HerdrPaneInfo; name?: string }> {
@@ -267,21 +277,23 @@ export default function herdrPanelToolsExtension(pi: ExtensionAPI): void {
         `HERDR_PANEL_NAME=${name}`,
         "--no-focus",
       ], signal);
-      const pane = tabResponse?.result?.root_pane;
-      const tab = tabResponse?.result?.tab;
-      if (!pane?.pane_id) {
+      const result = responseResult(tabResponse);
+      const paneValue = result?.root_pane;
+      const tabValue = result?.tab;
+      if (!isRecord(paneValue) || typeof paneValue.pane_id !== "string") {
         throw new Error(`Could not find root pane in Herdr tab response: ${JSON.stringify(tabResponse)}`);
       }
+      const pane = paneValue as unknown as HerdrPaneInfo;
+      const tab = isRecord(tabValue) && typeof tabValue.tab_id === "string"
+        ? { tab_id: tabValue.tab_id }
+        : undefined;
       const command = buildBashPanelCommand(name, params.command);
       await runInPane(pi, pane.pane_id, command, signal);
       rememberPanel({ name, paneId: pane.pane_id, terminalId: pane.terminal_id, cwd, command: params.command });
 
       let waitText: string | undefined;
       if (params.waitFor?.match) {
-        const args = ["wait", "output", pane.pane_id, "--match", params.waitFor.match, "--source", "recent"];
-        if (params.waitFor.regex === true) args.push("--regex");
-        if (params.waitFor.timeoutMs !== undefined) args.push("--timeout", String(Math.max(0, Math.ceil(params.waitFor.timeoutMs))));
-        const waitResult = await runHerdr(pi, args, signal);
+        const waitResult = await runHerdr(pi, paneWaitOutputArgs(pane.pane_id, params.waitFor), signal);
         if (waitResult.code !== 0) {
           const failure = commandText(waitResult);
           const recent = await readPanelOutput(pi, pane.pane_id, 80, "recent", signal).catch((error) => String(error));

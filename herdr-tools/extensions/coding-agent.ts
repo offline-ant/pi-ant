@@ -3,16 +3,13 @@ import * as path from "node:path";
 import { SessionManager, type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
-import { flushSessionFile, paneExists as herdrPaneExists, sendTextToPane, startHerdrPiPane } from "./herdr-helpers.ts";
-import { getSubagentModelCliArgs } from "./subagent-model-state.ts";
+import { agentExists, flushSessionFile, modelCliArgs, promptHerdrAgent, startHerdrPiAgent, workerAgentName } from "./herdr-helpers.ts";
 import {
   appendWorkerMoreInfo,
   createWorkerArtifacts,
   formatWorkerResult,
   makeWorkerId,
   readWorkerStatus,
-  sanitizeWorkerName,
-  waitForWorkerReady,
   waitForWorkerResult,
   writeWorkerRequest,
   writeWorkerStatus,
@@ -30,8 +27,8 @@ type CodingAgentParams = Static<typeof codingAgentParams>;
 
 interface RegistryEntry {
   name: string;
-  lockName: string;
-  requestedLockName: string;
+  agentName: string;
+  paneId: string;
   sessionFile: string;
   cwd: string;
   statusPath: string;
@@ -44,7 +41,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function validateName(name: string): string {
-  const safe = sanitizeWorkerName(name.trim());
+  const safe = name.trim().replace(/[^A-Za-z0-9._:-]/g, "");
   if (!safe || safe !== name.trim() || safe === "." || safe === ".." || safe.includes("..")) {
     throw new Error("coding-agent name must contain only letters, numbers, '.', '_', ':', or '-' and must not contain '..'.");
   }
@@ -67,7 +64,7 @@ function readRegistry(name: string): RegistryEntry | undefined {
   const file = registryPath(name);
   if (!fs.existsSync(file)) return undefined;
   const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
-  if (!isRecord(parsed) || typeof parsed.lockName !== "string" || typeof parsed.sessionFile !== "string" || typeof parsed.cwd !== "string" || typeof parsed.statusPath !== "string") {
+  if (!isRecord(parsed) || typeof parsed.agentName !== "string" || typeof parsed.paneId !== "string" || typeof parsed.sessionFile !== "string" || typeof parsed.cwd !== "string" || typeof parsed.statusPath !== "string") {
     return undefined;
   }
   return parsed as unknown as RegistryEntry;
@@ -101,36 +98,30 @@ function claimWorker(name: string): () => void {
   };
 }
 
-async function paneExists(pi: ExtensionAPI, paneId: string, signal?: AbortSignal): Promise<boolean> {
-  return herdrPaneExists(pi, paneId, signal);
-}
-
 function isIdle(entry: RegistryEntry): boolean {
   const status = readWorkerStatus(entry.statusPath);
   return status === undefined || status.state === "idle" || status.state === "closed";
 }
 
-async function startWorker(pi: ExtensionAPI, _params: CodingAgentParams, name: string, cwd: string, paths: WorkerArtifactPaths, ctx: ExtensionContext, signal?: AbortSignal): Promise<RegistryEntry> {
+async function startWorker(pi: ExtensionAPI, id: string, name: string, cwd: string, paths: WorkerArtifactPaths, ctx: ExtensionContext, signal?: AbortSignal): Promise<RegistryEntry> {
   const session = SessionManager.create(cwd);
   const sessionFile = session.getSessionFile();
   if (!sessionFile) throw new Error("Could not create a persistent session for coding-agent.");
   session.appendCustomEntry("pi-herdr:coding-agent", { name, cwd, createdAt: new Date().toISOString() });
   flushSessionFile(session, sessionFile);
 
-  const requestedLockName = sanitizeWorkerName(`coding-${name}`);
-  const started = await startHerdrPiPane(pi, {
-    name: requestedLockName,
+  const agentName = workerAgentName("coding", id);
+  const started = await startHerdrPiAgent(pi, {
+    name: agentName,
     cwd,
     sessionFile,
-    piArgs: getSubagentModelCliArgs(ctx),
-    placement: "tab",
+    piArgs: modelCliArgs(ctx.model, pi.getThinkingLevel()),
   }, signal);
 
-  const lockName = started.paneId;
   const entry: RegistryEntry = {
     name,
-    lockName,
-    requestedLockName,
+    agentName,
+    paneId: started.paneId,
     sessionFile,
     cwd,
     statusPath: paths.statusPath,
@@ -141,8 +132,25 @@ async function startWorker(pi: ExtensionAPI, _params: CodingAgentParams, name: s
   return entry;
 }
 
-async function sendWorkerRun(pi: ExtensionAPI, paneId: string, requestPath: string, signal?: AbortSignal): Promise<void> {
-  await sendTextToPane(pi, paneId, `/worker-run ${requestPath}`, true, signal);
+async function promptWorker(
+  pi: ExtensionAPI,
+  entry: RegistryEntry,
+  id: string,
+  paths: WorkerArtifactPaths,
+  signal?: AbortSignal,
+): Promise<void> {
+  try {
+    await promptHerdrAgent(pi, entry.agentName, `/worker-run ${paths.requestPath}`, signal);
+  } catch (error) {
+    writeWorkerStatus(entry.statusPath, {
+      id,
+      state: "idle",
+      resultPath: paths.resultPath,
+      sessionFile: entry.sessionFile,
+      contextPercent: null,
+    });
+    throw error;
+  }
 }
 
 function renderCodingAgentArgs(args: CodingAgentParams) {
@@ -165,8 +173,9 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "coding-agent",
     label: "Coding Agent",
-    description: "Run one task in a named persistent fresh-context worker and wait for completion. The worker remains available by name for follow-ups. Returns its result, automatic retrospective, idle status, and context use; failures throw with recovery details.",
+    description: "Run one task in a named persistent fresh-context worker and wait for completion. The worker remains available by name for follow-ups. Coding-agent calls run serially. Returns its result, automatic retrospective, idle status, and context use; failures throw with recovery details.",
     parameters: codingAgentParams,
+    executionMode: "sequential",
     renderCall: renderCodingAgentArgs,
     async execute(_toolCallId, params, signal, onUpdate: AgentToolUpdateCallback | undefined, ctx) {
       const name = validateName(params.name);
@@ -193,7 +202,7 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
           if (path.resolve(entry.cwd) !== cwd) {
             throw new Error(`coding-agent '${name}' already exists for ${entry.cwd}; refusing reuse with ${cwd}.`);
           }
-          if (!(await paneExists(pi, entry.lockName, signal))) {
+          if (!(await agentExists(pi, entry.agentName, signal))) {
             entry = undefined;
           } else if (!isIdle(entry)) {
             throw new Error(`coding-agent '${name}' is busy.`);
@@ -202,20 +211,18 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
 
         if (!entry) {
           writeWorkerStatus(paths.statusPath, { id, state: "running", resultPath: paths.resultPath, sessionFile: undefined, contextPercent: null });
-          entry = await startWorker(pi, params, name, cwd, paths, ctx, signal);
-          await waitForWorkerReady(pi, entry.lockName, 10_000, signal);
-          await sendWorkerRun(pi, entry.lockName, paths.requestPath, signal);
+          entry = await startWorker(pi, id, name, cwd, paths, ctx, signal);
         } else {
           writeWorkerStatus(paths.statusPath, { id, state: "running", resultPath: paths.resultPath, sessionFile: entry.sessionFile, contextPercent: null });
           entry = { ...entry, statusPath: paths.statusPath, updatedAt: new Date().toISOString() };
           writeRegistry(entry);
-          await sendWorkerRun(pi, entry.lockName, paths.requestPath, signal);
         }
+        await promptWorker(pi, entry, id, paths, signal);
 
         const { result } = await waitForWorkerResult(pi, {
           id,
-          actualLockName: entry.lockName,
-          requestedLockName: entry.requestedLockName,
+          agentName: entry.agentName,
+          paneId: entry.paneId,
           paths,
           sessionFile: entry.sessionFile,
           task: params.task,

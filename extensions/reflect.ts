@@ -370,14 +370,15 @@ function getVisibleMessages(ctx: ExtensionCommandContext): AgentMessage[] {
 function createReflectionOptions(
 	model: Model<Api>,
 	apiKey: string | undefined,
-	headers: Record<string, string> | undefined,
+	headers: SimpleStreamOptions["headers"],
+	env: SimpleStreamOptions["env"],
 	thinkingLevel: ReturnType<ExtensionAPI["getThinkingLevel"]>,
 ): SimpleStreamOptions {
 	const maxTokens = Math.min(
 		12000,
 		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
 	);
-	const options: SimpleStreamOptions = { maxTokens, apiKey, headers };
+	const options: SimpleStreamOptions = { maxTokens, apiKey, headers, env };
 	if (model.reasoning && thinkingLevel !== "off") {
 		options.reasoning = thinkingLevel;
 	}
@@ -411,7 +412,7 @@ async function generateReflectionPlan(
 	}
 
 	const response = await completeSimple(
-		model,
+		auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model,
 		{
 			systemPrompt: REFLECTION_SYSTEM_PROMPT,
 			messages: [
@@ -426,6 +427,7 @@ async function generateReflectionPlan(
 			model,
 			auth.apiKey,
 			auth.headers,
+			auth.env,
 			pi.getThinkingLevel(),
 		),
 	);
