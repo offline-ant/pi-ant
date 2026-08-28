@@ -1,18 +1,32 @@
 /**
- * /herdr-fork — fork the current pi session into a new Herdr tab.
+ * /herdr-fork — fork the current pi session into a sibling Herdr pane.
  */
 
 import * as fs from "node:fs";
 import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { closeHerdrAgent, flushSessionFile, modelCliArgs, promptHerdrAgent, resolveCwd, startHerdrPiAgent, validateHerdrAgentName } from "./herdr-helpers.ts";
+import {
+  agentExists,
+  closeHerdrAgent,
+  flushSessionFile,
+  modelCliArgs,
+  promptHerdrAgent,
+  resolveCwd,
+  startHerdrPiAgentInSiblingPane,
+  validateHerdrAgentName,
+} from "./herdr-helpers.ts";
 const IS_HERDR_FORK = process.env.PI_HERDR_FORK === "true";
 const FORK_SYSTEM_PROMPT =
   "You are running in an interactive Herdr fork, not the original controlling session. Continue assisting the user in this forked session.";
 
-interface HerdrForkInput {
-  name: string;
+export interface HerdrForkInput {
+  name?: string;
   folder?: string;
   prompt?: string;
+}
+
+export interface HerdrForkResult {
+  name: string;
+  sessionFile: string;
 }
 
 interface SessionFileProvider {
@@ -20,12 +34,21 @@ interface SessionFileProvider {
 }
 
 function validateForkName(name: string): string | undefined {
-  if (!name) return "Usage: /herdr-fork <name> [folder] [-- <prompt>]";
   try {
     validateHerdrAgentName(name);
     return undefined;
   } catch {
     return "herdr-fork name must start with a lowercase letter, contain only lowercase letters, numbers, '_' or '-', and be at most 32 characters";
+  }
+}
+
+async function resolveForkName(pi: ExtensionAPI, requestedName?: string): Promise<string> {
+  const explicitName = requestedName?.trim();
+  if (explicitName) return explicitName;
+
+  for (let number = 1; ; number++) {
+    const candidate = `fork-${number}`;
+    if (!(await agentExists(pi, candidate))) return candidate;
   }
 }
 
@@ -82,11 +105,11 @@ function parseCommandLine(input: string): string[] {
 }
 
 function parseHerdrForkArgs(args: string): HerdrForkInput {
-  const separator = args.includes(" -- ") ? args.indexOf(" -- ") : -1;
-  const optionsText = separator === -1 ? args : args.slice(0, separator);
-  const prompt = separator === -1 ? undefined : args.slice(separator + 4).trim();
+  const separator = /(?:^|\s)--(?:\s|$)/.exec(args);
+  const optionsText = separator ? args.slice(0, separator.index) : args;
+  const prompt = separator ? args.slice(separator.index + separator[0].length) : undefined;
   const tokens = parseCommandLine(optionsText.trim());
-  const name = tokens.shift() ?? "";
+  const name = tokens.shift();
   let folder: string | undefined;
 
   while (tokens.length > 0) {
@@ -101,23 +124,25 @@ function parseHerdrForkArgs(args: string): HerdrForkInput {
 }
 
 function validateInput(input: HerdrForkInput): string | undefined {
-  return validateForkName(input.name.trim());
+  const name = input.name?.trim();
+  return name ? validateForkName(name) : undefined;
 }
 
-async function forkIntoHerdr(
+export async function forkIntoHerdr(
   pi: ExtensionAPI,
   input: HerdrForkInput,
   cwd: string,
   sessionManager: SessionFileProvider,
   piArgs: string[],
   signal?: AbortSignal,
-): Promise<string> {
+  branchFromId?: string | null,
+): Promise<HerdrForkResult> {
   const validationError = validateInput(input);
   if (validationError) {
     throw new Error(validationError);
   }
 
-  const name = input.name.trim();
+  const name = await resolveForkName(pi, input.name);
   const targetCwd = resolveCwd(cwd, input.folder);
   const parentSession = sessionManager.getSessionFile();
   if (!parentSession || !fs.existsSync(parentSession)) {
@@ -129,50 +154,50 @@ async function forkIntoHerdr(
   if (!sessionFile) {
     throw new Error("Could not create a persistent fork session.");
   }
-
-  const prompt = input.prompt?.trim() || undefined;
-  forked.appendCustomEntry("pi-herdr:fork", {
-    name,
-    sourceCwd: cwd,
-    targetCwd,
-    parentSession,
-    sessionFile,
-    prompt,
-  });
-  flushSessionFile(forked, sessionFile);
-
-  const started = await startHerdrPiAgent(pi, {
-    name,
-    cwd: targetCwd,
-    sessionFile,
-    piArgs,
-    env: { PI_HERDR_FORK: "true" },
-  }, signal);
+  let started: Awaited<ReturnType<typeof startHerdrPiAgentInSiblingPane>> | undefined;
   try {
+    if (branchFromId === null) forked.resetLeaf();
+    else if (branchFromId !== undefined) forked.branch(branchFromId);
+
+    const prompt = input.prompt && input.prompt.trim().length > 0 ? input.prompt : undefined;
+    forked.appendCustomEntry("pi-herdr:fork", {
+      name,
+      sourceCwd: cwd,
+      targetCwd,
+      parentSession,
+      sessionFile,
+      prompt,
+    });
+    flushSessionFile(forked, sessionFile);
+
+    started = await startHerdrPiAgentInSiblingPane(pi, {
+      name,
+      cwd: targetCwd,
+      sessionFile,
+      piArgs,
+      env: { PI_HERDR_FORK: "true" },
+    }, signal);
     if (prompt) await promptHerdrAgent(pi, started.agentName, prompt, signal);
+    return { name, sessionFile };
   } catch (error) {
-    await closeHerdrAgent(pi, started.agentName, started.paneId).catch(() => undefined);
+    if (started) {
+      await closeHerdrAgent(pi, started.agentName, started.paneId).catch(() => undefined);
+    }
+    fs.rmSync(sessionFile, { force: true });
     throw error;
   }
-
-  return [
-    `Started Herdr fork '${name}'.`,
-    `Agent: ${started.agentName}`,
-    `Tab: ${started.tabId ?? "unknown"}`,
-    `Pane: ${started.paneId}`,
-    `Cwd: ${targetCwd}`,
-    `Forked session: ${sessionFile}`,
-  ].join("\n");
 }
 
 export default function herdrForkExtension(pi: ExtensionAPI): void {
+  let forkStarting = false;
+
   pi.on("before_agent_start", (event) => {
     if (!IS_HERDR_FORK) return undefined;
     return { systemPrompt: `${event.systemPrompt}\n\n${FORK_SYSTEM_PROMPT}` };
   });
 
   pi.registerCommand("herdr-fork", {
-    description: "Fork the current session into a new Pi agent in a Herdr tab. Usage: /herdr-fork <name> [folder] [-- <prompt>]",
+    description: "Fork the current session into a sibling Herdr pane. Usage: /herdr-fork [name] [folder] [-- <prompt>]",
     handler: async (args, ctx) => {
       let input: HerdrForkInput;
       try {
@@ -187,13 +212,44 @@ export default function herdrForkExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      await ctx.waitForIdle();
+      if (forkStarting) {
+        ctx.ui.notify("A Herdr fork is already starting.", "warning");
+        return;
+      }
+
+      forkStarting = true;
       try {
+        await ctx.waitForIdle();
         const piArgs = modelCliArgs(ctx.model, pi.getThinkingLevel());
-        const text = await forkIntoHerdr(pi, input, ctx.cwd, ctx.sessionManager, piArgs);
-        ctx.ui.notify(text, "info");
+        await forkIntoHerdr(pi, input, ctx.cwd, ctx.sessionManager, piArgs);
       } catch (error) {
         ctx.ui.notify(`herdr-fork failed: ${errorMessage(error)}`, "error");
+      } finally {
+        forkStarting = false;
+      }
+    },
+  });
+
+  pi.registerShortcut("ctrl+alt+f", {
+    description: "Open an idle fork without changing the editor draft",
+    handler: async (ctx) => {
+      if (forkStarting) {
+        ctx.ui.notify("A Herdr fork is already starting.", "warning");
+        return;
+      }
+      if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+        ctx.ui.notify("Wait for the current turn to finish before starting a Herdr fork.", "warning");
+        return;
+      }
+
+      forkStarting = true;
+      try {
+        const piArgs = modelCliArgs(ctx.model, pi.getThinkingLevel());
+        await forkIntoHerdr(pi, {}, ctx.cwd, ctx.sessionManager, piArgs);
+      } catch (error) {
+        ctx.ui.notify(`herdr-fork failed: ${errorMessage(error)}`, "error");
+      } finally {
+        forkStarting = false;
       }
     },
   });

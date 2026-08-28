@@ -63,11 +63,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "delegate",
     label: "Delegate",
-    description: "Run one task in an ephemeral Herdr worker and wait for its result and automatic retrospective. A delegate-only sibling batch runs concurrently, then joins before the parent continues. context='inherit' continues from the current conversation and excludes the delegate call itself and sibling results; context='project' or 'clean' starts a blank conversation. context is required. Failures throw with recovery details.",
+    description: "Run one task in an ephemeral Herdr worker and wait for its result and automatic retrospective. Sibling delegate and coding-agent calls run concurrently, then join before the parent continues. context='inherit' continues from the current conversation and excludes the delegate call itself and sibling results; context='project' or 'clean' starts a blank conversation. context is required. Failures throw with recovery details.",
     promptSnippet: "Run an ephemeral task with inherited, project, or clean context",
     promptGuidelines: [
       "Use delegate with context='inherit' when the task depends on context established in the current conversation. Use context='project' for a self-contained task that needs normal project guidance but no conversation history; include all relevant requirements, decisions, paths, findings, and constraints in task. Use context='clean' for independent fresh-eyes work.",
-      "For independent, non-overlapping tasks, issue a delegate-only sibling batch. Its calls execute concurrently and join before the parent continues; sibling results are not visible inside inherited delegates.",
+      "For independent, non-overlapping tasks, issue sibling delegate and coding-agent calls together. They execute concurrently and join before the parent continues; sibling results are not visible inside inherited delegates.",
     ],
     parameters: delegateParams,
     executionMode: "parallel",

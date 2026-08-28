@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SessionManager, type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { cleanContextCliArgs, withoutDelegateTool, type DelegateContext } from "./delegate-policy.ts";
-import { closeHerdrAgent, flushSessionFile, modelCliArgs, promptHerdrAgent, resolveCwd, startHerdrPiAgent, workerAgentName } from "./herdr-helpers.ts";
+import { closeHerdrAgent, flushSessionFile, getPreToolCallLeafId, modelCliArgs, promptHerdrAgent, resolveCwd, startHerdrPiAgent, workerAgentName } from "./herdr-helpers.ts";
 import {
   appendWorkerMoreInfo,
   createWorkerArtifacts,
@@ -131,20 +131,6 @@ function getLatestDelegateRuntime(ctx: ExtensionContext): DelegateRuntimeState |
   return undefined;
 }
 
-function getPreDelegateLeafId(ctx: ExtensionContext, toolCallId: string): string | null {
-  const branch = ctx.sessionManager.getBranch();
-  for (let index = branch.length - 1; index >= 0; index--) {
-    const entry = branch[index];
-    if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-    const hasThisCall = entry.message.content.some(
-      (item) => isRecord(item) && item.type === "toolCall" && item.id === toolCallId && item.name === DELEGATE_TOOL,
-    );
-    if (hasThisCall) return entry.parentId ?? null;
-  }
-
-  throw new Error("Could not identify this delegate tool call in the current session branch; refusing to fork an unmatched transcript.");
-}
-
 function inheritedTaskPrompt(task: string): string {
   return [
     "You are inside an inherited delegate frame. The parent delegated the task below from its current conversation.",
@@ -254,7 +240,7 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
       const childSessionFile = forked.getSessionFile();
       if (!childSessionFile) throw new Error("Could not create a persistent session for inherited delegate.");
 
-      const preDelegateLeafId = getPreDelegateLeafId(ctx, toolCallId);
+      const preDelegateLeafId = getPreToolCallLeafId(ctx.sessionManager, DELEGATE_TOOL, toolCallId);
       if (preDelegateLeafId === null) forked.resetLeaf();
       else forked.branch(preDelegateLeafId);
 

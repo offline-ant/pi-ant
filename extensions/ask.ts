@@ -14,6 +14,15 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
+import {
+	forkIntoHerdr,
+	type HerdrForkResult,
+} from "../herdr-tools/extensions/herdr-fork.ts";
+import {
+	getPreToolCallLeafId,
+	hasHerdrEnvironment,
+	modelCliArgs,
+} from "../herdr-tools/extensions/herdr-helpers.ts";
 
 declare module "@earendil-works/pi-tui" {
 	interface Keybindings {
@@ -22,6 +31,7 @@ declare module "@earendil-works/pi-tui" {
 }
 
 const OTHER_OPTION = "Other (type your own)";
+const FORK_OPTION = "Fork (discuss separately)";
 const DONE_OPTION = "Done selecting";
 const BACK_OPTION = "← Go back";
 const RECOMMENDED_SUFFIX = " (Recommended)";
@@ -101,7 +111,10 @@ type AskChoiceValue =
 	| { kind: "option"; label: string }
 	| { kind: "done" }
 	| { kind: "other" }
+	| { kind: "fork" }
 	| { kind: "back" };
+
+type AskForkLauncher = (prompt: string) => Promise<HerdrForkResult>;
 
 interface AskPickerChoice {
 	id: string;
@@ -198,6 +211,60 @@ function addChoice(
 
 function formatKeys(keys: string[]): string {
 	return keys.length > 0 ? keys.join("/") : "unbound";
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function forkDiscussionPrompt(
+	question: AskQuestion,
+	previous: QuestionResult | undefined,
+): string {
+	const lines = [
+		"First talk through the current situation and relevant context with me. Then help me think through this question before I answer it in the parent session. Explore the tradeoffs and ask clarifying questions as needed.",
+		"",
+		question.question,
+		"",
+		"Options:",
+		...question.options.map((option) =>
+			option.description
+				? `- ${option.label} — ${option.description}`
+				: `- ${option.label}`,
+		),
+	];
+	if (previous) lines.push("", `Current answer: ${answerPreview(previous)}`);
+	return lines.join("\n");
+}
+
+async function discussInFork(
+	question: AskQuestion,
+	previous: QuestionResult | undefined,
+	ctx: ExtensionContext,
+	launchFork: AskForkLauncher,
+	draft: string | undefined,
+): Promise<string | undefined> {
+	const input = await ctx.ui.editor(
+		"Discuss in a fork",
+		draft ?? forkDiscussionPrompt(question, previous),
+	);
+	if (input === undefined) return draft;
+	if (input.trim().length === 0) {
+		ctx.ui.notify("Enter a question for the fork.", "warning");
+		return input;
+	}
+
+	try {
+		const result = await launchFork(input);
+		ctx.ui.notify(
+			`Started ${result.name}. Return here to answer when ready.`,
+			"info",
+		);
+		return undefined;
+	} catch (error) {
+		ctx.ui.notify(`Fork failed: ${errorMessage(error)}`, "error");
+		return input;
+	}
 }
 
 class WrappedAskList implements Component {
@@ -399,6 +466,7 @@ async function askSingleChoice(
 	ctx: ExtensionContext,
 	previous: QuestionResult | undefined,
 	canGoBack: boolean,
+	launchFork: AskForkLauncher | undefined,
 ): Promise<QuestionAction> {
 	const currentLabels =
 		previous?.customInput === undefined
@@ -413,6 +481,7 @@ async function askSingleChoice(
 		previous?.customInput !== undefined
 			? `${OTHER_OPTION} — Current: ${answerPreview(previous)}`
 			: OTHER_OPTION;
+	let forkDraft: string | undefined;
 
 	while (true) {
 		const choices: AskPickerChoice[] = [];
@@ -433,6 +502,7 @@ async function askSingleChoice(
 				previous?.customInput ?? "",
 			);
 		}
+		if (launchFork) addChoice(choices, FORK_OPTION, { kind: "fork" });
 		if (canGoBack) addChoice(choices, BACK_OPTION, { kind: "back" });
 
 		const choice = await selectAskChoice(question.question, choices, ctx);
@@ -465,6 +535,17 @@ async function askSingleChoice(
 			case "keep":
 				if (previous)
 					return { action: "answered", result: cloneResult(previous) };
+				continue;
+			case "fork":
+				if (launchFork) {
+					forkDraft = await discussInFork(
+						question,
+						previous,
+						ctx,
+						launchFork,
+						forkDraft,
+					);
+				}
 				continue;
 			case "other": {
 				const customInput = await ctx.ui.editor(
@@ -504,6 +585,7 @@ async function askMultiChoice(
 	ctx: ExtensionContext,
 	previous: QuestionResult | undefined,
 	canGoBack: boolean,
+	launchFork: AskForkLauncher | undefined,
 ): Promise<QuestionAction> {
 	const displays = optionDisplays(question);
 	const allowOther = question.allowOther !== false;
@@ -512,6 +594,7 @@ async function askMultiChoice(
 		? `Keep current answer: ${answerPreview(previous)}`
 		: undefined;
 	let customInput = previous?.customInput;
+	let forkDraft: string | undefined;
 
 	while (true) {
 		const choices: AskPickerChoice[] = [];
@@ -531,6 +614,7 @@ async function askMultiChoice(
 		if (allowOther) {
 			addChoice(choices, OTHER_OPTION, { kind: "other" }, customInput ?? "");
 		}
+		if (launchFork) addChoice(choices, FORK_OPTION, { kind: "fork" });
 		if (canGoBack) addChoice(choices, BACK_OPTION, { kind: "back" });
 
 		const choice = await selectAskChoice(question.question, choices, ctx);
@@ -561,6 +645,23 @@ async function askMultiChoice(
 				continue;
 			case "done":
 				break;
+			case "fork":
+				if (launchFork) {
+					forkDraft = await discussInFork(
+						question,
+						{
+							id: question.id ?? "question",
+							question: question.question,
+							multi: true,
+							selectedOptions: Array.from(selected),
+							customInput,
+						},
+						ctx,
+						launchFork,
+						forkDraft,
+					);
+				}
+				continue;
 			case "other": {
 				const input = await ctx.ui.editor("Enter your response", customInput);
 				if (input === undefined) continue;
@@ -610,7 +711,7 @@ export default function askExtension(pi: ExtensionAPI) {
 		description:
 			"Ask the user interactive multiple-choice or free-form questions when a required preference, approval, or decision is missing. Returns answers keyed by question id; cancellation and non-interactive use are reported explicitly.",
 		parameters: AskParamsSchema,
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+		async execute(toolCallId, params, signal, _onUpdate, ctx) {
 			if (!ctx.hasUI) {
 				return {
 					content: [
@@ -635,6 +736,25 @@ export default function askExtension(pi: ExtensionAPI) {
 				};
 			}
 
+			const launchFork: AskForkLauncher | undefined =
+				ctx.mode === "tui" && hasHerdrEnvironment()
+					? async (prompt) => {
+							const branchFromId = getPreToolCallLeafId(
+								ctx.sessionManager,
+								"ask",
+								toolCallId,
+							);
+							return forkIntoHerdr(
+								pi,
+								{ prompt },
+								ctx.cwd,
+								ctx.sessionManager,
+								modelCliArgs(ctx.model, pi.getThinkingLevel()),
+								signal,
+								branchFromId,
+							);
+						}
+					: undefined;
 			const results: QuestionResult[] = [];
 			let index = 0;
 			while (index < params.questions.length) {
@@ -647,12 +767,14 @@ export default function askExtension(pi: ExtensionAPI) {
 							ctx,
 							results[index],
 							index > 0,
+							launchFork,
 						)
 					: await askSingleChoice(
 							normalizedQuestion,
 							ctx,
 							results[index],
 							index > 0,
+							launchFork,
 						);
 
 				if (action.action === "back") {

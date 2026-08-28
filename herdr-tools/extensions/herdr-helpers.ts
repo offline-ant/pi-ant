@@ -36,6 +36,29 @@ export interface StartedHerdrAgent {
   tabId?: string;
 }
 
+interface HerdrRect {
+  height: number;
+  width: number;
+}
+
+interface HerdrLayout {
+  area?: HerdrRect;
+  focused_pane_id?: string;
+  panes?: Array<{
+    focused?: boolean;
+    pane_id?: string;
+    rect?: HerdrRect;
+  }>;
+}
+
+interface HerdrAgentStartupState {
+  tail: Promise<void>;
+}
+
+type HerdrAgentPlacement = "new-tab" | "sibling-pane";
+
+const HERDR_AGENT_STARTUP_STATE = Symbol.for("pi-ant.herdr-agent-startup-state");
+
 const HERDR_AGENT_NAME_PATTERN = /^[a-z][a-z0-9_-]{0,31}$/;
 
 export function herdrBin(): string {
@@ -45,6 +68,10 @@ export function herdrBin(): string {
 export function modelCliArgs(model: { provider: string; id: string } | undefined, thinkingLevel: string): string[] {
   if (!model) throw new Error("Current session has no selected model; cannot start a child Pi process.");
   return ["--provider", model.provider, "--model", model.id, "--thinking", thinkingLevel];
+}
+
+export function hasHerdrEnvironment(): boolean {
+  return process.env.HERDR_ENV === "1" && Boolean(process.env.HERDR_SOCKET_PATH);
 }
 
 export function validateHerdrAgentName(name: string): string {
@@ -70,7 +97,7 @@ export function flushSessionFile(sessionManager: SessionManager, sessionFile: st
 }
 
 export function requireHerdrEnv(): void {
-  if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_SOCKET_PATH) {
+  if (!hasHerdrEnvironment()) {
     throw new Error("herdr-tools requires pi to run inside a Herdr pane (HERDR_ENV=1 and HERDR_SOCKET_PATH set).");
   }
 }
@@ -89,6 +116,29 @@ export function commandText(result: HerdrCommandResult): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+export function getPreToolCallLeafId(
+  sessionManager: Pick<SessionManager, "getBranch">,
+  toolName: string,
+  toolCallId: string,
+): string | null {
+  const branch = sessionManager.getBranch();
+  for (let index = branch.length - 1; index >= 0; index--) {
+    const entry = branch[index];
+    if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+    const hasToolCall = entry.message.content.some(
+      (item) => isRecord(item)
+        && item.type === "toolCall"
+        && item.id === toolCallId
+        && item.name === toolName,
+    );
+    if (hasToolCall) return entry.parentId ?? null;
+  }
+
+  throw new Error(
+    `Could not identify ${toolName} tool call ${toolCallId} in the current session branch; refusing to fork an unmatched transcript.`,
+  );
 }
 
 function parseJsonResponse(raw: string, command: string): unknown {
@@ -130,6 +180,11 @@ function responseTab(response: unknown): { tab_id?: string } | undefined {
 function responseRootPane(response: unknown): HerdrPaneInfo | undefined {
   const pane = responseResult(response)?.root_pane;
   return isRecord(pane) && typeof pane.pane_id === "string" ? pane as unknown as HerdrPaneInfo : undefined;
+}
+
+function responseLayout(response: unknown): HerdrLayout | undefined {
+  const layout = responseResult(response)?.layout;
+  return isRecord(layout) ? layout as HerdrLayout : undefined;
 }
 
 function parseHerdrErrorCode(raw: string): string | undefined {
@@ -249,11 +304,65 @@ export interface StartHerdrPiAgentOptions {
   env?: Record<string, string>;
 }
 
-let agentStartupTail = Promise.resolve();
+function herdrAgentStartupState(): HerdrAgentStartupState {
+  const globals = globalThis as typeof globalThis & Record<symbol, HerdrAgentStartupState | undefined>;
+  const current = globals[HERDR_AGENT_STARTUP_STATE];
+  if (current) return current;
+  const created = { tail: Promise.resolve() };
+  globals[HERDR_AGENT_STARTUP_STATE] = created;
+  return created;
+}
+
+async function createHerdrAgentPane(
+  pi: ExtensionAPI,
+  options: StartHerdrPiAgentOptions,
+  placement: HerdrAgentPlacement,
+  signal?: AbortSignal,
+): Promise<{ pane: HerdrPaneInfo; tabId?: string }> {
+  const env = { ...(options.env ?? {}) };
+  if (process.env.PI_NESTED) env.PI_NESTED = process.env.PI_NESTED;
+
+  if (placement === "new-tab") {
+    const args = ["tab", "create", "--cwd", options.cwd, "--label", options.name, "--no-focus"];
+    for (const [key, value] of Object.entries(env)) args.push("--env", `${key}=${value}`);
+
+    const response = await runHerdrJson(pi, args, signal);
+    const pane = responseRootPane(response);
+    if (!pane) {
+      throw new Error(`Could not find root pane in Herdr tab response: ${JSON.stringify(response)}`);
+    }
+    return { pane, tabId: responseTab(response)?.tab_id };
+  }
+
+  const layoutResponse = await runHerdrJson(pi, ["pane", "layout", "--current"], signal);
+  const layout = responseLayout(layoutResponse);
+  const currentPane = layout?.panes?.find(
+    (pane) => pane.pane_id === layout.focused_pane_id || pane.focused === true,
+  );
+  const area = currentPane?.rect ?? layout?.area;
+  if (!area) {
+    throw new Error(`Could not find current pane area in Herdr layout response: ${JSON.stringify(layoutResponse)}`);
+  }
+
+  const direction = area.width >= area.height * 2 ? "right" : "down";
+  const args = [
+    "pane", "split", "--current", "--direction", direction,
+    "--cwd", options.cwd, "--no-focus",
+  ];
+  for (const [key, value] of Object.entries(env)) args.push("--env", `${key}=${value}`);
+
+  const response = await runHerdrJson(pi, args, signal);
+  const pane = responsePane(response);
+  if (!pane) {
+    throw new Error(`Could not find pane in Herdr split response: ${JSON.stringify(response)}`);
+  }
+  return { pane, tabId: pane.tab_id ?? process.env.HERDR_TAB_ID };
+}
 
 async function startHerdrPiAgentUnlocked(
   pi: ExtensionAPI,
   options: StartHerdrPiAgentOptions,
+  placement: HerdrAgentPlacement,
   signal?: AbortSignal,
 ): Promise<StartedHerdrAgent> {
   const agentName = validateHerdrAgentName(options.name);
@@ -261,20 +370,7 @@ async function startHerdrPiAgentUnlocked(
     throw new Error(`session file does not exist: ${options.sessionFile}`);
   }
 
-  const env = { ...(options.env ?? {}) };
-  if (process.env.PI_NESTED) env.PI_NESTED = process.env.PI_NESTED;
-
-  const tabArgs = ["tab", "create", "--cwd", options.cwd, "--label", agentName, "--no-focus"];
-  for (const [key, value] of Object.entries(env)) {
-    tabArgs.push("--env", `${key}=${value}`);
-  }
-  const tabResponse = await runHerdrJson(pi, tabArgs, signal);
-  const pane = responseRootPane(tabResponse);
-  const tab = responseTab(tabResponse);
-  if (!pane) {
-    throw new Error(`Could not find root pane in Herdr tab response: ${JSON.stringify(tabResponse)}`);
-  }
-
+  const { pane, tabId } = await createHerdrAgentPane(pi, options, placement, signal);
   const startArgs = [
     "agent",
     "start",
@@ -298,11 +394,33 @@ async function startHerdrPiAgentUnlocked(
       agentName,
       paneId: agent.pane_id,
       terminalId: agent.terminal_id,
-      tabId: tab?.tab_id,
+      tabId,
     };
   } catch (error) {
     await closePane(pi, pane.pane_id).catch(() => undefined);
     throw error;
+  }
+}
+
+async function startHerdrPiAgentWithPlacement(
+  pi: ExtensionAPI,
+  options: StartHerdrPiAgentOptions,
+  placement: HerdrAgentPlacement,
+  signal?: AbortSignal,
+): Promise<StartedHerdrAgent> {
+  const startupState = herdrAgentStartupState();
+  const previousStartup = startupState.tail;
+  let releaseStartup!: () => void;
+  startupState.tail = new Promise<void>((resolve) => {
+    releaseStartup = resolve;
+  });
+
+  await previousStartup;
+  try {
+    signal?.throwIfAborted();
+    return await startHerdrPiAgentUnlocked(pi, options, placement, signal);
+  } finally {
+    releaseStartup();
   }
 }
 
@@ -311,19 +429,15 @@ export async function startHerdrPiAgent(
   options: StartHerdrPiAgentOptions,
   signal?: AbortSignal,
 ): Promise<StartedHerdrAgent> {
-  const previousStartup = agentStartupTail;
-  let releaseStartup!: () => void;
-  agentStartupTail = new Promise<void>((resolve) => {
-    releaseStartup = resolve;
-  });
+  return startHerdrPiAgentWithPlacement(pi, options, "new-tab", signal);
+}
 
-  await previousStartup;
-  try {
-    signal?.throwIfAborted();
-    return await startHerdrPiAgentUnlocked(pi, options, signal);
-  } finally {
-    releaseStartup();
-  }
+export async function startHerdrPiAgentInSiblingPane(
+  pi: ExtensionAPI,
+  options: StartHerdrPiAgentOptions,
+  signal?: AbortSignal,
+): Promise<StartedHerdrAgent> {
+  return startHerdrPiAgentWithPlacement(pi, options, "sibling-pane", signal);
 }
 
 export function resolveCwd(base: string, folder?: string): string {

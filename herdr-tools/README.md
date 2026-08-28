@@ -38,9 +38,11 @@ Command:
 
 ## Session fork
 
-`/herdr-fork <name> [folder] [-- <prompt>]` forks the current session into a new interactive Pi agent in a separate Herdr tab. Names follow Herdr's strict agent-name format (`^[a-z][a-z0-9_-]{0,31}$`). If `prompt` is omitted, the forked tab opens idle. Interactive forks can create further forks, subject to the global Pi nesting-depth limit.
+`/herdr-fork [name] [folder] [-- <prompt>]` forks the current session into a new interactive Pi agent in a sibling pane of the current Herdr tab. If `name` is omitted, the command uses the lowest available `fork-N` name. Explicit names follow Herdr's strict agent-name format (`^[a-z][a-z0-9_-]{0,31}$`). If `prompt` is omitted, the forked pane opens idle. Interactive forks can create further forks, subject to the global Pi nesting-depth limit.
 
-`herdr-fork` is intentionally a user command, not an LLM-callable tool. Use it when the user wants an interactive tab continuing from the current session. Use `delegate`, `coding-agent`, or `fresh-history` when the parent needs a structured worker result.
+Press `Ctrl+Alt+F` while the parent is idle to open an idle fork without changing or submitting the current editor draft. The interactive `ask` tool also includes `Fork (discuss separately)`: it forks immediately before the active `ask` tool call, starts the edited discussion prompt in a sibling pane, and leaves the parent question open with its selections unchanged.
+
+`herdr-fork` is intentionally a user command, not an LLM-callable tool. Use it when the user wants an interactive pane continuing from the current session. Use `delegate`, `coding-agent`, or `fresh-history` when the parent needs a structured worker result.
 
 ## Worker tools
 
@@ -51,7 +53,7 @@ Command:
 - `coding-agent` — run a task in a named persistent fresh-context Herdr worker in a separate tab.
 - `fresh-history` — run one task in an ephemeral fresh Herdr worker seeded with only recent user requests and direct assistant replies. Tool calls/results are omitted, and the prompt includes the parent Pi session file plus session history root for critical recovery.
 
-`context` is required on `delegate`. Every spawned Pi process explicitly inherits the parent's current provider, model, and thinking level. A delegate-only sibling batch executes concurrently and joins before the parent continues; child Pi startups are serialized so they cannot race provider authentication. A batch containing `coding-agent` or `fresh-history` remains sequential. `folder` may select another working directory for `project`/`clean`; inherited delegates accept only the parent's current directory. Inherited delegates fork before their own tool-call message, so sibling tool results are not present in the worker.
+`context` is required on `delegate`. Every spawned Pi process explicitly inherits the parent's current provider, model, and thinking level. Sibling `delegate` and `coding-agent` calls execute concurrently and join before the parent continues; concurrent `coding-agent` calls must use different worker names. Child Pi startups are serialized so they cannot race provider authentication. A batch containing `fresh-history` remains sequential. `folder` may select another working directory for `project`/`clean`; inherited delegates accept only the parent's current directory. Inherited delegates fork before their own tool-call message, so sibling tool results are not present in the worker.
 
 When the parent conversation is over 50% of its context window, the first inherited delegate on a conversation branch is not started. Its tool result recommends a self-contained `project` delegate instead. Retrying with `inherit` proceeds normally, and the warning is not repeated on that branch. The check is skipped when Pi cannot determine current context usage.
 

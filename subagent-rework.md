@@ -4,8 +4,8 @@ The orchestration layer requires Herdr 0.7.5 or newer and uses its named-agent C
 
 ## Public tools
 
-- `delegate`: runs one task in a temporary Herdr worker with required `context: "inherit" | "project" | "clean"`. Inherit forks before the tool call; project and clean create blank conversations. A delegate-only sibling batch executes concurrently and joins before the parent continues.
-- `coding-agent`: runs tasks serially in a named persistent fresh-context Herdr worker and keeps the worker available for follow-up tasks.
+- `delegate`: runs one task in a temporary Herdr worker with required `context: "inherit" | "project" | "clean"`. Inherit forks before the tool call; project and clean create blank conversations. Sibling delegate and coding-agent calls execute concurrently and join before the parent continues.
+- `coding-agent`: runs tasks in named persistent fresh-context Herdr workers and keeps each worker available for follow-up tasks. Sibling calls with different worker names may run concurrently; each named worker handles one task at a time.
 - `fresh-history`: runs one isolated task with a requested excerpt of recent user requests and direct assistant replies. Tool activity is omitted.
 
 `/herdr-fork` is a user command for opening an interactive forked session. It is not an LLM-callable tool.
@@ -67,7 +67,7 @@ A structured request starts with automatic result capture. Normal human input se
 - `delegate` with `context: "inherit"` inherits the current conversation and ordinary active parent tools, excluding unavailable control tools. Use it when the task depends on context established in the current conversation. Under the `bobs` profile it instead receives the deterministic Research tool profile. It retains `delegate` for bounded nested delegation.
 - `delegate` with `context: "project"` creates a blank conversation with normal project/global startup resources but no conversation history. Its task must include all relevant conversation-specific requirements, decisions, paths, findings, and constraints. `context: "clean"` also creates a blank conversation but disables discovered context files, skills, prompt templates, extensions, and custom system prompts, explicitly loading only the worker-frame extension required by the result protocol. Fresh delegates remove one-shot and persistent worker tools.
 - Above 50% parent context usage, the first inherited delegate on a conversation branch returns a model-visible recommendation to use `project` and does not start a worker. Retrying `inherit` proceeds without another warning. Unknown context usage does not trigger the check.
-- Every spawned Pi process explicitly receives the parent's current provider, model, and thinking level. There is no separate worker model state or model-selection fallback. Delegate-only sibling work may overlap, but child Pi startup is serialized to avoid provider-authentication races. A batch containing `coding-agent` or `fresh-history` remains sequential.
+- Every spawned Pi process explicitly receives the parent's current provider, model, and thinking level. There is no separate worker model state or model-selection fallback. Delegate and coding-agent sibling work may overlap, but child Pi startup is serialized to avoid provider-authentication races. A batch containing `fresh-history` remains sequential.
 - The root `/tools` selector controls branch-persistent ordinary-session tool exposure without changing structured-worker or Ugo tool ownership.
 
 ## Runtime state
