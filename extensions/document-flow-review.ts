@@ -3,24 +3,24 @@ import { defineTool, type ExtensionAPI, type ExtensionContext } from "@earendil-
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import {
-	runFreshPovReview,
-	type FreshPovRunResult,
-} from "./fresh-pov-runner.ts";
+	runDocumentFlowReview,
+	type DocumentFlowReviewRunResult,
+} from "./document-flow-review-runner.ts";
 
-const ENTRY_TYPE = "fresh-pov-review:result";
-const TOOL_NAME = "fresh_pov_review";
+const ENTRY_TYPE = "document-flow-review:result";
+const TOOL_NAME = "document_flow_review";
 
-const freshPovToolSchema = Type.Object({
+const documentFlowReviewToolSchema = Type.Object({
 	file: Type.String({
 		minLength: 1,
 		description: "Document path, resolved relative to the current working directory.",
 	}),
 	prompt: Type.Optional(Type.String({
-		description: "Optional reader profile, audience, or review focus. The isolated reader still receives no project context.",
+		description: "Optional reader profile, audience, or internal-coherence focus. Must not request factual or external validation.",
 	})),
 });
 
-type FreshPovToolParams = Static<typeof freshPovToolSchema>;
+type DocumentFlowReviewToolParams = Static<typeof documentFlowReviewToolSchema>;
 
 interface ParsedCommand {
 	documentPath: string;
@@ -35,7 +35,7 @@ interface ReviewMessageDetails {
 	unitCount: number;
 }
 
-interface FreshPovToolDetails {
+interface DocumentFlowReviewToolDetails {
 	status: "running" | "complete";
 	reportPath?: string;
 	metadataPath?: string;
@@ -92,7 +92,7 @@ function parseShellWords(input: string): string[] {
 function parseCommand(input: string): ParsedCommand {
 	const words = parseShellWords(input);
 	if (words.length === 0) {
-		throw new Error("Usage: /fresh-pov-review <document-path> [--profile <reader profile>]");
+		throw new Error("Usage: /document-flow-review <document-path> [--profile <reader profile>]");
 	}
 	const profileFlag = words.indexOf("--profile");
 	if (profileFlag === 0) throw new Error("Document path must come before --profile.");
@@ -129,7 +129,7 @@ function reviewMessageDetails(value: unknown): ReviewMessageDetails | undefined 
 	};
 }
 
-function formatParentResult(result: FreshPovRunResult): string {
+function formatParentResult(result: DocumentFlowReviewRunResult): string {
 	return [
 		result.report,
 		"",
@@ -139,35 +139,36 @@ function formatParentResult(result: FreshPovRunResult): string {
 	].join("\n");
 }
 
-export default function freshPovReviewExtension(pi: ExtensionAPI): void {
+export default function documentFlowReviewExtension(pi: ExtensionAPI): void {
 	pi.registerMessageRenderer(ENTRY_TYPE, (message, _options, theme) => {
 		const data = reviewMessageDetails(message.details);
-		if (!data) return new Text(theme.fg("error", "Fresh POV review result is malformed."), 0, 0);
+		if (!data) return new Text(theme.fg("error", "Document flow review result is malformed."), 0, 0);
 		const header = theme.fg(
 			"accent",
-			theme.bold(`Fresh POV review: ${path.basename(data.sourcePath)} (${data.unitCount} reading units)`),
+			theme.bold(`Document flow review: ${path.basename(data.sourcePath)} (${data.unitCount} reading units)`),
 		);
 		const paths = theme.fg("dim", `Report: ${data.reportPath}\nSession: ${data.sessionPath}`);
 		return new Text(`${header}\n${paths}\n\n${data.report}`, 0, 0);
 	});
 
-	pi.registerTool(defineTool<typeof freshPovToolSchema, FreshPovToolDetails>({
+	pi.registerTool(defineTool<typeof documentFlowReviewToolSchema, DocumentFlowReviewToolDetails>({
 			name: TOOL_NAME,
-			label: "Fresh POV Review",
-			description: "Run an isolated sequential fresh-point-of-view review of one document. Use only after the user explicitly asks for a fresh POV review. Returns the final review and artifact paths.",
-			promptSnippet: "Review one document sequentially through an isolated context-free reader",
+			label: "Document Flow Review",
+			description: "Read one document strictly in sequence without lookahead and review whether each part follows coherently and consistently from earlier parts. Use for internal logical flow, definitions, transitions, expectations, internal contradictions, and misplaced or late information. Do not use to verify factual truth, external validity, real-world correctness, or agreement with project context. Returns the final review and artifact paths.",
+			promptSnippet: "Review one document's internal coherence by reading it sequentially without lookahead",
 			promptGuidelines: [
-				"Use fresh_pov_review only when the user explicitly requests a fresh-point-of-view document review.",
+				"Use document_flow_review when the user asks whether a single document is internally coherent or logically sequenced.",
+				"Do not use it to validate factual claims, establish external correctness, or compare the document with a project or other sources.",
 			],
-			parameters: freshPovToolSchema,
-			async execute(_toolCallId, params: FreshPovToolParams, signal, onUpdate, ctx) {
-				const result = await runFreshPovReview(
+			parameters: documentFlowReviewToolSchema,
+			async execute(_toolCallId, params: DocumentFlowReviewToolParams, signal, onUpdate, ctx) {
+				const result = await runDocumentFlowReview(
 					pi,
 					ctx,
 					{ file: params.file, prompt: params.prompt },
 					(text) => onUpdate?.({
 						content: [{ type: "text", text }],
-						details: { status: "running" } satisfies FreshPovToolDetails,
+						details: { status: "running" } satisfies DocumentFlowReviewToolDetails,
 					}),
 					signal,
 				);
@@ -180,30 +181,29 @@ export default function freshPovReviewExtension(pi: ExtensionAPI): void {
 						sessionPath: result.sessionPath,
 						sourcePath: result.sourcePath,
 						unitCount: result.unitCount,
-					} satisfies FreshPovToolDetails,
+					} satisfies DocumentFlowReviewToolDetails,
 				};
 			},
 			renderCall(args, theme) {
 				return new Text(
-					theme.fg("toolTitle", theme.bold("fresh_pov_review ")) + theme.fg("accent", args.file),
+					theme.fg("toolTitle", theme.bold("document_flow_review ")) + theme.fg("accent", args.file),
 					0,
 					0,
 				);
 			},
 		}));
 
-
-	pi.registerCommand("fresh-pov-review", {
-		description: "Review a document sequentially in an isolated no-context agent: /fresh-pov-review <path> [--profile <text>]",
+	pi.registerCommand("document-flow-review", {
+		description: "Review one document's internal coherence sequentially without lookahead: /document-flow-review <path> [--profile <text>]",
 		handler: async (args, ctx) => {
 			await ctx.waitForIdle();
 			try {
 				const parsed = parseCommand(args);
-				const result = await runFreshPovReview(
+				const result = await runDocumentFlowReview(
 					pi,
 					ctx,
 					{ file: parsed.documentPath, readerProfile: parsed.profile },
-					(text) => ctx.ui.setWidget("fresh-pov-review", text.split("\n")),
+					(text) => ctx.ui.setWidget("document-flow-review", text.split("\n")),
 				);
 				const details = {
 					report: result.report,
@@ -215,16 +215,16 @@ export default function freshPovReviewExtension(pi: ExtensionAPI): void {
 				const relativeSourcePath = path.relative(ctx.cwd, result.sourcePath) || path.basename(result.sourcePath);
 				pi.sendMessage({
 					customType: ENTRY_TYPE,
-					content: `An isolated fresh-point-of-view reader reviewed ${relativeSourcePath}.\n\n${formatParentResult(result)}`,
+					content: `An isolated sequential reader reviewed the internal coherence of ${relativeSourcePath}.\n\n${formatParentResult(result)}`,
 					display: true,
 					details,
 				});
-				ctx.ui.notify(`Fresh POV review saved to ${result.reportPath} and inserted into the current session`, "info");
+				ctx.ui.notify(`Document flow review saved to ${result.reportPath} and inserted into the current session`, "info");
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				ctx.ui.notify(`Fresh POV review failed: ${message}`, "error");
+				ctx.ui.notify(`Document flow review failed: ${message}`, "error");
 			} finally {
-				ctx.ui.setWidget("fresh-pov-review", undefined);
+				ctx.ui.setWidget("document-flow-review", undefined);
 			}
 		},
 	});

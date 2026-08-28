@@ -13,7 +13,7 @@ import {
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
-import { segmentReadingUnits, type ReadingUnit } from "./fresh-pov-segmentation.ts";
+import { segmentReadingUnits, type ReadingUnit } from "./document-flow-review-segmentation.ts";
 
 const READING_TOOL_NAME = "next_reading_unit";
 const DEFAULT_READER_PROFILE =
@@ -69,13 +69,13 @@ interface ProgressState {
 	writingFinal: boolean;
 }
 
-export interface FreshPovRunInput {
+export interface DocumentFlowReviewRunInput {
 	file: string;
 	readerProfile?: string;
 	prompt?: string;
 }
 
-export interface FreshPovRunResult {
+export interface DocumentFlowReviewRunResult {
 	report: string;
 	reportPath: string;
 	metadataPath: string;
@@ -85,7 +85,7 @@ export interface FreshPovRunResult {
 	friction: FrictionRecord[];
 }
 
-export type FreshPovProgressCallback = (text: string) => void;
+export type DocumentFlowReviewProgressCallback = (text: string) => void;
 
 function artifactSlug(filePath: string): string {
 	const base = path.basename(filePath, path.extname(filePath)).toLowerCase();
@@ -96,7 +96,10 @@ function makeSystemPrompt(readerProfile: string, prompt: string | undefined): st
 	const additionalPrompt = prompt?.trim()
 		? `\n\nAdditional review instructions from the caller:\n${prompt.trim()}`
 		: "";
-	return `You are performing a fresh-point-of-view review of a document.
+	return `You are performing a sequential coherence review of one document.
+
+Purpose:
+Evaluate the document's internal consistency and reader-facing logical progression. Determine whether each newly revealed unit follows coherently from the material that preceded it. This is not a validity review: do not judge factual truth, external evidence, real-world correctness, feasibility, or agreement with project context. A claim may be valid or invalid externally without affecting this review. Report it only when the document itself contradicts it, fails to provide context it depends on, or creates a problem in the document's sequence.
 
 Reader profile:
 ${readerProfile}${additionalPrompt}
@@ -108,14 +111,14 @@ Reading protocol:
 - Begin with afterUnit 0 and an empty friction array.
 - The tool reveals one human-sized reading unit at a time. Never speculate about unrevealed content.
 - Before requesting the next unit, submit zero to three terse friction points about the preceding unit.
-- Record only meaningful confusion, unanswered questions, surprising or apparently contradictory claims, required but unexplained terms, likely wrong turns, or information that feels misplaced or late.
+- Record only meaningful confusion, unanswered questions, internally contradictory claims, required but unexplained terms, likely wrong turns, broken transitions, or information that feels misplaced or late.
 - Do not summarize ordinary understanding. Use an empty friction array when nothing noteworthy occurred.
 - Earlier friction is a historical observation. Do not rewrite it using information learned later.
 - During reading, respond only by calling ${READING_TOOL_NAME} exactly once. Do not add explanatory prose.
 - Continue until the tool returns EOF. Do not stop early.
 
 After EOF, do not call the tool again. Write the final review with these sections:
-1. Overall ingress assessment
+1. Overall sequential coherence assessment
 2. Ordered friction points, each with unit number, a short quotation, the interpretation at that moment, why it caused uncertainty, and whether later material resolved it
 3. Unresolved questions
 4. Incorrect expectations created and later corrected
@@ -123,7 +126,7 @@ After EOF, do not call the tool again. Write the final review with these section
 6. What worked well
 7. Prioritized revisions
 
-Later clarification does not erase earlier friction. Distinguish initial friction that was eventually resolved from problems that remain unresolved.`;
+Later clarification does not erase earlier friction. Distinguish initial friction that was eventually resolved from problems that remain unresolved. Keep every conclusion within the document; do not turn the final review into external fact-checking or validation.`;
 }
 
 function estimateContextTokens(document: string, units: ReadingUnit[]): number {
@@ -155,10 +158,10 @@ function recentLiveLines(text: string): string[] {
 }
 
 function formatProgress(state: ProgressState, unitCount: number): string {
-	if (!state.unit) return "Fresh POV · starting isolated reader";
+	if (!state.unit) return "Document flow review · starting isolated reader";
 	const action = state.phase === "processed" ? "processed" : "reading";
 	const lines = [
-		`Fresh POV · ${action} unit ${state.unit.number}/${unitCount} · lines ${state.unit.startLine}–${state.unit.endLine}`,
+		`Document flow review · ${action} unit ${state.unit.number}/${unitCount} · lines ${state.unit.startLine}–${state.unit.endLine}`,
 		"",
 		state.unit.text,
 	];
@@ -178,13 +181,13 @@ function formatProgress(state: ProgressState, unitCount: number): string {
 	return lines.join("\n");
 }
 
-export async function runFreshPovReview(
+export async function runDocumentFlowReview(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
-	input: FreshPovRunInput,
-	onProgress?: FreshPovProgressCallback,
+	input: DocumentFlowReviewRunInput,
+	onProgress?: DocumentFlowReviewProgressCallback,
 	signal?: AbortSignal,
-): Promise<FreshPovRunResult> {
+): Promise<DocumentFlowReviewRunResult> {
 	const sourcePath = path.resolve(ctx.cwd, input.file.replace(/^@/, ""));
 	const document = await readFile(sourcePath, "utf8");
 	if (!document.trim()) throw new Error("Document is empty.");
@@ -208,7 +211,7 @@ export async function runFreshPovReview(
 	const artifactDir = path.join(
 		ctx.cwd,
 		"scratch",
-		"fresh-pov",
+		"document-flow-review",
 		`${timestamp}-${artifactSlug(sourcePath)}-${hash.slice(0, 10)}`,
 	);
 	await mkdir(artifactDir, { recursive: true });
@@ -315,7 +318,7 @@ export async function runFreshPovReview(
 		sessionManager,
 		settingsManager,
 	});
-	session.setSessionName(`Fresh POV: ${path.basename(sourcePath)}`);
+	session.setSessionName(`Document flow review: ${path.basename(sourcePath)}`);
 
 	let finalReview: string | undefined;
 	const unsubscribe = session.subscribe((event) => {
@@ -349,7 +352,7 @@ export async function runFreshPovReview(
 	};
 	signal?.addEventListener("abort", abortNested, { once: true });
 	try {
-		if (signal?.aborted) throw new Error("Fresh POV review cancelled.");
+		if (signal?.aborted) throw new Error("Document flow review cancelled.");
 		await session.prompt(`Begin the reading protocol now. Call ${READING_TOOL_NAME} with afterUnit 0 and an empty friction array.`);
 		for (let attempt = 0; !protocol.finished && attempt < MAX_CONTINUATION_ATTEMPTS; attempt++) {
 			await session.prompt("Continue the reading protocol. Do not stop before EOF.");
@@ -365,7 +368,7 @@ export async function runFreshPovReview(
 		if (!finalReview) throw new Error("Review agent reached EOF but did not produce a final review.");
 
 		const sessionPath = session.sessionFile;
-		if (!sessionPath) throw new Error("Fresh POV session was not persisted.");
+		if (!sessionPath) throw new Error("Document flow review session was not persisted.");
 		const reportPath = path.join(artifactDir, "review.md");
 		const metadataPath = path.join(artifactDir, "metadata.json");
 		await writeFile(reportPath, `${finalReview.trim()}\n`, "utf8");

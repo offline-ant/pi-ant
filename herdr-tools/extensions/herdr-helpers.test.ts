@@ -3,10 +3,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   closeHerdrAgent,
   getAgent,
+  getPreToolCallLeafId,
   modelCliArgs,
   paneWaitOutputArgs,
   promptHerdrAgent,
@@ -63,6 +64,36 @@ async function withHerdrEnv(run: () => Promise<void>): Promise<void> {
     else process.env.PI_NESTED = previousNested;
   }
 }
+
+test("tool-call forks branch immediately before the matching assistant entry", () => {
+  const sessionManager = {
+    getBranch: () => [
+      {
+        type: "message",
+        id: "user-1",
+        parentId: null,
+        timestamp: "2026-01-01T00:00:00.000Z",
+        message: { role: "user", content: "Choose", timestamp: 1 },
+      },
+      {
+        type: "message",
+        id: "assistant-1",
+        parentId: "user-1",
+        timestamp: "2026-01-01T00:00:01.000Z",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "ask-1", name: "ask", arguments: {} }],
+        },
+      },
+    ],
+  } as unknown as Pick<SessionManager, "getBranch">;
+
+  assert.equal(getPreToolCallLeafId(sessionManager, "ask", "ask-1"), "user-1");
+  assert.throws(
+    () => getPreToolCallLeafId(sessionManager, "delegate", "ask-1"),
+    /refusing to fork an unmatched transcript/,
+  );
+});
 
 test("child Pi arguments pin the parent model and thinking level", () => {
   assert.deepEqual(

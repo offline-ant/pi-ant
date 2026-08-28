@@ -41,7 +41,7 @@
       "./extensions/audio.ts",
       "./extensions/mail.ts",
       "./extensions/prompt-history.ts",
-      "./extensions/fresh-pov-review.ts",
+      "./extensions/document-flow-review.ts",
       "./extensions/vim.ts",
       "./extensions/agents-d.ts",
       "./extensions/tools.ts"
