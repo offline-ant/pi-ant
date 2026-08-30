@@ -27,9 +27,9 @@ Each delegate should make the in-scope code/docs changes, run relevant checks, a
 
 Verify each returned result before continuing. Finish with the parent-facing outcome: required changed files, checks, evidence, caveats, blockers, and next actions. Omit introductions, repetition, and optional background first. Stop only when feasible scope is complete or a real decision/external blocker is documented.`;
 
-export const SUPERVISE_SNIPPET = `Use coding-agent named 'main' to execute the plan in serial phases. A new worker knows only its loaded project instructions, so provide the task, current state, relevant files, extra constraints, and handoff facts without repeating project guidance.
+export const SUPERVISE_SNIPPET = `Use delegate with context='project' to execute the plan in serial phases. A new worker knows only its loaded project instructions, so provide the task, current state, relevant files, extra constraints, and handoff facts without repeating project guidance.
 
-Wait for each result before sending follow-up work. Verify progress and correct quick fixes or wrong architecture. Before 89% context use, require a handoff.md preserving decisions, changed files, checks, blockers, and next actions, then continue with a new named worker. Do not mention supervision unless it affects the task.
+Wait for each result before sending follow-up work. Verify progress and correct quick fixes or wrong architecture. Before 89% context use, require a handoff.md preserving decisions, changed files, checks, blockers, and next actions, then continue with a new delegate. Do not mention supervision unless it affects the task.
 
 Stop when feasible scope and relevant validation/docs are complete or a material decision/external blocker is documented. Commit only if explicitly requested.`;
 
@@ -103,7 +103,7 @@ export const SNIPPETS: PromptSnippet[] = [
   {
     key: "supervise",
     value: SUPERVISE_SNIPPET,
-    description: "Insert coding-agent supervisor instructions",
+    description: "Insert delegate supervisor instructions",
   },
   {
     key: "api-review",
