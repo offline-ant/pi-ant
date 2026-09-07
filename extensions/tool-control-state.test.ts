@@ -7,6 +7,7 @@ import {
   parseToolControlState,
   profileIsModified,
   toolControlStatesEqual,
+  toggleTool,
 } from "./tool-control-state.ts";
 
 test("profile state is exact and detects manual changes", () => {
@@ -36,6 +37,21 @@ test("Bob's profile has deterministic delegated research tools", () => {
   const event = eventForState(state, ["delegate", "coding-agent", "ask", "fresh-history", "read", "bash", "web_search"]);
   assert.deepEqual(event.enabledTools, ["delegate", "coding-agent", "ask", "fresh-history"]);
   assert.deepEqual(event.delegatedTools, ["read", "bash", "ask", "delegate", "web_search"]);
+});
+
+test("orchestration profile contains only neutral panel names", () => {
+  const state = createProfileState("orchestration");
+  assert.deepEqual(state.enabledTools.filter((name) => name.startsWith("panel-")), ["panel-start", "panel-read", "panel-send", "panel-close"]);
+  assert.equal(state.enabledTools.some((name) => /herdr|tmux/.test(name)), false);
+});
+
+test("tool toggling preserves the profile and leaves the original selection untouched", () => {
+  const original = createProfileState("coding");
+  const added = toggleTool(original, "browser");
+  assert.equal(added.profile, original.profile);
+  assert.equal(original.enabledTools.includes("browser"), false);
+  assert.equal(added.enabledTools.includes("browser"), true);
+  assert.deepEqual(toggleTool(added, "browser").enabledTools, original.enabledTools);
 });
 
 test("stored state parsing rejects malformed values and removes duplicates", () => {

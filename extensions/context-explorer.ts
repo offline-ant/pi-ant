@@ -24,11 +24,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // ── Constants ─────────────────────────────────────────────────────
 
-const SESSIONS_DIR = path.resolve(
-  process.env.HOME || "/home/claude",
-  ".pi/agent/sessions",
-);
-
 const FIXED_PORT = 41789;
 
 const IGNORE_DIRS = new Set([

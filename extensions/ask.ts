@@ -15,14 +15,13 @@ import {
 } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import {
-	forkIntoHerdr,
-	type HerdrForkResult,
-} from "../herdr-tools/extensions/herdr-fork.ts";
+	forkHere,
+	type ForkResult,
+} from "../orchestration/extensions/fork-here.ts";
 import {
 	getPreToolCallLeafId,
-	hasHerdrEnvironment,
 	modelCliArgs,
-} from "../herdr-tools/extensions/herdr-helpers.ts";
+} from "../orchestration/context.ts";
 
 declare module "@earendil-works/pi-tui" {
 	interface Keybindings {
@@ -114,7 +113,7 @@ type AskChoiceValue =
 	| { kind: "fork" }
 	| { kind: "back" };
 
-type AskForkLauncher = (prompt: string) => Promise<HerdrForkResult>;
+type AskForkLauncher = (prompt: string) => Promise<ForkResult>;
 
 interface AskPickerChoice {
 	id: string;
@@ -373,6 +372,18 @@ async function selectAskChoice(
 	ctx: ExtensionContext,
 ): Promise<AskPickerResult> {
 	if (ctx.signal?.aborted) return { action: "cancel" };
+	if (ctx.mode !== "tui") {
+		const actions = choices.flatMap((choice) => [
+			{ label: `${choice.id.slice(7)}. ${choice.display}`, result: { action: "selected", choice } as AskPickerResult },
+			...(choice.editPrefill === undefined ? [] : [{
+				label: `${choice.id.slice(7)}. Edit: ${choice.display}`,
+				result: { action: "edit", choice } as AskPickerResult,
+			}]),
+		]);
+		const selected = await ctx.ui.select(title, actions.map((action) => action.label), { signal: ctx.signal });
+		if (ctx.signal?.aborted) return { action: "cancel" };
+		return actions.find((action) => action.label === selected)?.result ?? { action: "cancel" };
+	}
 
 	const result = await ctx.ui.custom<AskPickerResult>(
 		(tui, theme, keybindings, done) => {
@@ -466,7 +477,7 @@ async function askSingleChoice(
 	ctx: ExtensionContext,
 	previous: QuestionResult | undefined,
 	canGoBack: boolean,
-	launchFork: AskForkLauncher | undefined,
+	launchFork: AskForkLauncher,
 ): Promise<QuestionAction> {
 	const currentLabels =
 		previous?.customInput === undefined
@@ -502,7 +513,7 @@ async function askSingleChoice(
 				previous?.customInput ?? "",
 			);
 		}
-		if (launchFork) addChoice(choices, FORK_OPTION, { kind: "fork" });
+		addChoice(choices, FORK_OPTION, { kind: "fork" });
 		if (canGoBack) addChoice(choices, BACK_OPTION, { kind: "back" });
 
 		const choice = await selectAskChoice(question.question, choices, ctx);
@@ -537,15 +548,7 @@ async function askSingleChoice(
 					return { action: "answered", result: cloneResult(previous) };
 				continue;
 			case "fork":
-				if (launchFork) {
-					forkDraft = await discussInFork(
-						question,
-						previous,
-						ctx,
-						launchFork,
-						forkDraft,
-					);
-				}
+				forkDraft = await discussInFork(question, previous, ctx, launchFork, forkDraft);
 				continue;
 			case "other": {
 				const customInput = await ctx.ui.editor(
@@ -585,7 +588,7 @@ async function askMultiChoice(
 	ctx: ExtensionContext,
 	previous: QuestionResult | undefined,
 	canGoBack: boolean,
-	launchFork: AskForkLauncher | undefined,
+	launchFork: AskForkLauncher,
 ): Promise<QuestionAction> {
 	const displays = optionDisplays(question);
 	const allowOther = question.allowOther !== false;
@@ -614,7 +617,7 @@ async function askMultiChoice(
 		if (allowOther) {
 			addChoice(choices, OTHER_OPTION, { kind: "other" }, customInput ?? "");
 		}
-		if (launchFork) addChoice(choices, FORK_OPTION, { kind: "fork" });
+		addChoice(choices, FORK_OPTION, { kind: "fork" });
 		if (canGoBack) addChoice(choices, BACK_OPTION, { kind: "back" });
 
 		const choice = await selectAskChoice(question.question, choices, ctx);
@@ -646,21 +649,19 @@ async function askMultiChoice(
 			case "done":
 				break;
 			case "fork":
-				if (launchFork) {
-					forkDraft = await discussInFork(
-						question,
-						{
-							id: question.id ?? "question",
-							question: question.question,
-							multi: true,
-							selectedOptions: Array.from(selected),
-							customInput,
-						},
-						ctx,
-						launchFork,
-						forkDraft,
-					);
-				}
+				forkDraft = await discussInFork(
+					question,
+					{
+						id: question.id ?? "question",
+						question: question.question,
+						multi: true,
+						selectedOptions: Array.from(selected),
+						customInput,
+					},
+					ctx,
+					launchFork,
+					forkDraft,
+				);
 				continue;
 			case "other": {
 				const input = await ctx.ui.editor("Enter your response", customInput);
@@ -736,89 +737,47 @@ export default function askExtension(pi: ExtensionAPI) {
 				};
 			}
 
-			pi.events.emit("herdr:blocked", {
-				active: true,
-				label: "Ask: waiting for user",
-			});
-			try {
-				const launchFork: AskForkLauncher | undefined =
-					ctx.mode === "tui" && hasHerdrEnvironment()
-						? async (prompt) => {
-								const branchFromId = getPreToolCallLeafId(
-									ctx.sessionManager,
-									"ask",
-									toolCallId,
-								);
-								return forkIntoHerdr(
-									pi,
-									{ prompt },
-									ctx.cwd,
-									ctx.sessionManager,
-									modelCliArgs(ctx.model, pi.getThinkingLevel()),
-									signal,
-									branchFromId,
-								);
-							}
-						: undefined;
-				const results: QuestionResult[] = [];
-				let index = 0;
-				while (index < params.questions.length) {
-					const question = params.questions[index];
-					const id = question.id ?? `question_${index + 1}`;
-					const normalizedQuestion: AskQuestion = { ...question, id };
-					const action = normalizedQuestion.multi
-						? await askMultiChoice(
-								normalizedQuestion,
-								ctx,
-								results[index],
-								index > 0,
-								launchFork,
-							)
-						: await askSingleChoice(
-								normalizedQuestion,
-								ctx,
-								results[index],
-								index > 0,
-								launchFork,
-							);
+			const launchFork: AskForkLauncher = async (prompt) => {
+				const branchFromId = getPreToolCallLeafId(ctx.sessionManager, "ask", toolCallId);
+				return forkHere(
+					pi,
+					{ prompt },
+					ctx.cwd,
+					ctx.sessionManager,
+					modelCliArgs(ctx.model, pi.getThinkingLevel()),
+					signal,
+					branchFromId,
+				);
+			};
+			const results: QuestionResult[] = [];
+			let index = 0;
+			while (index < params.questions.length) {
+				const question = params.questions[index];
+				const id = question.id ?? `question_${index + 1}`;
+				const normalizedQuestion: AskQuestion = { ...question, id };
+				const action = normalizedQuestion.multi
+					? await askMultiChoice(normalizedQuestion, ctx, results[index], index > 0, launchFork)
+					: await askSingleChoice(normalizedQuestion, ctx, results[index], index > 0, launchFork);
 
-					if (action.action === "back") {
-						index = Math.max(0, index - 1);
-						continue;
-					}
-
-					if (action.action === "cancel") {
-						return {
-							content: [
-								{ type: "text" as const, text: "User cancelled the ask dialog." },
-							],
-							details: {
-								results: results.slice(0, index),
-								cancelled: true,
-							} satisfies AskDetails,
-						};
-					}
-
-					results[index] = finalizedResult(action.result, normalizedQuestion);
-					index++;
+				if (action.action === "back") {
+					index = Math.max(0, index - 1);
+					continue;
 				}
-
-				const completedResults = results.slice(0, params.questions.length);
-				return {
-					content: [
-						{
-							type: "text" as const,
-							text: `User answers:\n${completedResults.map(formatResult).join("\n")}`,
-						},
-					],
-					details: {
-						results: completedResults,
-						cancelled: false,
-					} satisfies AskDetails,
-				};
-			} finally {
-				pi.events.emit("herdr:blocked", { active: false });
+				if (action.action === "cancel") {
+					return {
+						content: [{ type: "text" as const, text: "User cancelled the ask dialog." }],
+						details: { results: results.slice(0, index), cancelled: true } satisfies AskDetails,
+					};
+				}
+				results[index] = finalizedResult(action.result, normalizedQuestion);
+				index++;
 			}
+
+			const completedResults = results.slice(0, params.questions.length);
+			return {
+				content: [{ type: "text" as const, text: `User answers:\n${completedResults.map(formatResult).join("\n")}` }],
+				details: { results: completedResults, cancelled: false } satisfies AskDetails,
+			};
 		},
 	});
 }

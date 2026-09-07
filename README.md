@@ -1,16 +1,21 @@
 # pi-ant
 
-Personal set of tiny pi extensions for misc development tools. Orchestration
-lives in sibling subprojects loaded as separate pi packages: `tmux-tools/` for
-legacy tmux-backed workflows and `herdr-tools/` for Herdr-backed workflows.
-Herdr exposes interactive session forking as the user command `/herdr-fork`;
-structured worker orchestration remains LLM-callable tools.
+Personal Pi extensions for development tools. Unified orchestration lives in
+[`orchestration/`](orchestration/README.md), loaded alongside this root package.
+One worker protocol supports tmux, Herdr, and Emacs/Pilish with EAT terminals.
+`/fork-here` opens independent interactive conversations; `delegate`,
+`coding-agent`, `fresh-history`, and neutral `panel-*` tools provide orchestration.
+The replaced backend packages and legacy semaphore/Claude bridge tools are removed.
+Emacs startup must load `orchestration/emacs/pi-orchestration.el` in Pilish's
+`use-package :config` before the first Pi spawn. The companion owns host/server
+identity and `C-M-f`; the separate Pilish checkout contains only generic session
+APIs, RPC input/settlement, and editor dialogs. See the linked orchestration README.
 
 ## Agent tools
 
 These are the pi tools registered by this package:
 
-- `ask` — ask the user interactive multiple-choice or free-form questions. In interactive Herdr sessions, each question also offers `Fork (discuss separately)`: edit a discussion prompt, launch an inherited sibling pane, then return to the unchanged question and answer it.
+- `ask` — ask the user interactive multiple-choice or free-form questions. In TUI and RPC sessions, each question also offers `Fork (discuss separately)`: edit a discussion prompt, launch an inherited session on the selected host, then return to the unchanged question and answer it.
 - `browser` — control persistent Chromium/Firefox sessions through `bin/browser-io`, including navigation, awaited JavaScript eval, and before/after screenshots under `/tmp/browser-io`.
 - `document_flow_review` — read one document strictly in sequence without lookahead and assess its internal coherence, including logical flow, definitions, transitions, expectations, internal contradictions, and misplaced or late information. It does not verify factual truth or external validity. The tool is inactive by default and can be exposed through `/tools`.
 - `send_mail` — review, confirm, and send plain-text mail through an externally configured implicit-TLS SMTP account. Sender and recipients cannot be selected by the model.
@@ -73,7 +78,7 @@ mailbox.
 - Git commit command: `/git-commit [message]` runs `git add -A && git commit -m <message>`, defaulting to `auto`.
 - Git worktree creation command: `/worktree <name>`.
 - Execution safety toggle: `/exec-lints`.
-- Tool configuration: `/tools` opens a branch-persistent interactive selector. The Tools tab enables or disables individual ordinary tools immediately; Tab opens Profiles for the saved `Default`, `coding`, `research`, `orchestration`, `full`, and `bobs`. Ctrl+S saves the exact current ordinary tool selection to `~/.pi/agent/tool-selection.json` as the global default for new sessions. `research` is the built-in fallback until a default is saved. The deterministic `bobs` profile restricts the root to delegation tools, gives structured workers the delegated Research tool set, and injects root orchestration instructions. `delegate` requires `context: "inherit" | "project" | "clean"`; the modes respectively fork the current conversation, start a blank conversation with project/global resources, or start a blank conversation without discovered resources. Independent sibling `delegate` and `coding-agent` calls execute concurrently and join before the parent continues. Structured workers receive the caller's active tools that are available in the child, plus `delegate`; `bobs` supplies its delegated Research set instead. A worker that tries to start another worker as its first tool call receives a one-time warning before retries are allowed. Ugo keeps its own tool control; required dynamic tools such as `sqlite` and `present_guidance` remain active when applicable.
+- Tool configuration: `/tools` opens a branch-persistent selector in TUI or standard RPC dialogs. The Tools tab enables or disables individual ordinary tools immediately; Tab opens Profiles for the saved `Default`, `coding`, `research`, `orchestration`, `full`, and `bobs`. Ctrl+S saves the exact current ordinary tool selection to `~/.pi/agent/tool-selection.json` as the global default for new sessions. `research` is the built-in fallback until a default is saved. The deterministic `bobs` profile restricts the root to delegation tools, gives structured workers the delegated Research tool set, and injects root orchestration instructions. `delegate` requires `context: "inherit" | "project" | "clean"`; the modes respectively fork the current conversation, start a blank conversation with project/global resources, or start a blank conversation without discovered resources. Independent sibling `delegate` and `coding-agent` calls execute concurrently and join before the parent continues. Structured workers receive the caller's active tools that are available in the child, plus `delegate`; `bobs` supplies its delegated Research set instead. A worker that tries to start another worker as its first tool call receives a one-time warning before retries are allowed. Ugo keeps its own tool control; required dynamic tools such as `sqlite` and `present_guidance` remain active when applicable.
 - Workboard command/context: `/new-workboard` creates `workboard.md`; when `workboard.md` exists in the current working directory, it is autoloaded into agent context as active operational state. `/new-workflow` creates editable `workflow.md` guidance policy; `/ugo` and guidance mode also create it when missing. Cold ideas/backlog items belong in project files outside `workboard.md` until promoted to `needs-enrichment` or `ready`.
 - AGENTS.d auto-loading: when a `./AGENTS.d/` directory exists in the workspace, its top-level files and file-target symlinks are automatically loaded and injected into the system prompt before every agent start. Subdirectories are listed in a tree structure (at the end of the injected block) but their contents are not loaded. Symlinks show their resolved real path. Dangling symlinks appear in the tree listing but are excluded from content loading.
 - Guidance mode: `PI_GUIDANCE=true pi -p "inspect workboard.md and present_guidance"` loads editable `workflow.md` guidance policy and requires a structured `present_guidance` result. `bin/pi-guidance-loop` repeatedly runs guidance, executes `CONTINUE_WORK` prompts, applies `UPDATE_WORK` workboard updates, and stops on `REQUIRE_HUMAN_DECISION` or `EMPTY_WORKBOARD`.

@@ -1,6 +1,7 @@
 # Shared orchestration across tmux, Herdr, and Emacs
 
-Status: design proposal; no implementation or active settings changes.
+Status: implemented and locally activated. See `orchestration/README.md` for the
+public interface, runtime requirements, recovery, and reproducible checks.
 
 ## Decision
 
@@ -12,18 +13,15 @@ This supersedes the initial Emacs-only proposal. Supporting all three hosts is
 now an explicit requirement, not a speculative backend abstraction. There is
 no reason to build a separate Emacs-owned worker scheduler.
 
-## Evidence in the current code
+## Implementation boundary
 
-The tmux and Herdr `extensions/coding-agent.ts` implementations share nearly
-the same persistent registry, exclusive name claim, session creation, worker
-request construction, result waiting, and result formatting.
+`orchestration/workers.ts` owns the common registry, exclusive name claims,
+waiting, cancellation, and progress. `context.ts` prepares sessions and history;
+`worker-frame.ts` owns the child result/retrospective and supervision lifecycle.
+The former Herdr settled-retry behavior was the extraction baseline. The
+duplicated backend packages have been deleted, not wrapped.
 
-Their `worker-frame.ts` implementations also duplicate result/status artifacts,
-result ID validation, progress reporting, and the result/retrospective lifecycle.
-Herdr's current version has newer supervision and settled-retry behavior; use
-that behavior as the common baseline, not a merger of both generations.
-
-The actual host-specific work is:
+The host-specific work is:
 
 - Start a shell command or Pi session with a cwd and environment.
 - Submit input to the correct running target.
@@ -129,7 +127,7 @@ text, key names, or an RPC command is not.
 | --- | --- | --- | --- |
 | Start Pi | Pi TUI in a managed pane | Named Herdr Pi agent | Named Pilish RPC session |
 | Start shell | Managed shell pane | Managed shell panel | Native process/terminal buffer |
-| Submit Pi prompt | Terminal submission | Named-agent prompt | Pilish RPC prompt |
+| Submit Pi prompt | Shared private terminal-input socket | Shared private terminal-input socket | Pilish RPC prompt |
 | Read preview | Pane capture | Pane read | Chat/process buffer text |
 | Liveness | Managed process/pane status | Agent/pane status | Emacs process status |
 | Close | Close managed pane | Close managed agent/pane | Stop process and close owned buffers |
@@ -211,8 +209,9 @@ Buffer creation must not steal focus; window layout remains the user's choice.
 
 ### Required input/completion correction
 
-Installed Pilish queues busy input locally, then uses a 50 ms timer after
-`agent_end` to drain it. A worker can finish before seeing a human intervention.
+The previous Pilish input implementation queued busy input locally, then used
+a 50 ms timer after `agent_end` to drain it. A worker could finish before seeing
+a human intervention. That local queue and timer have been removed.
 
 Submit ordinary busy human input through RPC `prompt` with
 `streamingBehavior: "followUp"` or `"steer"`. That invokes Pi's `input` hook
@@ -226,27 +225,22 @@ the draft rather than pretending to accept work. Extension commands such as
 worker continue/submit must dispatch immediately even while the worker is busy.
 Merely editing an unsent draft is not supervision.
 
-Terminal prompt submission must likewise preserve human drafts: typed text
-must not silently append to an existing draft or be interpreted as key names.
-This behavior belongs in the host's prompt-submission contract, not in a
-shared parser for Pi's screen layout. Validate it explicitly in the tmux spike;
-if terminal injection cannot satisfy it, change the common worker request
-submission mechanism rather than reintroduce screen scraping.
+Terminal prompt submission preserves human drafts. Native tmux submission and
+Herdr 0.8.2 `agent prompt` were both observed appending to existing drafts.
+Consequently both terminal adapters explicitly load one shared internal input
+extension and dispatch machine prompts over a private Unix socket through Pi's
+extension API. This is input delivery only, not another worker protocol or a
+screen-layout parser. Native host tests validate unchanged drafts.
 
 ### UI and terminal scope
 
-`ask` currently uses TUI-only `ctx.ui.custom`; `/tools` explicitly rejects RPC.
-Those interfaces need Emacs-native presentation or supported standard RPC
-dialogs. Keep their policy/data shared and their presentation separate from
-the host process API. Pilish also currently cancels unsupported multiline
-`editor` requests; implement that standard RPC dialog where existing tools need it.
+`ask` and `/tools` now share their policy across TUI presentation and standard
+RPC dialogs. Pilish implements standard multiline `editor` requests in separate
+buffers, preserving prompt drafts. Presentation remains separate from host
+process operations.
 
-For shell panels, choose the required semantics before implementing the Emacs
-side. Comint suffices for servers, builds, watchers, and line-oriented REPLs;
-fullscreen/curses programs and arbitrary terminal keys require a real terminal
-such as EAT. Both EAT and vterm are installed, but supporting multiple Emacs
-terminal engines is not justified. Do not silently claim full terminal parity
-for a comint implementation.
+The approved shell backend is EAT only, supporting terminal keys and fullscreen
+applications. There is no comint or vterm fallback or terminal-engine selector.
 
 ## Selection, scope, and cleanup
 
@@ -265,13 +259,13 @@ Call tmux's machine-oriented CLI directly from its adapter. Do not wrap the
 with semaphore orchestration, old-format output parsing, prompt detection,
 Claude-specific bridging, and global cleanup side effects.
 
-After migration approval, replace the duplicated packages and update the
-active settings, root tool-control metadata, lints, fork imports, and docs.
-Keep three native adapters, not three extension packages or old-name aliases.
-Intentional legacy features outside the selected common tool set are a scope
-decision, not something to silently resurrect or remove during extraction.
+The approved cutover replaces both backend packages with `orchestration/` and
+updates active settings, root tool-control metadata, lints, fork imports, and
+docs. Legacy tmux semaphore tools/commands, standalone stale cleanup, and the
+Claude-agent bridge were explicitly approved for deletion and are removed.
+There are three native adapters, not three packages or old-name aliases.
 
-## Implementation order
+## Implementation sequence
 
 1. Extract the current shared worker semantics and narrow host contract from
    Herdr; prove Herdr still behaves the same.
@@ -290,21 +284,24 @@ decision, not something to silently resurrect or remove during extraction.
 Use fake Pi/provider fixtures for lifecycle tests, then a small real interactive
 smoke test on each host. Do not use paid model calls for retry/failure tests.
 
-## Local investigation facts
+## Verification and local facts
 
-- Pilish 3.0.1, commit `043dd368f0f58de8a183398bbd24468361a657d5`, installed at
-  `/home/claude/.local/share/pilish`; matched upstream `master` when inspected.
-- Emacs 30.2 server: `/home/claude/.emacs.d/server/pilish`. Bare `emacsclient`
-  selected another user's inaccessible runtime socket; the explicit path works.
-- Two disposable named Pilish sessions in `/tmp/` returned distinct Pi process
-  and session IDs through successful `get_state` calls. Closed afterward;
-  original session left running. No model prompt was submitted.
-- Pi CLI and reference checkout now both report 0.85.1. The reference was
-  fast-forwarded from 0.85.0 per the workspace version-match requirement.
-- No unified adapter, worker lifecycle, or shell implementation has been tested
-  yet. Existing uncommitted source changes were left untouched.
+- Pi CLI/reference: 0.85.1. The reference checkout was not edited.
+- Pilish 3.0.1 checkout: `/home/claude/.local/share/pilish`, now contains the
+  required named-session, input/queue, native shortcut, and editor APIs.
+- Emacs 30.2 and EAT 0.9.4 were exercised using disposable servers. The previously
+  supplied `/home/claude/.emacs.d/server/pilish` socket was absent during final
+  implementation checks; no existing session was restarted or reconfigured.
+- Focused fake-backed tests cover registry claims, cancellation, context/tool
+  inheritance, mismatch rejection, retry/compaction settlement, supervision,
+  immutable main results, and TUI/RPC ask discussion forks.
+- Real Pi with its in-process faux provider passed worker lifecycle and public
+  idle/prompted `/fork-here` tests on tmux, Herdr 0.8.2, and Emacs. These include
+  actual retry and overflow-compaction recovery, persistent model/tool changes,
+  draft preservation, and explicit native placement. Shell smoke tests exercise
+  literal input, control keys, process exit, and output capture.
+- `npm run check` checks all active TypeScript using installed Pi declarations.
+  Focused commands and native test requirements are in `orchestration/README.md`.
 
-Main references: both packages' `coding-agent.ts` and `worker-frame.ts`, Herdr's
-`delegate-runner.ts` and `herdr-helpers.ts`, tmux's `tmux.ts` and `bin/pi-tmux`,
-Pilish's `pilish.el`, `pilish-core.el`, `pilish-input.el`, relevant queue/event
-handlers in `pilish-render.el`, and Pi 0.85.1 `docs/rpc.md` plus `AgentSession`.
+Implementation references: `orchestration/`, Pilish's session/input/render/dialog
+modules and fake RPC fixture, plus Pi 0.85.1 `docs/rpc.md` and `AgentSession`.

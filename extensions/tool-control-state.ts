@@ -5,9 +5,10 @@ const CORE_TOOLS = ["read", "bash", "edit", "write", "grep"] as const;
 const WORKER_TOOLS = ["ask", "delegate"] as const;
 const WEB_TOOLS = ["browser", "web_search", "web_fetch"] as const;
 const ORCHESTRATION_TOOLS = [
-  "herdr-bash",
-  "herdr-capture",
-  "herdr-send",
+  "panel-start",
+  "panel-read",
+  "panel-send",
+  "panel-close",
   "coding-agent",
   "fresh-history",
 ] as const;
@@ -27,7 +28,7 @@ export const TOOL_PROFILES = {
   },
   orchestration: {
     label: "Orchestration",
-    description: "Coding, delegated workers, and Herdr orchestration tools",
+    description: "Coding, delegated workers, and host-native panel tools",
     tools: [...CORE_TOOLS, ...WORKER_TOOLS, ...ORCHESTRATION_TOOLS],
   },
   full: {
@@ -79,6 +80,13 @@ export function createProfileState(profile: ToolProfileName, updatedAt = new Dat
     enabledTools: [...TOOL_PROFILES[profile].tools],
     updatedAt,
   };
+}
+
+export function toggleTool(state: ToolControlState, name: string): ToolControlState {
+  const enabled = new Set(state.enabledTools);
+  if (enabled.has(name)) enabled.delete(name);
+  else enabled.add(name);
+  return { ...state, enabledTools: [...enabled], updatedAt: new Date().toISOString() };
 }
 
 export function parseToolControlState(value: unknown): ToolControlState | undefined {
