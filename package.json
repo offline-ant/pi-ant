@@ -9,6 +9,9 @@
     "personal"
   ],
   "license": "MIT",
+  "scripts": {
+    "check": "node scripts/check.mjs"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",

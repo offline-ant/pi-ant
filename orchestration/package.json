@@ -1,0 +1,24 @@
+{
+  "name": "pi-orchestration",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Shared Pi workers and panels for tmux, Herdr, and Emacs/Pilish",
+  "keywords": ["pi-package", "pi-extension", "workers"],
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./worker-frame.ts",
+      "./extensions/panels.ts",
+      "./extensions/fork-here.ts",
+      "./extensions/delegate.ts",
+      "./extensions/coding-agent.ts",
+      "./extensions/fresh-history.ts"
+    ]
+  }
+}

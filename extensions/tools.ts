@@ -28,17 +28,17 @@ import {
   TOOL_CONTROL_STATE_TYPE,
   TOOL_PROFILES,
   toolControlStatesEqual,
+  toggleTool,
   type ToolControlState,
   type ToolProfileName,
 } from "./tool-control-state.ts";
 
-const REQUIRED_DYNAMIC_TOOLS = ["present_guidance", "sqlite"] as const;
 const SAVED_DEFAULT_PATH = path.join(getAgentDir(), "tool-selection.json");
 const STRUCTURED_WORKER_TYPES = new Set([
-  "pi-herdr:delegate-runtime",
-  "pi-herdr:delegate",
-  "pi-herdr:coding-agent",
-  "pi-herdr:fresh-history",
+  "pi-orchestration:delegate-runtime",
+  "pi-orchestration:delegate",
+  "pi-orchestration:coding-agent",
+  "pi-orchestration:fresh-history",
 ]);
 const BOBS_INSTRUCTIONS =
   "Root orchestration mode: delegate repository or environment work rather than doing it here. Use delegate with context='inherit' when the task depends on context established in the current conversation, context='project' for a self-contained task in a blank conversation with project guidance, and context='clean' for independent fresh-eyes work. A project task must include all relevant conversation-specific requirements, decisions, paths, findings, and constraints. Use coding-agent for persistent fresh context, fresh-history for a recent excerpt, and ask for required decisions. Answer directly only when no inspection or tool work is needed. Inherited delegates receive the deterministic Research tool profile.";
@@ -91,9 +91,10 @@ function latestState(ctx: ExtensionContext, savedDefault: ToolControlState): Too
 
 function specializedOwner(ctx: ExtensionContext): string | undefined {
   const entries = customEntries(ctx);
-  if (entries.some((entry) => STRUCTURED_WORKER_TYPES.has(entry.customType ?? ""))) return "structured worker";
   for (let index = entries.length - 1; index >= 0; index--) {
     const entry = entries[index];
+    if (entry.customType === "pi-orchestration:fork") return undefined;
+    if (STRUCTURED_WORKER_TYPES.has(entry.customType ?? "")) return "structured worker";
     if (entry.customType !== "pi-ant:ugo-state" || !isRecord(entry.data)) continue;
     if (entry.data.active === true) return "Ugo";
     break;
@@ -195,14 +196,7 @@ class ToolControlComponent implements Component, Focusable {
 
     const tool = this.filteredTools()[this.selectedTool];
     if (!tool || this.required.has(tool.name)) return;
-    const enabled = new Set(this.state.enabledTools);
-    if (enabled.has(tool.name)) enabled.delete(tool.name);
-    else enabled.add(tool.name);
-    this.state = {
-      ...this.state,
-      enabledTools: [...enabled],
-      updatedAt: new Date().toISOString(),
-    };
+    this.state = toggleTool(this.state, tool.name);
     this.onStateChange(this.state);
   }
 
@@ -330,6 +324,56 @@ class ToolControlComponent implements Component, Focusable {
   }
 }
 
+interface ToolDialogOptions {
+  state: ToolControlState;
+  savedDefault: ToolControlState;
+  tools: ToolInfo[];
+  required: Set<string>;
+  onStateChange: (state: ToolControlState) => void;
+  onSaveDefault: (state: ToolControlState) => boolean;
+}
+
+/** Standard RPC dialogs share the TUI's profile, toggle, and persistence policy. */
+export async function showToolDialogs(ctx: ExtensionContext, options: ToolDialogOptions): Promise<void> {
+  let state = options.state;
+  let savedDefault = options.savedDefault;
+  while (!ctx.signal?.aborted) {
+    const action = await ctx.ui.select(`Tools: ${state.profile}${profileIsModified(state) ? " modified" : ""}`, [
+      "Toggle tools", "Apply profile", "Save as default", "Done",
+    ], { signal: ctx.signal });
+    if (!action || action === "Done") return;
+    if (action === "Save as default") {
+      if (options.onSaveDefault(state)) savedDefault = { ...state, enabledTools: [...state.enabledTools] };
+      continue;
+    }
+    if (action === "Apply profile") {
+      const profiles = Object.entries(TOOL_PROFILES) as Array<[ToolProfileName, (typeof TOOL_PROFILES)[ToolProfileName]]>;
+      const selected = await ctx.ui.select("Apply profile", ["Default", ...profiles.map(([, profile]) => `${profile.label} — ${profile.description}`)], { signal: ctx.signal });
+      const profile = profiles.find(([, value]) => `${value.label} — ${value.description}` === selected);
+      if (selected === "Default") state = { ...savedDefault, enabledTools: [...savedDefault.enabledTools], updatedAt: new Date().toISOString() };
+      else if (profile) state = createProfileState(profile[0]);
+      else continue;
+      options.onStateChange(state);
+      continue;
+    }
+    while (!ctx.signal?.aborted) {
+      const choices = options.tools.map((tool) => ({
+        tool,
+        label: `${options.required.has(tool.name) ? "[required]" : state.enabledTools.includes(tool.name) ? "[x]" : "[ ]"} ${tool.name} — ${tool.description}`,
+      }));
+      const selected = await ctx.ui.select("Toggle tools", [...choices.map((choice) => choice.label), "Done"], { signal: ctx.signal });
+      const choice = choices.find((item) => item.label === selected);
+      if (!choice) break;
+      if (options.required.has(choice.tool.name)) {
+        ctx.ui.notify(toolDescription(choice.tool, true), "info");
+        continue;
+      }
+      state = toggleTool(state, choice.tool.name);
+      options.onStateChange(state);
+    }
+  }
+}
+
 export default function toolsExtension(pi: ExtensionAPI): void {
   let savedDefault = loadSavedDefault();
   let currentState = { ...savedDefault, enabledTools: [...savedDefault.enabledTools] };
@@ -367,8 +411,8 @@ export default function toolsExtension(pi: ExtensionAPI): void {
     description: "Interactively enable tools or apply a tool profile",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
-      if (ctx.mode !== "tui") {
-        ctx.ui.notify("/tools requires TUI mode", "error");
+      if (!ctx.hasUI) {
+        ctx.ui.notify("/tools requires interactive mode", "error");
         return;
       }
       const owner = specializedOwner(ctx);
@@ -381,13 +425,11 @@ export default function toolsExtension(pi: ExtensionAPI): void {
       currentState = latestState(ctx, savedDefault);
       const tools = pi.getAllTools().sort((left, right) => left.name.localeCompare(right.name));
       const required = requiredTools(pi, ctx);
-      await ctx.ui.custom<void>((tui, theme, keybindings, done) => new ToolControlComponent({
+      const options: ToolDialogOptions = {
         state: currentState,
         savedDefault,
         tools,
         required,
-        theme,
-        keybindings,
         onStateChange: (state) => {
           currentState = state;
           persistAndApply(ctx, state);
@@ -403,6 +445,15 @@ export default function toolsExtension(pi: ExtensionAPI): void {
             return false;
           }
         },
+      };
+      if (ctx.mode !== "tui") {
+        await showToolDialogs(ctx, options);
+        return;
+      }
+      await ctx.ui.custom<void>((tui, theme, keybindings, done) => new ToolControlComponent({
+        ...options,
+        theme,
+        keybindings,
         requestRender: () => tui.requestRender(),
         onClose: () => done(undefined),
       }));
