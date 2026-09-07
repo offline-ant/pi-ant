@@ -53,7 +53,7 @@ Press `Ctrl+Alt+F` while the parent is idle to open an idle fork without changin
 - `coding-agent` — run a task in a named persistent fresh-context Herdr worker in a separate tab.
 - `fresh-history` — run one task in an ephemeral fresh Herdr worker seeded with only recent user requests and direct assistant replies. Tool calls/results are omitted, and the prompt includes the parent Pi session file plus session history root for critical recovery.
 
-`context` is required on `delegate`. Every spawned Pi process explicitly inherits the parent's current provider, model, and thinking level. Sibling `delegate` and `coding-agent` calls execute concurrently and join before the parent continues; concurrent `coding-agent` calls must use different worker names. Child Pi startups are serialized so they cannot race provider authentication. A batch containing `fresh-history` remains sequential. `folder` may select another working directory for `project`/`clean`; inherited delegates accept only the parent's current directory. Inherited delegates fork before their own tool-call message, so sibling tool results are not present in the worker.
+`context` is required on `delegate`. Every spawned Pi process explicitly inherits the parent's current provider, model, thinking level, and active tools that are available in the child; `delegate` is also enabled when available. The `bobs` profile supplies its deterministic delegated Research tool set instead. If a worker's first tool call starts another worker, that call returns a one-time automated warning to investigate or split the task before forwarding it; retrying or making another tool call allows subsequent worker calls. Sibling `delegate` and `coding-agent` calls execute concurrently and join before the parent continues; concurrent `coding-agent` calls must use different worker names. Child Pi startups are serialized so they cannot race provider authentication. A batch containing `fresh-history` remains sequential. `folder` may select another working directory for `project`/`clean`; inherited delegates accept only the parent's current directory. Inherited delegates fork before their own tool-call message, so sibling tool results are not present in the worker.
 
 When the parent conversation is over 50% of its context window, the first inherited delegate on a conversation branch is not started. Its tool result recommends a self-contained `project` delegate instead. Retrying with `inherit` proceeds normally, and the warning is not repeated on that branch. The check is skipped when Pi cannot determine current context usage.
 
@@ -69,7 +69,7 @@ Commands:
 - `/worker-submit [message]` — submit the latest supervised reply or explicit text, preserving the normal retrospective protocol.
 - `/finish-worker-now "message"` — recovery command that immediately returns explicit text and bypasses retrospective.
 
-Root orchestration behavior is the `bobs` profile in the main package's `/tools` selector. It restricts root tools to delegation and gives inherited `delegate` workers the deterministic Research tool profile.
+Root orchestration behavior is the `bobs` profile in the main package's `/tools` selector. It restricts root tools to delegation and gives structured workers the deterministic delegated Research tool set.
 
 ## Runtime state
 

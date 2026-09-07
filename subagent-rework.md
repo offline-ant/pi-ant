@@ -29,6 +29,7 @@ A request is complete only when the matching `result.json` exists. Named-agent s
 interface WorkerRequestFile {
   id: string;
   task: string;
+  tools: string[];
   resultPath: string;
   closeWhenDone: boolean;
   statusPath?: string;
@@ -64,11 +65,12 @@ A structured request starts with automatic result capture. Normal human input se
 
 ## Context and tools
 
-- `delegate` with `context: "inherit"` inherits the current conversation and ordinary active parent tools, excluding unavailable control tools. Use it when the task depends on context established in the current conversation. Under the `bobs` profile it instead receives the deterministic Research tool profile. It retains `delegate` for bounded nested delegation.
-- `delegate` with `context: "project"` creates a blank conversation with normal project/global startup resources but no conversation history. Its task must include all relevant conversation-specific requirements, decisions, paths, findings, and constraints. `context: "clean"` also creates a blank conversation but disables discovered context files, skills, prompt templates, extensions, and custom system prompts, explicitly loading only the worker-frame extension required by the result protocol. Fresh delegates remove one-shot and persistent worker tools.
+- Every structured worker receives the caller's active tools that are available in the child, plus `delegate`. Under the `bobs` profile it instead receives the deterministic delegated Research tool set plus `delegate`. A worker whose first tool call is `delegate`, `coding-agent`, or `fresh-history` receives a one-time automated warning to investigate or split the task before forwarding it; retrying or making any other tool call clears the warning.
+- `delegate` with `context: "inherit"` inherits the current conversation. Use it when the task depends on context established in the current conversation.
+- `delegate` with `context: "project"` creates a blank conversation with normal project/global startup resources but no conversation history. Its task must include all relevant conversation-specific requirements, decisions, paths, findings, and constraints. `context: "clean"` also creates a blank conversation but disables discovered context files, skills, prompt templates, extensions, and custom system prompts, explicitly loading only the worker-frame extension required by the result protocol. Tool names unavailable in the clean child are ignored.
 - Above 50% parent context usage, the first inherited delegate on a conversation branch returns a model-visible recommendation to use `project` and does not start a worker. Retrying `inherit` proceeds without another warning. Unknown context usage does not trigger the check.
 - Every spawned Pi process explicitly receives the parent's current provider, model, and thinking level. There is no separate worker model state or model-selection fallback. Delegate and coding-agent sibling work may overlap, but child Pi startup is serialized to avoid provider-authentication races. A batch containing `fresh-history` remains sequential.
-- The root `/tools` selector controls branch-persistent ordinary-session tool exposure without changing structured-worker or Ugo tool ownership.
+- The root `/tools` selector controls branch-persistent ordinary-session tools and supplies the tool set inherited by structured workers. `bobs` supplies its delegated Research set instead. Ugo retains its own tool ownership.
 
 ## Runtime state
 

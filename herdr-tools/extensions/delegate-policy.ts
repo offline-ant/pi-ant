@@ -36,7 +36,3 @@ export function cleanContextCliArgs(context: Exclude<DelegateContext, "inherit">
     workerFrameExtensionPath,
   ];
 }
-
-export function withoutDelegateTool(tools: string[]): string[] {
-  return tools.filter((tool) => tool !== "delegate");
-}

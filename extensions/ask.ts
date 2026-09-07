@@ -736,81 +736,89 @@ export default function askExtension(pi: ExtensionAPI) {
 				};
 			}
 
-			const launchFork: AskForkLauncher | undefined =
-				ctx.mode === "tui" && hasHerdrEnvironment()
-					? async (prompt) => {
-							const branchFromId = getPreToolCallLeafId(
-								ctx.sessionManager,
-								"ask",
-								toolCallId,
+			pi.events.emit("herdr:blocked", {
+				active: true,
+				label: "Ask: waiting for user",
+			});
+			try {
+				const launchFork: AskForkLauncher | undefined =
+					ctx.mode === "tui" && hasHerdrEnvironment()
+						? async (prompt) => {
+								const branchFromId = getPreToolCallLeafId(
+									ctx.sessionManager,
+									"ask",
+									toolCallId,
+								);
+								return forkIntoHerdr(
+									pi,
+									{ prompt },
+									ctx.cwd,
+									ctx.sessionManager,
+									modelCliArgs(ctx.model, pi.getThinkingLevel()),
+									signal,
+									branchFromId,
+								);
+							}
+						: undefined;
+				const results: QuestionResult[] = [];
+				let index = 0;
+				while (index < params.questions.length) {
+					const question = params.questions[index];
+					const id = question.id ?? `question_${index + 1}`;
+					const normalizedQuestion: AskQuestion = { ...question, id };
+					const action = normalizedQuestion.multi
+						? await askMultiChoice(
+								normalizedQuestion,
+								ctx,
+								results[index],
+								index > 0,
+								launchFork,
+							)
+						: await askSingleChoice(
+								normalizedQuestion,
+								ctx,
+								results[index],
+								index > 0,
+								launchFork,
 							);
-							return forkIntoHerdr(
-								pi,
-								{ prompt },
-								ctx.cwd,
-								ctx.sessionManager,
-								modelCliArgs(ctx.model, pi.getThinkingLevel()),
-								signal,
-								branchFromId,
-							);
-						}
-					: undefined;
-			const results: QuestionResult[] = [];
-			let index = 0;
-			while (index < params.questions.length) {
-				const question = params.questions[index];
-				const id = question.id ?? `question_${index + 1}`;
-				const normalizedQuestion: AskQuestion = { ...question, id };
-				const action = normalizedQuestion.multi
-					? await askMultiChoice(
-							normalizedQuestion,
-							ctx,
-							results[index],
-							index > 0,
-							launchFork,
-						)
-					: await askSingleChoice(
-							normalizedQuestion,
-							ctx,
-							results[index],
-							index > 0,
-							launchFork,
-						);
 
-				if (action.action === "back") {
-					index = Math.max(0, index - 1);
-					continue;
+					if (action.action === "back") {
+						index = Math.max(0, index - 1);
+						continue;
+					}
+
+					if (action.action === "cancel") {
+						return {
+							content: [
+								{ type: "text" as const, text: "User cancelled the ask dialog." },
+							],
+							details: {
+								results: results.slice(0, index),
+								cancelled: true,
+							} satisfies AskDetails,
+						};
+					}
+
+					results[index] = finalizedResult(action.result, normalizedQuestion);
+					index++;
 				}
 
-				if (action.action === "cancel") {
-					return {
-						content: [
-							{ type: "text" as const, text: "User cancelled the ask dialog." },
-						],
-						details: {
-							results: results.slice(0, index),
-							cancelled: true,
-						} satisfies AskDetails,
-					};
-				}
-
-				results[index] = finalizedResult(action.result, normalizedQuestion);
-				index++;
+				const completedResults = results.slice(0, params.questions.length);
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: `User answers:\n${completedResults.map(formatResult).join("\n")}`,
+						},
+					],
+					details: {
+						results: completedResults,
+						cancelled: false,
+					} satisfies AskDetails,
+				};
+			} finally {
+				pi.events.emit("herdr:blocked", { active: false });
 			}
-
-			const completedResults = results.slice(0, params.questions.length);
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `User answers:\n${completedResults.map(formatResult).join("\n")}`,
-					},
-				],
-				details: {
-					results: completedResults,
-					cancelled: false,
-				} satisfies AskDetails,
-			};
 		},
 	});
 }
