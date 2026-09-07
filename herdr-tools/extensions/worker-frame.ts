@@ -14,6 +14,9 @@ const RESULT_POLL_INTERVAL_MS = 250;
 const PROGRESS_UPDATE_INTERVAL_MS = 5000;
 const AGENT_STATE_POLL_INTERVAL_MS = 1000;
 const AGENT_MISSING_GRACE_MS = 5000;
+const SUBWORKER_TOOLS = new Set(["delegate", "coding-agent", "fresh-history"]);
+const FIRST_ACTION_SUBWORKER_WARNING =
+  "This is an automated warning heuristic. You are in a worker frame. Do not simply forward the entire task; investigate it and/or split it into a distinct subtask. Continue working, and retry the worker call if this warning was triggered in error.";
 
 const MAIN_RESULT_PROMPT_PREFIX =
   "Complete the worker task and return only the parent-facing result or blocker.";
@@ -30,6 +33,7 @@ const SUPERVISION_CONTEXT =
 export interface WorkerRequestFile {
   id: string;
   task: string;
+  tools: string[];
   resultPath: string;
   closeWhenDone: boolean;
   statusPath?: string;
@@ -75,7 +79,8 @@ interface PendingWorkerFailure {
 
 interface ActiveWorkerRequest {
   request: WorkerRequestFile;
-  priorTools: string[];
+  workerTools: string[];
+  hasTakenToolAction: boolean;
   phase: WorkerPhase;
   capture: WorkerCapture;
   candidate?: string;
@@ -105,22 +110,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function isFreshWorkerSession(ctx: ExtensionContext): boolean {
-  return ctx.sessionManager.getBranch().some((entry) => {
-    return isRecord(entry)
-      && entry.type === "custom"
-      && (entry.customType === "pi-herdr:delegate" || entry.customType === "pi-herdr:coding-agent" || entry.customType === "pi-herdr:fresh-history");
-  });
-}
-
-function stripSubagentTools(tools: string[]): string[] {
-  return tools.filter((tool) => tool !== "delegate" && tool !== "coding-agent" && tool !== "fresh-history");
-}
-
 function isWorkerRequestFile(value: unknown): value is WorkerRequestFile {
   return isRecord(value)
     && typeof value.id === "string"
     && typeof value.task === "string"
+    && Array.isArray(value.tools)
+    && value.tools.every((tool) => typeof tool === "string")
     && typeof value.resultPath === "string"
     && typeof value.closeWhenDone === "boolean"
     && (value.statusPath === undefined || typeof value.statusPath === "string");
@@ -466,10 +461,9 @@ function writeFinalResult(
 export default function workerFrameExtension(pi: ExtensionAPI): void {
   let activeRequest: ActiveWorkerRequest | undefined;
 
-  function refreshFreshWorkerTools(ctx: ExtensionContext): void {
-    if (isFreshWorkerSession(ctx)) {
-      pi.setActiveTools(stripSubagentTools(pi.getActiveTools()));
-    }
+  function availableWorkerTools(requestedTools: string[]): string[] {
+    const available = new Set(pi.getAllTools().map((tool) => tool.name));
+    return [...new Set(requestedTools)].filter((tool) => available.has(tool));
   }
 
   function refreshWorkerUi(ctx: ExtensionContext): void {
@@ -517,7 +511,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     const wasSupervised = request.capture === "supervised";
     request.capture = "supervised";
     if (reason !== undefined || !wasSupervised) request.supervisionReason = reason;
-    if (request.phase === "retrospective") pi.setActiveTools(request.priorTools);
+    if (request.phase === "retrospective") pi.setActiveTools(request.workerTools);
     writeActiveWorkerStatus(ctx, request);
     refreshWorkerUi(ctx);
     if (!wasSupervised || reason !== undefined) {
@@ -576,18 +570,16 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     writeFinalResult(ctx, request, result, isError, retrospective);
     const shouldClose = request.request.closeWhenDone;
     activeRequest = undefined;
-    pi.setActiveTools(request.priorTools);
+    pi.setActiveTools(request.workerTools);
     refreshWorkerUi(ctx);
     if (shouldClose) ctx.shutdown();
   }
 
   pi.on("session_start", async (_event, ctx) => {
-    refreshFreshWorkerTools(ctx);
     refreshWorkerUi(ctx);
   });
 
   pi.on("session_tree", async (_event, ctx) => {
-    refreshFreshWorkerTools(ctx);
     refreshWorkerUi(ctx);
   });
 
@@ -596,6 +588,18 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
       beginHumanInput(ctx, activeRequest);
     }
     return { action: "continue" };
+  });
+
+  pi.on("tool_call", async (event) => {
+    const request = activeRequest;
+    if (!request || request.phase !== "result") return undefined;
+
+    const isFirstToolAction = !request.hasTakenToolAction;
+    request.hasTakenToolAction = true;
+    if (isFirstToolAction && SUBWORKER_TOOLS.has(event.toolName)) {
+      return { block: true, reason: FIRST_ACTION_SUBWORKER_WARNING };
+    }
+    return undefined;
   });
 
   pi.on("context", async (event) => {
@@ -649,9 +653,12 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
         return;
       }
 
+      const workerTools = availableWorkerTools(parsed.tools);
+      pi.setActiveTools(workerTools);
       activeRequest = {
         request: parsed,
-        priorTools: pi.getActiveTools(),
+        workerTools,
+        hasTakenToolAction: false,
         phase: "result",
         capture: "automatic",
         submitting: false,

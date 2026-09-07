@@ -11,6 +11,7 @@ import {
   waitForWorkerResult,
   writeWorkerRequest,
 } from "./worker-frame.ts";
+import { createWorkerToolResolver, type WorkerToolResolver } from "./worker-tools.ts";
 
 const TOOL_NAME = "fresh-history";
 const PI_SESSION_ROOT = path.join(process.env.HOME || "/home/claude", ".pi/agent/sessions");
@@ -164,6 +165,7 @@ function renderFreshHistoryArgs(args: FreshHistoryParams) {
 
 async function runFreshHistory(
   pi: ExtensionAPI,
+  workerToolResolver: WorkerToolResolver,
   params: FreshHistoryParams,
   ctx: ExtensionContext,
   signal: AbortSignal | undefined,
@@ -177,6 +179,7 @@ async function runFreshHistory(
   writeWorkerRequest(paths, {
     id,
     task: workerPrompt,
+    tools: workerToolResolver.current(),
     resultPath: paths.resultPath,
     statusPath: paths.statusPath,
     closeWhenDone: true,
@@ -238,6 +241,9 @@ async function runFreshHistory(
 }
 
 export default function freshHistoryExtension(pi: ExtensionAPI): void {
+  const workerToolResolver = createWorkerToolResolver(pi);
+  pi.on("session_shutdown", async () => workerToolResolver.dispose());
+
   pi.registerTool({
     name: TOOL_NAME,
     label: "Fresh History",
@@ -246,7 +252,7 @@ export default function freshHistoryExtension(pi: ExtensionAPI): void {
     executionMode: "sequential",
     renderCall: renderFreshHistoryArgs,
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
-      const result = await runFreshHistory(pi, params, ctx, signal, onUpdate);
+      const result = await runFreshHistory(pi, workerToolResolver, params, ctx, signal, onUpdate);
       return {
         content: [{ type: "text", text: formatFreshHistoryResult(result) }],
         details: {

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SessionManager, type AgentToolUpdateCallback, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { cleanContextCliArgs, withoutDelegateTool, type DelegateContext } from "./delegate-policy.ts";
+import { cleanContextCliArgs, type DelegateContext } from "./delegate-policy.ts";
 import { closeHerdrAgent, flushSessionFile, getPreToolCallLeafId, modelCliArgs, promptHerdrAgent, resolveCwd, startHerdrPiAgent, workerAgentName } from "./herdr-helpers.ts";
 import {
   appendWorkerMoreInfo,
@@ -15,11 +15,11 @@ import {
   type WorkerResultFile,
 } from "./worker-frame.ts";
 import { WORKER_DESIGN_PRINCIPLES } from "./worker-principles.ts";
+import { createWorkerToolResolver } from "./worker-tools.ts";
 
 const DELEGATE_TOOL = "delegate";
 const DELEGATE_RUNTIME_CUSTOM_TYPE = "pi-herdr:delegate-runtime";
 const FRESH_DELEGATE_CUSTOM_TYPE = "pi-herdr:delegate";
-const TOOL_CONTROL_EVENT = "pi-ant:tool-control-changed";
 const WORKER_FRAME_EXTENSION_PATH = fileURLToPath(new URL("./worker-frame.ts", import.meta.url));
 
 export interface DelegateRequest {
@@ -35,7 +35,6 @@ interface DelegateRuntimeState {
   childSession: string;
   parentCwd: string;
   childCwd: string;
-  workerTools: string[];
   createdAt: string;
 }
 
@@ -85,14 +84,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function stringArray(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  return value.every((item) => typeof item === "string") ? value : undefined;
-}
-
 function parseDelegateRuntime(value: unknown): DelegateRuntimeState | undefined {
   if (!isRecord(value)) return undefined;
-  const workerTools = stringArray(value.workerTools);
   if (
     typeof value.id !== "string"
     || typeof value.task !== "string"
@@ -100,7 +93,6 @@ function parseDelegateRuntime(value: unknown): DelegateRuntimeState | undefined 
     || typeof value.childSession !== "string"
     || typeof value.parentCwd !== "string"
     || typeof value.childCwd !== "string"
-    || workerTools === undefined
     || typeof value.createdAt !== "string"
   ) {
     return undefined;
@@ -113,7 +105,6 @@ function parseDelegateRuntime(value: unknown): DelegateRuntimeState | undefined 
     childSession: value.childSession,
     parentCwd: value.parentCwd,
     childCwd: value.childCwd,
-    workerTools: withoutDelegateTool(workerTools),
     createdAt: value.createdAt,
   };
 }
@@ -178,25 +169,11 @@ function makeRunDetails(options: {
 }
 
 export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
-  let currentRuntime: DelegateRuntimeState | undefined;
-  let delegatedRootTools: string[] | undefined;
-
-  const unsubscribeToolControl = pi.events.on(TOOL_CONTROL_EVENT, (value: unknown) => {
-    if (!isRecord(value)) return;
-    const delegated = stringArray(value.delegatedTools);
-    delegatedRootTools = delegated ? withoutDelegateTool(delegated) : undefined;
-  });
-
-  function resolveRuntime(ctx: ExtensionContext): DelegateRuntimeState | undefined {
-    const runtime = getLatestDelegateRuntime(ctx);
-    currentRuntime = runtime;
-    return runtime;
-  }
+  const workerToolResolver = createWorkerToolResolver(pi);
 
   function refreshRuntime(ctx: ExtensionContext): void {
-    const runtime = resolveRuntime(ctx);
+    const runtime = getLatestDelegateRuntime(ctx);
     if (runtime) {
-      pi.setActiveTools([...new Set([...runtime.workerTools, DELEGATE_TOOL])]);
       ctx.ui.setStatus("delegate", ctx.ui.theme.fg("accent", "delegate:child"));
       ctx.ui.setWidget("delegate", [
         "Herdr inherited delegate",
@@ -211,7 +188,7 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
 
   pi.on("session_start", async (_event, ctx) => refreshRuntime(ctx));
   pi.on("session_tree", async (_event, ctx) => refreshRuntime(ctx));
-  pi.on("session_shutdown", async () => unsubscribeToolControl());
+  pi.on("session_shutdown", async () => workerToolResolver.dispose());
 
   async function runInheritedAttempt(
     request: DelegateRequest & { context: "inherit" },
@@ -231,6 +208,7 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
       writeWorkerRequest(paths, {
         id,
         task: inheritedTaskPrompt(request.task),
+        tools: workerTools,
         resultPath: paths.resultPath,
         statusPath: paths.statusPath,
         closeWhenDone: true,
@@ -251,7 +229,6 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
         childSession: childSessionFile,
         parentCwd: ctx.cwd,
         childCwd: ctx.cwd,
-        workerTools,
         createdAt: new Date().toISOString(),
       };
       forked.appendCustomEntry(DELEGATE_RUNTIME_CUSTOM_TYPE, runtime);
@@ -318,13 +295,7 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
       throw new Error("Current session is not persisted; cannot start an inherited delegate.");
     }
 
-    const parentRuntime = resolveRuntime(ctx);
-    const workerTools = parentRuntime
-      ? withoutDelegateTool(parentRuntime.workerTools)
-      : withoutDelegateTool(delegatedRootTools ?? pi.getActiveTools());
-    if (workerTools.length === 0) {
-      throw new Error("Cannot start inherited delegate: no worker tools remain after stripping delegation control tools.");
-    }
+    const workerTools = workerToolResolver.current();
 
     return runInheritedAttempt(
       request,
@@ -342,6 +313,7 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
     request: DelegateRequest & { context: "project" | "clean" },
     cwd: string,
     args: string[],
+    workerTools: string[],
     signal: AbortSignal | undefined,
     onUpdate: AgentToolUpdateCallback | undefined,
   ): Promise<DelegateRunOutput> {
@@ -350,6 +322,7 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
     writeWorkerRequest(paths, {
       id,
       task: freshTaskPrompt(request.task),
+      tools: workerTools,
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
       closeWhenDone: true,
@@ -425,7 +398,7 @@ export function createDelegateRunner(pi: ExtensionAPI): DelegateRunner {
       ...modelCliArgs(ctx.model, pi.getThinkingLevel()),
       ...cleanContextCliArgs(request.context, WORKER_FRAME_EXTENSION_PATH),
     ];
-    return runFreshWorker(request, cwd, args, signal, onUpdate);
+    return runFreshWorker(request, cwd, args, workerToolResolver.current(), signal, onUpdate);
   }
 
   return { runInherited, runFresh };

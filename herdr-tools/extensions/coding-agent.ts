@@ -15,6 +15,7 @@ import {
   writeWorkerStatus,
   type WorkerArtifactPaths,
 } from "./worker-frame.ts";
+import { createWorkerToolResolver } from "./worker-tools.ts";
 
 const REGISTRY_DIR = "/tmp/pi-herdr-coding-agents";
 const codingAgentParams = Type.Object({
@@ -170,6 +171,9 @@ function formatCodingAgentResult(resultText: string, entry: RegistryEntry, conte
 }
 
 export default function codingAgentExtension(pi: ExtensionAPI): void {
+  const workerToolResolver = createWorkerToolResolver(pi);
+  pi.on("session_shutdown", async () => workerToolResolver.dispose());
+
   pi.registerTool({
     name: "coding-agent",
     label: "Coding Agent",
@@ -192,6 +196,7 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
         writeWorkerRequest(paths, {
           id,
           task: params.task,
+          tools: workerToolResolver.current(),
           resultPath: paths.resultPath,
           statusPath: paths.statusPath,
           closeWhenDone: false,

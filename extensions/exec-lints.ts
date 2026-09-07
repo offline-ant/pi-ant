@@ -8,10 +8,6 @@
  * - `grep` inside remote/nested quoted commands (for example `ssh host '... grep ...'`)
  *   is ignored because the built-in grep tool cannot replace it.
  *
- * Rust formatting:
- * - `cargo fmt`: blocked when invoked as a shell command — follow existing code style instead.
- * - `rustfmt`: blocked when invoked as a shell command — follow existing code style instead.
- *
  * Git safety:
  * - `git restore`: always blocked (other agents may have uncommitted work).
  * - `git checkout`: blocked on first attempt, allowed on retry (warn once).
@@ -37,18 +33,12 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 const GIT_RESTORE_RE = /\bgit\s+restore\b/i;
 const GIT_CHECKOUT_RE = /\bgit\s+checkout\b/i;
 const GIT_STASH_RE = /\bgit\s+stash\b/i;
-const CARGO_FMT_CMD_RE = /(?:^|[;&|\n]\s*)cargo\s+fmt\b/;
-const RUSTFMT_CMD_RE = /(?:^|[;&|\n]\s*)rustfmt\b/;
 const SHELL_COMMAND_SEPARATORS = new Set([";", "&", "&&", "||", "|", "\n", "("]);
 const SHELL_COMMAND_START_KEYWORDS = new Set(["if", "then", "do", "else", "elif", "while", "until"]);
 
 const GREP_NOTE =
   "Use the built-in `grep` tool instead of the bash `grep` command. " +
   "It's faster, respects .gitignore, and returns structured results.";
-
-const RUSTFMT_NOTE =
-  "Do not run `cargo fmt`/`rustfmt` — they create large diffs unrelated to the actual change. " +
-  "Follow the existing code style in the file instead.";
 
 const RESTORE_NOTE =
   "Other agents or the user may have uncommitted work. `git restore` is always blocked.";
@@ -327,14 +317,21 @@ export default function (pi: ExtensionAPI) {
       };
     }
 
-    // rust formatters — block shell-command invocations, not prose mentions
-    if (CARGO_FMT_CMD_RE.test(command) || RUSTFMT_CMD_RE.test(command)) {
+    // Optional Rust formatter lint. Uncomment to re-enable.
+    /*
+    if (
+      /(?:^|[;&|\n]\s*)cargo\s+fmt\b/.test(command) ||
+      /(?:^|[;&|\n]\s*)rustfmt\b/.test(command)
+    ) {
       return {
         block: true,
         reason:
-          `Blocked: rust formatter in ${event.toolName} command: ${command}. ${RUSTFMT_NOTE}`,
+          `Blocked: rust formatter in ${event.toolName} command: ${command}. ` +
+          "Do not run `cargo fmt`/`rustfmt` — they create large diffs unrelated to the actual change. " +
+          "Follow the existing code style in the file instead.",
       };
     }
+    */
 
     // git restore — always block
     if (GIT_RESTORE_RE.test(command)) {

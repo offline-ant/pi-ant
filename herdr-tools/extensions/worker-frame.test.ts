@@ -50,6 +50,7 @@ function createHarness(): WorkerFrameHarness {
 
   const pi = {
     getActiveTools: () => [...harness.activeTools],
+    getAllTools: () => ["read", "bash", "delegate", "coding-agent", "fresh-history"].map((name) => ({ name })),
     on: (name: string, handler: EventHandler) => {
       handlers.set(name, [...(handlers.get(name) ?? []), handler]);
     },
@@ -146,6 +147,33 @@ function assistantAbortEvent(): unknown {
   };
 }
 
+test("worker tools follow the request and only the first immediate subworker call is warned", async () => {
+  const harness = createHarness();
+  const paths = createWorkerArtifacts();
+  try {
+    writeWorkerRequest(paths, {
+      id: "nested-worker",
+      task: "Investigate the issue",
+      tools: ["read", "delegate", "unavailable-tool"],
+      resultPath: paths.resultPath,
+      statusPath: paths.statusPath,
+      closeWhenDone: false,
+    });
+
+    await runCommand(harness, "worker-run", paths.requestPath);
+    assert.deepEqual(harness.activeTools, ["read", "delegate"]);
+
+    const toolCall = harness.handlers.get("tool_call")?.[0];
+    if (!toolCall) throw new Error("No tool_call handler registered");
+    const warning = await toolCall({ toolName: "delegate" }, harness.context) as { block?: boolean; reason?: string } | undefined;
+    assert.equal(warning?.block, true);
+    assert.match(warning?.reason ?? "", /automated warning heuristic/);
+    assert.equal(await toolCall({ toolName: "delegate" }, harness.context), undefined);
+  } finally {
+    fs.rmSync(paths.artifactDir, { recursive: true, force: true });
+  }
+});
+
 test("human input supervises result and retrospective capture until explicit submission", async () => {
   const harness = createHarness();
   const paths = createWorkerArtifacts();
@@ -153,6 +181,7 @@ test("human input supervises result and retrospective capture until explicit sub
     writeWorkerRequest(paths, {
       id: "supervised-worker",
       task: "Complete the delegated task",
+      tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
       closeWhenDone: true,
@@ -214,6 +243,7 @@ test("worker-continue gives guidance and restores automatic result capture", asy
     writeWorkerRequest(paths, {
       id: "continued-worker",
       task: "Complete with guidance",
+      tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
       closeWhenDone: true,
@@ -262,6 +292,7 @@ test("worker-continue preserves the main result while resuming an automatic retr
     writeWorkerRequest(paths, {
       id: "continued-retrospective-worker",
       task: "Complete before retrospective guidance",
+      tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
       closeWhenDone: true,
@@ -302,6 +333,7 @@ test("worker-continue clears supervised failure state before retrying automatica
     writeWorkerRequest(paths, {
       id: "continued-failure-worker",
       task: "Recover with guidance",
+      tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
       closeWhenDone: true,
@@ -344,6 +376,7 @@ test("worker-continue does not race a pending worker submission", async () => {
     writeWorkerRequest(paths, {
       id: "continue-submit-race-worker",
       task: "Wait for submission",
+      tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
       closeWhenDone: false,
@@ -378,6 +411,7 @@ test("worker-continue requires an active request and guidance prompt", async () 
     writeWorkerRequest(paths, {
       id: "continue-validation-worker",
       task: "Wait for valid guidance",
+      tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
       closeWhenDone: false,
@@ -399,6 +433,7 @@ test("extension messages preserve automatic result capture", async () => {
     writeWorkerRequest(paths, {
       id: "automatic-worker",
       task: "Complete automatically",
+      tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
       closeWhenDone: false,
@@ -428,6 +463,7 @@ test("retryable result failure enters supervision only after retries settle", as
     writeWorkerRequest(paths, {
       id: "retry-worker",
       task: "Recover after connection failure",
+      tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
       closeWhenDone: true,
@@ -476,6 +512,7 @@ test("retryable retrospective failure preserves the main result after retries se
     writeWorkerRequest(paths, {
       id: "retrospective-retry-worker",
       task: "Complete before retrospective failure",
+      tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
       closeWhenDone: true,
@@ -508,6 +545,7 @@ test("cancelled result enters supervision after the worker run settles", async (
     writeWorkerRequest(paths, {
       id: "cancelled-worker",
       task: "Wait for cancellation",
+      tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
       closeWhenDone: true,
@@ -534,6 +572,7 @@ test("cancelled retrospective preserves the main result", async () => {
     writeWorkerRequest(paths, {
       id: "cancelled-retrospective-worker",
       task: "Complete before retrospective cancellation",
+      tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
       closeWhenDone: true,
@@ -567,6 +606,7 @@ test("non-retryable result failure completes after automatic recovery settles", 
     writeWorkerRequest(paths, {
       id: "quota-worker",
       task: "Fail without retry supervision",
+      tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
       closeWhenDone: true,
@@ -593,6 +633,7 @@ test("context overflow remains pending while Pi runs automatic compaction recove
     writeWorkerRequest(paths, {
       id: "overflow-worker",
       task: "Recover after context overflow",
+      tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
       closeWhenDone: true,
