@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { Type, type Static } from "typebox";
+import { Type } from "typebox";
+import { renderWorkerCall } from "../worker-call.ts";
 import { collectHistoryItems, modelCliArgs, prepareFreshSession } from "../context.ts";
 import { createWorkerArtifacts, formatWorkerResult, makeWorkerId, writeWorkerRequest } from "../worker-frame.ts";
 import { runEphemeralWorker } from "../workers.ts";
@@ -12,15 +12,6 @@ const freshHistoryParams = Type.Object({
   history: Type.Integer({ minimum: 0, description: "Number of recent conversational items to include. Counts user requests and direct assistant replies only; tool calls/results are omitted." }),
   prompt: Type.String({ minLength: 1, description: "Task to run in the fresh history worker." }),
 });
-type FreshHistoryParams = Static<typeof freshHistoryParams>;
-
-function renderFreshHistoryArgs(args: FreshHistoryParams) {
-  const lines = ["fresh-history(", ...JSON.stringify(args, null, 2).split("\n").map((line) => `  ${line}`), ")"];
-  return {
-    render: (width: number) => lines.flatMap((line) => wrapTextWithAnsi(line, width)),
-    invalidate: () => {},
-  };
-}
 
 export default function freshHistoryExtension(pi: ExtensionAPI): void {
   const workerTools = createWorkerToolResolver(pi);
@@ -31,7 +22,7 @@ export default function freshHistoryExtension(pi: ExtensionAPI): void {
     description: "Run one task in an ephemeral fresh-context worker with recent user requests and direct assistant replies; tool activity is omitted. Fresh-history calls run serially. Use when a small excerpt is enough, not for full-context or persistent follow-up work. Returns the answer and automatic retrospective; failures throw with recovery details.",
     parameters: freshHistoryParams,
     executionMode: "sequential",
-    renderCall: renderFreshHistoryArgs,
+    renderCall: (args) => renderWorkerCall("fresh-history", args),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       if (!ctx.model) throw new Error("Current session has no selected model.");
       const items = collectHistoryItems(ctx.sessionManager.buildContextEntries(), params.history);

@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { Type, type Static } from "typebox";
+import { Type } from "typebox";
+import { renderWorkerCall } from "../worker-call.ts";
 import { modelCliArgs, prepareFreshSession, resolveCwd } from "../context.ts";
 import { getHost, hostForTarget } from "../host.ts";
 import { appendWorkerMoreInfo, createWorkerArtifacts, formatWorkerResult, makeWorkerId, readWorkerStatus, writeWorkerRequest, type WorkerArtifactPaths } from "../worker-frame.ts";
@@ -14,15 +14,6 @@ const codingAgentParams = Type.Object({
   task: Type.String({ minLength: 1, description: "Task to run in the coding agent." }),
   folder: Type.Optional(Type.String({ description: "Working directory. Defaults to the current working directory." })),
 });
-type CodingAgentParams = Static<typeof codingAgentParams>;
-
-function renderCodingAgentArgs(args: CodingAgentParams) {
-  const lines = ["coding-agent(", ...JSON.stringify(args, null, 2).split("\n").map((line) => `  ${line}`), ")"];
-  return {
-    render: (width: number) => lines.flatMap((line) => wrapTextWithAnsi(line, width)),
-    invalidate: () => {},
-  };
-}
 
 export default function codingAgentExtension(pi: ExtensionAPI): void {
   const workerTools = createWorkerToolResolver(pi);
@@ -33,7 +24,7 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
     description: "Run one task in a named persistent fresh-context worker and wait for completion. The worker remains available by name for follow-ups. Sibling calls with different worker names can run concurrently. Returns its result, automatic retrospective, idle status, and context use; failures throw with recovery details. Cancellation closes owned work while retaining its session file.",
     parameters: codingAgentParams,
     executionMode: "parallel",
-    renderCall: renderCodingAgentArgs,
+    renderCall: (args) => renderWorkerCall("coding-agent", args),
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
       const name = validateName(params.name);
       const cwd = resolveCwd(ctx.cwd, params.folder);

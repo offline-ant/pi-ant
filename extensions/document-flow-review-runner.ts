@@ -188,8 +188,10 @@ export async function runDocumentFlowReview(
 	onProgress?: DocumentFlowReviewProgressCallback,
 	signal?: AbortSignal,
 ): Promise<DocumentFlowReviewRunResult> {
+	signal?.throwIfAborted();
 	const sourcePath = path.resolve(ctx.cwd, input.file.replace(/^@/, ""));
-	const document = await readFile(sourcePath, "utf8");
+	const document = await readFile(sourcePath, { encoding: "utf8", signal });
+	signal?.throwIfAborted();
 	if (!document.trim()) throw new Error("Document is empty.");
 
 	const units = segmentReadingUnits(document);
@@ -215,6 +217,7 @@ export async function runDocumentFlowReview(
 		`${timestamp}-${artifactSlug(sourcePath)}-${hash.slice(0, 10)}`,
 	);
 	await mkdir(artifactDir, { recursive: true });
+	signal?.throwIfAborted();
 
 	const protocol: ProtocolState = { currentUnit: 0, finished: false, friction: [] };
 	const progress: ProgressState = {
@@ -231,6 +234,7 @@ export async function runDocumentFlowReview(
 		description: "Record noteworthy friction from the preceding reading unit and reveal exactly one next unit. Returns EOF after final friction is recorded.",
 		parameters: nextReadingUnitSchema,
 		async execute(_toolCallId, params: NextReadingUnitParams) {
+			signal?.throwIfAborted();
 			if (protocol.finished) throw new Error("EOF was already returned. Write the final review now.");
 			if (params.afterUnit !== protocol.currentUnit) {
 				throw new Error(
@@ -299,9 +303,12 @@ export async function runDocumentFlowReview(
 		systemPromptOverride: () => makeSystemPrompt(readerProfile, input.prompt),
 		appendSystemPromptOverride: () => [],
 	});
+	signal?.throwIfAborted();
 	await resourceLoader.reload();
+	signal?.throwIfAborted();
 
-	const modelRuntime = await ModelRuntime.create();
+	const modelRuntime = await ModelRuntime.create({ signal });
+	signal?.throwIfAborted();
 	const registeredProvider = ctx.modelRegistry.getRegisteredProviderConfig(model.provider);
 	if (registeredProvider) modelRuntime.registerProvider(model.provider, registeredProvider);
 
@@ -322,6 +329,12 @@ export async function runDocumentFlowReview(
 
 	let finalReview: string | undefined;
 	const unsubscribe = session.subscribe((event) => {
+		if (signal?.aborted) {
+			// Cancellation during prompt preflight can precede the agent's run controller.
+			// Abort again when the run starts, and ignore any cancelled output.
+			session.agent.abort();
+			return;
+		}
 		if (event.type === "message_update") {
 			const update = event.assistantMessageEvent;
 			if (update.type === "thinking_delta" || update.type === "text_delta") {
@@ -351,11 +364,17 @@ export async function runDocumentFlowReview(
 		session.abort().catch(() => undefined);
 	};
 	signal?.addEventListener("abort", abortNested, { once: true });
+	const promptReader = async (text: string): Promise<void> => {
+		signal?.throwIfAborted();
+		await session.prompt(text);
+		// SDK prompt() can resolve normally after an abort. Never restart that run
+		// as a continuation or accept its partial final response as a report.
+		signal?.throwIfAborted();
+	};
 	try {
-		if (signal?.aborted) throw new Error("Document flow review cancelled.");
-		await session.prompt(`Begin the reading protocol now. Call ${READING_TOOL_NAME} with afterUnit 0 and an empty friction array.`);
+		await promptReader(`Begin the reading protocol now. Call ${READING_TOOL_NAME} with afterUnit 0 and an empty friction array.`);
 		for (let attempt = 0; !protocol.finished && attempt < MAX_CONTINUATION_ATTEMPTS; attempt++) {
-			await session.prompt("Continue the reading protocol. Do not stop before EOF.");
+			await promptReader("Continue the reading protocol. Do not stop before EOF.");
 		}
 		if (!protocol.finished) {
 			throw new Error(
@@ -363,7 +382,7 @@ export async function runDocumentFlowReview(
 			);
 		}
 		if (!finalReview) {
-			await session.prompt("The document is complete. Produce the required final review now without calling tools.");
+			await promptReader("The document is complete. Produce the required final review now without calling tools.");
 		}
 		if (!finalReview) throw new Error("Review agent reached EOF but did not produce a final review.");
 
@@ -371,7 +390,8 @@ export async function runDocumentFlowReview(
 		if (!sessionPath) throw new Error("Document flow review session was not persisted.");
 		const reportPath = path.join(artifactDir, "review.md");
 		const metadataPath = path.join(artifactDir, "metadata.json");
-		await writeFile(reportPath, `${finalReview.trim()}\n`, "utf8");
+		signal?.throwIfAborted();
+		await writeFile(reportPath, `${finalReview.trim()}\n`, { encoding: "utf8", signal });
 		await writeFile(
 			metadataPath,
 			`${JSON.stringify({
@@ -394,8 +414,9 @@ export async function runDocumentFlowReview(
 				sessionPath,
 				reportPath,
 			}, null, 2)}\n`,
-			"utf8",
+			{ encoding: "utf8", signal },
 		);
+		signal?.throwIfAborted();
 		return {
 			report: finalReview.trim(),
 			reportPath,
@@ -411,7 +432,11 @@ export async function runDocumentFlowReview(
 		throw error;
 	} finally {
 		signal?.removeEventListener("abort", abortNested);
-		unsubscribe();
-		session.dispose();
+		try {
+			await session.abort();
+		} finally {
+			unsubscribe();
+			session.dispose();
+		}
 	}
 }
