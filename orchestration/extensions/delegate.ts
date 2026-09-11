@@ -1,6 +1,6 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { renderWorkerCall } from "../worker-call.ts";
 import { Type, type Static } from "typebox";
 import {
   DELEGATE_CONTEXTS,
@@ -42,17 +42,6 @@ function branchHasInheritContextWarning(ctx: ExtensionContext): boolean {
   );
 }
 
-function renderDelegateArgs(args: DelegateParams) {
-  const payload = JSON.stringify(args, null, 2) ?? String(args);
-  const lines = ["delegate(", ...payload.split("\n").map((line) => `  ${line}`), ")"];
-  return {
-    render: (contentWidth: number) => lines.flatMap((line) => wrapTextWithAnsi(line, contentWidth)),
-    invalidate: () => {
-      /* no-op */
-    },
-  };
-}
-
 export default function delegateExtension(pi: ExtensionAPI): void {
   const workerTools = createWorkerToolResolver(pi);
   pi.on("session_shutdown", () => workerTools.dispose());
@@ -76,7 +65,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     ],
     parameters: delegateParams,
     executionMode: "parallel",
-    renderCall: renderDelegateArgs,
+    renderCall: (args) => renderWorkerCall("delegate", args),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const warningPercent = inheritContextWarningPercent(
         params.context,
