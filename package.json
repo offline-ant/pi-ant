@@ -19,7 +19,6 @@
     "typebox": "*"
   },
   "bin": {
-    "browser-io": "./bin/browser-io",
     "pi-guidance-loop": "./bin/pi-guidance-loop"
   },
   "pi": {
@@ -39,8 +38,6 @@
       "./extensions/workboard.ts",
       "./extensions/worktree.ts",
       "./extensions/context-explorer.ts",
-      "./extensions/browser.ts",
-      "./extensions/web.ts",
       "./extensions/audio.ts",
       "./extensions/mail.ts",
       "./extensions/prompt-history.ts",

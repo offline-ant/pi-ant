@@ -57,11 +57,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "delegate",
     label: "Delegate",
-    description: "Run one task in an ephemeral worker and wait for its result and automatic retrospective. Sibling delegate and coding-agent calls run concurrently, then join before the parent continues. context='inherit' continues from the current conversation and excludes the delegate call itself and sibling results; context='project' or 'clean' starts a blank conversation. context is required. Failures throw with recovery details.",
+    description: "Run one task in an ephemeral worker and wait for its result and automatic retrospective. Calls in the same batch run concurrently; listing another tool after delegate does not make it wait for the worker. Results return before the parent's next response. context='inherit' copies the parent conversation from before this call; context='project' or 'clean' starts a blank conversation. context is required. Failures throw with recovery details.",
     promptSnippet: "Run an ephemeral task with inherited, project, or clean context",
     promptGuidelines: [
       "Use delegate with context='inherit' when the task depends on context established in the current conversation. Use context='project' for a self-contained task that needs normal project guidance but no conversation history; include all relevant requirements, decisions, paths, findings, and constraints in task. Use context='clean' for independent fresh-eyes work.",
-      "For independent, non-overlapping tasks, issue sibling delegate and coding-agent calls together. They execute concurrently and join before the parent continues; sibling results are not visible inside inherited delegates.",
+      "Issue independent, non-overlapping delegate and coding-agent calls together. Calls in the same batch run concurrently, regardless of their order. Do not include reads, edits, or checks that depend on a worker's changes in that batch; wait for its result first. Sibling delegates can see each other's filesystem changes, but do not receive each other's reasoning or conversation output.",
     ],
     parameters: delegateParams,
     executionMode: "parallel",
