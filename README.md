@@ -16,12 +16,18 @@ APIs, RPC input/settlement, and editor dialogs. See the linked orchestration REA
 These are the pi tools registered by this package:
 
 - `ask` — ask the user interactive multiple-choice or free-form questions. In TUI and RPC sessions, each question also offers `Fork (discuss separately)`: edit a discussion prompt, launch an inherited session on the selected host, then return to the unchanged question and answer it.
-- `browser` — control persistent Chromium/Firefox sessions through `bin/browser-io`, including navigation, awaited JavaScript eval, and before/after screenshots under `/tmp/browser-io`.
 - `document_flow_review` — read one document strictly in sequence without lookahead and assess its internal coherence, including logical flow, definitions, transitions, expectations, internal contradictions, and misplaced or late information. It does not verify factual truth or external validity. The tool is inactive by default and can be exposed through `/tools`.
 - `send_mail` — review, confirm, and send plain-text mail through an externally configured implicit-TLS SMTP account. Sender and recipients cannot be selected by the model.
 - `sqlite` — run `sqlite3` against `AGENTS.db` in the current working directory; auto-enabled when that database exists.
 - Core `edit` and `write` are wrapped by `lints` to display post-write safety warnings.
 - `present_guidance` — validates structured guidance output for guidance-mode final answers. It is only registered for `PI_GUIDANCE=true` runs or dynamically inside `/ugo` guide-phase sessions.
+
+Browser automation and web retrieval are provided by the separately loaded
+[`pi-browser`](https://github.com/offline-ant/pi-browser) package, not this package. It registers
+`browser`, `web_search`, `web_fetch`, and `web_read`, sharing its core and web-tool factories
+with the standalone `pagent` application. `PI_WEB_BACKEND=auto` (default) prefers
+Codex and reports browser fallback when unavailable; `codex` and `browser` select
+strict backends. Backend selection is host configuration, not a tool argument.
 
 ## Mail configuration
 
@@ -63,7 +69,7 @@ mailbox.
 
 ## Skills
 
-- `herdr` — copied from Herdr's `SKILL.md`; teaches agents running inside Herdr to use the `herdr ...` CLI for pane, workspace, wait, and agent coordination.
+- `herdr` — local guidance for Herdr 0.9.0 CLI operations, with ownership safeguards and a separate managed Pi orchestration workflow.
 
 ## Commands, snippets, and safety extensions
 
