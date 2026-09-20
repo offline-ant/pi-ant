@@ -60,7 +60,7 @@ function createHarness(): WorkerFrameHarness {
 
   const pi = {
     getActiveTools: () => [...harness.activeTools],
-    getAllTools: () => ["read", "bash", "delegate", "coding-agent", "fresh-history"].map((name) => ({ name })),
+    getAllTools: () => ["read", "bash", "do", "delegate", "fresh_look", "coding-agent", "fresh-history"].map((name) => ({ name })),
     on: (name: string, handler: EventHandler) => {
       handlers.set(name, [...(handlers.get(name) ?? []), handler]);
     },
@@ -165,34 +165,36 @@ function assistantAbortEvent(): unknown {
   };
 }
 
-test("worker tools follow the request and only the first immediate subworker call is warned", async () => {
-  const harness = createHarness();
-  const paths = createWorkerArtifacts();
-  try {
-    writeWorkerRequest(paths, {
-      id: "nested-worker",
-      task: "Investigate the issue",
-      tools: ["read", "delegate", "unavailable-tool"],
-      resultPath: paths.resultPath,
-      statusPath: paths.statusPath,
-      closeWhenDone: false,
-    });
+for (const toolName of ["do", "delegate", "fresh_look", "coding-agent", "fresh-history"]) {
+  test(`${toolName}: worker tools follow the request and only the first immediate subworker call is warned`, async () => {
+    const harness = createHarness();
+    const paths = createWorkerArtifacts();
+    try {
+      writeWorkerRequest(paths, {
+        id: "nested-worker",
+        task: "Investigate the issue",
+        tools: ["read", toolName, "unavailable-tool"],
+        resultPath: paths.resultPath,
+        statusPath: paths.statusPath,
+        closeWhenDone: false,
+      });
 
-    await runCommand(harness, "worker-run", paths.requestPath);
-    assert.deepEqual(harness.activeTools, ["read", "delegate"]);
-    assert.deepEqual(harness.selectedModel, { provider: "fake", id: "fake" });
-    assert.equal(harness.thinkingLevel, "high");
+      await runCommand(harness, "worker-run", paths.requestPath);
+      assert.deepEqual(harness.activeTools, ["read", toolName]);
+      assert.deepEqual(harness.selectedModel, { provider: "fake", id: "fake" });
+      assert.equal(harness.thinkingLevel, "high");
 
-    const toolCall = harness.handlers.get("tool_call")?.[0];
-    if (!toolCall) throw new Error("No tool_call handler registered");
-    const warning = await toolCall({ toolName: "delegate" }, harness.context) as { block?: boolean; reason?: string } | undefined;
-    assert.equal(warning?.block, true);
-    assert.match(warning?.reason ?? "", /automated warning heuristic/);
-    assert.equal(await toolCall({ toolName: "delegate" }, harness.context), undefined);
-  } finally {
-    fs.rmSync(paths.artifactDir, { recursive: true, force: true });
-  }
-});
+      const toolCall = harness.handlers.get("tool_call")?.[0];
+      if (!toolCall) throw new Error("No tool_call handler registered");
+      const warning = await toolCall({ toolName }, harness.context) as { block?: boolean; reason?: string } | undefined;
+      assert.equal(warning?.block, true);
+      assert.match(warning?.reason ?? "", /automated warning heuristic/);
+      assert.equal(await toolCall({ toolName }, harness.context), undefined);
+    } finally {
+      fs.rmSync(paths.artifactDir, { recursive: true, force: true });
+    }
+  });
+}
 
 test("human input supervises result and retrospective capture until explicit submission", async () => {
   const harness = createHarness();

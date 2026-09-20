@@ -115,6 +115,14 @@ for (const kind of ["tmux", "herdr", "emacs"] as const) {
       else await host.send(owner, { kind: "text", text: draft, enter: false });
       await host.send(owner, { kind: "prompt", text: "/lifecycle-report" });
       await until(() => reports().some((event) => event.event === "report" && event.session === sessionFile), "parent report");
+      const initial = reports().findLast((event) => event.event === "report" && event.session === sessionFile)!;
+      assert.ok(initial.tools.includes("do"), "do must be active in the default profile");
+      assert.ok(initial.tools.includes("delegate"));
+      assert.ok(!initial.tools.includes("fresh_look"), "fresh_look must be opt-in");
+      // Explicit selection must survive child startup and its default-off hook.
+      await host.send(owner, { kind: "prompt", text: `/lifecycle-tools ${[...initial.tools, "fresh_look"].join(",")}` });
+      await host.send(owner, { kind: "prompt", text: "/lifecycle-report" });
+      await until(() => reports().some((event) => event.event === "report" && event.session === sessionFile && event.tools.includes("fresh_look")), "explicit optional tool selection");
       const before = reports().findLast((event) => event.event === "report" && event.session === sessionFile)!;
       const bytes = fs.readFileSync(sessionFile, "utf8");
 

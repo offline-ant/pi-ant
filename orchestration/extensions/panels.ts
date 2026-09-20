@@ -1,6 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { truncateTail, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type, type Static } from "typebox";
+import { Type } from "typebox";
 import { resolveCwd } from "../context.ts";
 import { getHost, hostForTarget } from "../host.ts";
 import type { Host, HostTarget } from "../host-types.ts";
@@ -8,16 +8,13 @@ import { claimName, listTargets, readTarget, removeTarget, saveTarget, validateN
 
 const MAX_LINES = 2000;
 const MAX_BYTES = 50 * 1024;
-const DEFAULT_READY_TIMEOUT_MS = 30_000;
-const waitForSchema = Type.Object({
-  match: Type.String({ minLength: 1 }),
-  regex: Type.Optional(Type.Boolean()),
-  timeoutMs: Type.Optional(Type.Integer({ minimum: 1, description: "Readiness deadline in milliseconds; defaults to 30000." })),
-});
-const nameSchema = Type.String({ description: "Registered logical name, not a native pane or buffer ID." });
+const DEFAULT_LINES = 500;
+/** Terminals answer input asynchronously; settle briefly so the returned snapshot shows the effect. */
+const SETTLE_MS = 250;
+const nameSchema = Type.String({ description: "Registered panel name, not a native pane or buffer ID." });
 
 function identity(target: HostTarget): string {
-  return `${target.name} (${target.host}:${target.id}; endpoint: ${target.endpoint})`;
+  return `${target.name} [${target.host}]`;
 }
 
 function snapshot(text: string, lines = MAX_LINES): string {
@@ -27,38 +24,26 @@ function snapshot(text: string, lines = MAX_LINES): string {
     : "");
 }
 
-function requireTarget(name: string): HostTarget {
+function requirePanel(name: string): HostTarget {
   const target = readTarget(validateName(name));
-  if (!target) throw new Error(`No registered panel named '${name}'. Use /panels to list targets.`);
+  if (!target) throw new Error(`No panel named '${name}'. Use /panels to list panels.`);
   return target;
 }
 
-async function waitUntilReady(
-  host: Host,
-  target: HostTarget,
-  waitFor: Static<typeof waitForSchema>,
-  pattern: RegExp | undefined,
-  signal?: AbortSignal,
-): Promise<string> {
-  const timeoutMs = waitFor.timeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
-  const timeout = AbortSignal.timeout(timeoutMs);
-  const waiting = signal ? AbortSignal.any([signal, timeout]) : timeout;
-  let recent = "(no output captured)";
+/** Native surfaces vanish when their server, window, or pane is destroyed elsewhere. */
+async function isMissing(host: Host, target: HostTarget, signal?: AbortSignal): Promise<boolean> {
+  return await host.state(target, signal).catch(() => undefined) === "missing";
+}
+
+async function readPanel(host: Host, target: HostTarget, lines: number, signal?: AbortSignal): Promise<string> {
   try {
-    while (true) {
-      waiting.throwIfAborted();
-      const output = await host.read(target, MAX_LINES, waiting);
-      recent = snapshot(output);
-      waiting.throwIfAborted();
-      if (pattern ? pattern.test(output) : output.includes(waitFor.match)) return recent;
-      const state = await host.state(target, waiting);
-      if (state !== "running") throw new Error(`Process ${state} before readiness matched.`);
-      await delay(100, undefined, { signal: waiting });
-    }
+    return snapshot(await host.read(target, lines, signal), lines);
   } catch (error) {
     signal?.throwIfAborted();
-    const reason = timeout.aborted ? `Readiness timed out after ${timeoutMs}ms.` : String(error);
-    throw new Error(`${reason}\nPanel retained: ${identity(target)}\nUse panel-read or panel-close with name '${target.name}'.\nRecent output:\n${recent}`);
+    if (await isMissing(host, target, signal)) {
+      throw new Error(`Panel '${target.name}' no longer exists on ${target.host}. Close it and start a new one.`);
+    }
+    throw error;
   }
 }
 
@@ -66,46 +51,34 @@ export default function panelsExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "panel-start",
     label: "Start Panel",
-    description: "Start a named terminal panel for a server, watcher, build, or interactive command. Optional waitFor checks readiness, not task completion. Readiness failures retain the panel and recent output; cancellation closes the newly created panel. Names remain reserved until panel-close, even after process exit. Use built-in bash for ordinary foreground commands.",
+    description: "Start a long-running command in a named terminal panel: a server, watcher, or interactive program. The name and output stay reserved until panel-close, including after the process exits. Use built-in bash for ordinary foreground commands.",
     parameters: Type.Object({
       name: nameSchema,
       command: Type.String({ minLength: 1 }),
       folder: Type.Optional(Type.String()),
-      waitFor: Type.Optional(waitForSchema),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
       const name = validateName(params.name);
       const cwd = resolveCwd(ctx.cwd, params.folder);
-      const pattern = params.waitFor?.regex ? new RegExp(params.waitFor.match) : undefined;
       const release = claimName(name);
-      let target: HostTarget | undefined;
-      let registered = false;
       try {
-        if (readTarget(name)) throw new Error(`'${name}' already exists. Close it explicitly before reusing its name.`);
-        const host = getHost(pi);
-        target = await host.start({ kind: "shell", name, cwd, command: params.command, placement: "worker", parent: host.parent() }, signal);
-        signal?.throwIfAborted();
-        saveTarget(target);
-        registered = true;
-        const output = params.waitFor ? await waitUntilReady(host, target, params.waitFor, pattern, signal) : undefined;
-        signal?.throwIfAborted();
-        return {
-          content: [{ type: "text", text: `${params.waitFor ? "Ready" : "Started"}: ${identity(target)}\nCwd: ${cwd}${output === undefined ? "" : `\n${output}`}` }],
-          details: { target, cwd, command: params.command, ready: params.waitFor !== undefined },
-        };
-      } catch (error) {
-        if (target && (!registered || signal?.aborted)) {
-          try {
-            await hostForTarget(pi, target).close(target);
-            removeTarget(name);
-          } catch (closeError) {
-            // Preserve the handle when native cleanup fails so recovery remains possible.
-            if (!registered) saveTarget(target);
-            throw new Error(`${String(error)}\nCould not close ${identity(target)}: ${String(closeError)}`);
+        const existing = readTarget(name);
+        if (existing) {
+          // A panel whose native surface is gone holds no output; its name is free to reuse.
+          if (!await isMissing(hostForTarget(pi, existing), existing, signal)) {
+            throw new Error(`'${name}' already exists. Close it explicitly before reusing its name.`);
           }
+          removeTarget(name);
         }
-        throw error;
+        // Hosts close their own half-created targets, so a failed start leaves nothing to clean up here.
+        const host = getHost(pi);
+        const target = await host.start({ kind: "shell", name, cwd, command: params.command, placement: "worker", parent: host.parent() }, signal);
+        saveTarget(target);
+        return {
+          content: [{ type: "text", text: `Started: ${identity(target)} in ${cwd}` }],
+          details: { target, cwd, command: params.command },
+        };
       } finally {
         release();
       }
@@ -115,49 +88,50 @@ export default function panelsExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "panel-read",
     label: "Read Panel",
-    description: "Read a bounded snapshot from a registered panel or worker, including exited shell panels. Defaults to 500 lines; limited to 2000 lines or 50KB. Repeated reads may overlap: this is not an incremental or lossless output log.",
+    description: "Read the most recent output of a panel, including one whose process has exited. Defaults to 500 lines, bounded to 2000 lines or 50KB. Reads are repeatable snapshots, not an incremental log.",
     parameters: Type.Object({ name: nameSchema, lines: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LINES })) }),
     async execute(_id, params, signal) {
       signal?.throwIfAborted();
-      const target = requireTarget(params.name);
-      const lines = params.lines ?? 500;
-      const output = await hostForTarget(pi, target).read(target, lines, signal);
-      return { content: [{ type: "text", text: `${identity(target)}\n${snapshot(output, lines)}` }], details: { target } };
+      const target = requirePanel(params.name);
+      const lines = params.lines ?? DEFAULT_LINES;
+      const output = await readPanel(hostForTarget(pi, target), target, lines, signal);
+      return { content: [{ type: "text", text: `${identity(target)}\n${output}` }], details: { target } };
     },
   });
 
   pi.registerTool({
     name: "panel-send",
     label: "Send to Panel",
-    description: "Send literal terminal text or native key presses to a registered target. Supply exactly one of text or keys. Text presses Enter by default; enter is valid only with text. This is terminal input, not draft-safe Pi prompt submission.",
+    description: "Type a line of text or press native keys such as ctrl+c and Escape in a panel, then return its output. Supply exactly one of text or keys. This is terminal input, not draft-safe Pi prompt submission.",
     parameters: Type.Object({
       name: nameSchema,
       text: Type.Optional(Type.String()),
       keys: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })),
-      enter: Type.Optional(Type.Boolean()),
     }),
     async execute(_id, params, signal) {
       signal?.throwIfAborted();
       if ((params.text === undefined) === (params.keys === undefined)) throw new Error("Supply exactly one of text or keys.");
-      if (params.keys && params.enter !== undefined) throw new Error("enter is only valid with text.");
-      const target = requireTarget(params.name);
-      await hostForTarget(pi, target).send(target, params.text !== undefined
-        ? { kind: "text", text: params.text, enter: params.enter ?? true }
+      const target = requirePanel(params.name);
+      const host = hostForTarget(pi, target);
+      await host.send(target, params.text !== undefined
+        ? { kind: "text", text: params.text, enter: true }
         : { kind: "keys", keys: params.keys! }, signal);
-      return { content: [{ type: "text", text: `Sent to ${identity(target)}.` }], details: { target } };
+      await delay(SETTLE_MS, undefined, { signal });
+      const output = await readPanel(host, target, DEFAULT_LINES, signal);
+      return { content: [{ type: "text", text: `${identity(target)}\n${output}` }], details: { target } };
     },
   });
 
   pi.registerTool({
     name: "panel-close",
     label: "Close Panel",
-    description: "Close a registered target and release its name. Finished shell panels retain their output until explicitly closed. A worker with an active parent request cannot be closed through this tool; cancel that request instead.",
+    description: "Close a panel and release its name. A worker with an active parent request cannot be closed through this tool; cancel that request instead.",
     parameters: Type.Object({ name: nameSchema }),
     async execute(_id, params, signal) {
       signal?.throwIfAborted();
       const release = claimName(params.name);
       try {
-        const target = requireTarget(params.name);
+        const target = requirePanel(params.name);
         // Once close starts, finish cleanup even if the tool is cancelled.
         await hostForTarget(pi, target).close(target);
         removeTarget(params.name);
@@ -167,10 +141,12 @@ export default function panelsExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("panels", {
-    description: "List registered panels, workers, and interactive forks. Exited targets retain their names until explicitly closed.",
+    description: "List registered panels, workers, and interactive forks. Exited panels retain their names until explicitly closed.",
     async handler(_args, ctx) {
       const targets = listTargets();
-      ctx.ui.notify(snapshot(targets.length ? targets.map((target) => `${identity(target)} [${target.kind}]`).join("\n") : "No registered panels."), "info");
+      ctx.ui.notify(snapshot(targets.length
+        ? targets.map((target) => `${identity(target)} ${target.kind} (${target.id})`).join("\n")
+        : "No registered panels."), "info");
     },
   });
 }

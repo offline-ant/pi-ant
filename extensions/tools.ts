@@ -41,7 +41,7 @@ const STRUCTURED_WORKER_TYPES = new Set([
   "pi-orchestration:fresh-history",
 ]);
 const BOBS_INSTRUCTIONS =
-  "Root orchestration mode: delegate repository or environment work rather than doing it here. Use delegate with context='inherit' when the task depends on context established in the current conversation, context='project' for a self-contained task in a blank conversation with project guidance, and context='clean' for independent fresh-eyes work. A project task must include all relevant conversation-specific requirements, decisions, paths, findings, and constraints. Use coding-agent for persistent fresh context, fresh-history for a recent excerpt, and ask for required decisions. Answer directly only when no inspection or tool work is needed. Inherited delegates receive the deterministic Research tool profile.";
+  "Root orchestration mode: prefer do for non-trivial repository or environment work; give a brief goal without investigating just to prepare a handoff. Use delegate only occasionally for large standalone tasks with a complete brief. Use coding-agent for persistent work, fresh-history for a recent excerpt, and ask for required decisions. Answer directly when no inspection or tool work is needed.";
 
 type Tab = "tools" | "profiles";
 

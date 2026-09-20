@@ -26,7 +26,7 @@ export function forkFixture() {
   const controlDirectories: string[] = [];
   let failure: string | undefined;
   const pi = {
-    getActiveTools: () => ["read", "ask", "delegate", "unknown-in-child"],
+    getActiveTools: () => ["read", "ask", "do", "delegate", "fresh_look", "unknown-in-child"],
     getThinkingLevel: () => "high",
     exec: async (_command: string, args: string[]) => {
       commands.push(args);

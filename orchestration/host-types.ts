@@ -1,4 +1,13 @@
-export type HostKind = "tmux" | "herdr" | "emacs";
+export const HOST_KINDS = ["tmux", "herdr", "emacs", "web"] as const;
+export type HostKind = (typeof HOST_KINDS)[number];
+export function isHostKind(value: unknown): value is HostKind {
+  return typeof value === "string" && (HOST_KINDS as readonly string[]).includes(value);
+}
+/** One reachable host and the endpoint its operations need. */
+export interface HostSelection {
+  kind: HostKind;
+  endpoint: string;
+}
 export interface HostTarget {
   host: HostKind;
   endpoint: string;

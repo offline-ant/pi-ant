@@ -17,19 +17,19 @@ export const SIMPLIFY_SUFFIX =
   "Before changing anything, propose what can be deleted, inlined, merged, renamed, or not built. Prefer the smallest clean end state over options, compatibility layers, and abstractions that do not pull their weight. Show concrete simplifications and ask about material design choices; wait for approval before implementing them.";
 
 export const DELEGATE_REVIEW_SUFFIX =
-  "Use delegate with context='project' for a generic review of this, requesting only issues and potential improvements. Then evaluate its suggestions: apply clearly good ones, ignore bad ones, and ask me about anything uncertain.";
+  "Use do (alt=true if available) for a generic review of this, requesting only issues and potential improvements. Then evaluate its suggestions: apply clearly good ones, ignore bad ones, and ask me about anything uncertain.";
 
 export const TS_SUFFIX = "Thoughts? Suggestions?";
 
-export const DELEGATE_PROGRESS_SNIPPET = `Use delegate with context='inherit' to execute the feasible plan. Start with one cohesive delegate; add serial delegates only after a result exposes remaining work, a blocker, or a handoff. Never run dependent or overlapping edits in parallel.
+export const DELEGATE_PROGRESS_SNIPPET = `Use do to execute the feasible plan. Start with one cohesive do call; add serial calls only after a result exposes remaining work, a blocker, or a handoff. Never run dependent or overlapping edits in parallel.
 
-Each delegate should make the in-scope code/docs changes, run relevant checks, and update workboard.md when applicable. If it materially changes a plan, review that plan with delegate context='clean' and triage the result before execution. Move unresolved material choices to needs-decision with a scratch/decisions artifact.
+Each call should make the in-scope code/docs changes, run relevant checks, and update workboard.md when applicable. If it materially changes a plan, review that plan with do (alt=true if available) and triage the result before execution. Move unresolved material choices to needs-decision with a scratch/decisions artifact.
 
 Verify each returned result before continuing. Finish with the parent-facing outcome: required changed files, checks, evidence, caveats, blockers, and next actions. Omit introductions, repetition, and optional background first. Stop only when feasible scope is complete or a real decision/external blocker is documented.`;
 
-export const SUPERVISE_SNIPPET = `Use delegate with context='project' to execute the plan in serial phases. A new worker knows only its loaded project instructions, so provide the task, current state, relevant files, extra constraints, and handoff facts without repeating project guidance.
+export const SUPERVISE_SNIPPET = `Use do to execute the plan in serial phases. State each phase's goal, scope, and what to return; do not repeat established context.
 
-Wait for each result before sending follow-up work. Verify progress and correct quick fixes or wrong architecture. Before 89% context use, require a handoff.md preserving decisions, changed files, checks, blockers, and next actions, then continue with a new delegate. Do not mention supervision unless it affects the task.
+Wait for each result before sending follow-up work. Verify progress and correct quick fixes or wrong architecture. If context pressure requires a fresh worker, preserve decisions, changed files, checks, blockers, and next actions in handoff.md, then use delegate with a complete brief. Do not mention supervision unless it affects the task.
 
 Stop when feasible scope and relevant validation/docs are complete or a material decision/external blocker is documented. Commit only if explicitly requested.`;
 
@@ -50,7 +50,7 @@ Return the recommended shape, avoided abstractions/shims, state ownership, seman
 
 export const ENRICH_SNIPPET = `Perform an enrichment pass only. Do not implement source changes or authority-doc changes.
 
-Read the relevant required-reading, handoff, plans, and current code/docs for this topic. If you write or materially change a plan, use delegate with context='clean' for a generic review before finishing, then triage the review in the same pass: apply clearly good suggestions, ignore bad ones, and split real unresolved questions into needs-decision with a scratch/decisions artifact.
+Read the relevant required-reading, handoff, plans, and current code/docs for this topic. If you write or materially change a plan, use do (alt=true if available) for a generic review before finishing, then triage the review in the same pass: apply clearly good suggestions, ignore bad ones, and split real unresolved questions into needs-decision with a scratch/decisions artifact.
 
 Return the factual state with file references, stale/contradictory docs, open design questions, local versus human decisions, overcomplication risks, and the exact workboard.md update. Preserve evidence, caveats, blockers, and next actions; omit introductions and repetition. Usually move executable work to ready and material unresolved choices to needs-decision.
 
@@ -88,7 +88,7 @@ export const SNIPPETS: PromptSnippet[] = [
   {
     key: "delegate-review",
     value: DELEGATE_REVIEW_SUFFIX,
-    description: "Insert the project delegate review suffix",
+    description: "Insert the do review suffix",
   },
   {
     key: "ts",
@@ -98,12 +98,12 @@ export const SNIPPETS: PromptSnippet[] = [
   {
     key: "delegate-progress",
     value: DELEGATE_PROGRESS_SNIPPET,
-    description: "Insert inherited delegate progress instructions",
+    description: "Insert do progress instructions",
   },
   {
     key: "supervise",
     value: SUPERVISE_SNIPPET,
-    description: "Insert delegate supervisor instructions",
+    description: "Insert do supervisor instructions",
   },
   {
     key: "api-review",

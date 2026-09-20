@@ -15,7 +15,7 @@ If this fails, stop; do not inspect or control an outside user's focused session
 
 ## Local Pi orchestration policy
 
-Use `delegate`, `coding-agent`, `/fork-here`, and the `panel-*` tools for managed Pi workers, forks, and shell panels. They preserve ownership, explicit host/socket identity, result collection, and cleanup.
+Use `do`, `delegate`, `coding-agent`, `/fork-here`, and the `panel-*` tools for managed Pi workers, forks, and shell panels. They preserve ownership, explicit host/socket identity, result collection, and cleanup.
 
 Managed Pi prompts must use orchestration's private terminal-input socket, not `herdr agent prompt`, `pane run`, or text/key injection. Native terminal input appends to human drafts; Herdr 0.9.0's improved prompt delivery does not provide draft isolation. Do not bypass the worker protocol or treat a Herdr lifecycle state as a matching worker result.
 

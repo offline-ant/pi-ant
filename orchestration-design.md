@@ -33,10 +33,10 @@ The host-specific work is:
 
 ```text
 orchestration/
-  extensions/              # delegate, coding-agent, panel tools, fork command
+  extensions/              # do/delegate/fresh_look, coding-agent, panel tools, fork command
   workers.ts               # common execution and persistent worker registry
   worker-frame.ts          # common child task/supervision/retrospective policy
-  context.ts               # inherited/project/clean/history session preparation
+  context.ts               # conversation/project/instruction-free/history session preparation
   host.ts                  # small interface and host selection
   hosts/
     tmux.ts
@@ -50,14 +50,14 @@ This is a responsibility sketch, not a requirement to create every file before
 it has enough code to justify existing. No backend plugin registry, capability
 negotiation framework, or provider class hierarchy.
 
-Use one set of public tool names on every host: `delegate`, `coding-agent`,
-`fresh-history`, and neutral `panel-start`, `panel-read`, `panel-send`,
+Use one set of public tool names on every host: `do`, `delegate`, `fresh_look`,
+`coding-agent`, `fresh-history`, and neutral `panel-start`, `panel-read`, `panel-send`,
 `panel-close`. Ordinary foreground `bash` stays Pi's built-in tool.
 Expose interactive forking as `/fork-here`, a user slash command rather than
 another LLM-callable delegation tool. It replaces `/herdr-fork` and the old
 `/tmux-fork` command without keeping backend-specific aliases.
 
-Old tmux `call` and `minitask` overlap the current delegate context modes; do
+Old tmux `call` and `minitask` overlap `do`, `delegate`, and `fresh_look`; do
 not restore their names, old model fallbacks, or old state formats merely to
 support tmux again. Backend support is not backwards compatibility with the
 old tmux package's complete public API.
@@ -75,7 +75,7 @@ Retain the existing optional name, folder, and initial prompt behavior.
 - With no prompt, open idle. Preserve the parent's editor draft and session.
 - Use a sibling pane in tmux/Herdr and a separate Pilish chat/input pair in
   Emacs. The host chooses native placement; expose no layout configuration.
-- Unlike a delegate, the fork has no parent result wait, automatic retrospective,
+- Unlike a `do` worker, the fork has no parent result wait, automatic retrospective,
   or automatic close. It is an independent conversation and may fork again,
   subject to the shared nesting policy.
 - Keep Pi's built-in `/fork` unchanged: that navigates into a fork in the
@@ -145,10 +145,10 @@ invalidate that guarantee. Lossless shell-log cursors require capturing output
 at its source; treat that as a separately specified capture contract, not an
 implicit property of `read`.
 
-Readiness waiting is distinct from task completion. Keep readiness matching
-behind the common panel operation; native host output-wait mechanisms can be
-used where appropriate. Its timeout/error must retain target identity and
-recent output for diagnosis.
+Panels do not wait for readiness. Matching startup text is guesswork that
+blocks the caller and reports a healthy panel as a failure; a real probe from
+`bash` answers the actual question. `panel-read` covers inspection, and
+`panel-send` answers with the output that followed its input.
 
 ## Shared worker protocol
 
@@ -158,7 +158,7 @@ and one current schema. Do not add an Emacs-specific worker protocol or
 obsolete-format readers.
 
 ```text
-delegate task
+do / delegate / fresh_look task
   -> prepare session and request
   -> host.start(Pi session)
   -> submit /worker-run request through the host's Pi-input path
@@ -273,7 +273,7 @@ There are three native adapters, not three packages or old-name aliases.
    startup, prompt/draft handling, capture, and process death. Delete obsolete
    protocol parsing rather than bringing it into the common layer.
 3. Implement Emacs/Pilish operations and fix human-input ordering.
-4. Exercise the same delegate/persistent-worker lifecycle tests on all hosts:
+4. Exercise the same ephemeral/persistent-worker lifecycle tests on all hosts:
    retries, compaction, takeover, retrospective failure, duplicate names,
    cancellation, missing processes, and mismatched/late results. Test
    `/fork-here` both idle and with an initial prompt, unchanged parent drafts,

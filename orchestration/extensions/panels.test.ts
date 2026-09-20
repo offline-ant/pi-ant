@@ -9,11 +9,9 @@ interface Params {
   name: string;
   command?: string;
   folder?: string;
-  waitFor?: { match: string; regex?: boolean; timeoutMs?: number };
   lines?: number;
   text?: string;
   keys?: string[];
-  enter?: boolean;
 }
 interface Result { content: Array<{ type: string; text: string }>; details: { target: HostTarget } }
 type Execute = (id: string, params: Params, signal: AbortSignal | undefined, update: undefined, ctx: ExtensionContext) => Promise<Result>;
@@ -59,7 +57,9 @@ function fixture(t: TestContext) {
       switch (args[2]) {
         case "new-window": stdout = "%9"; code = config.failStart ? 1 : 0; config.onCreate(); break;
         case "display-message":
-          stdout = args.at(-1) === "#{session_id}" ? "$1" : config.dead ? "1" : "0";
+          // Only pane queries fail when a pane vanishes; the server itself stays usable.
+          if (args.at(-1) === "#{session_id}") { stdout = "$1"; break; }
+          stdout = config.dead ? "1" : "0";
           code = config.missing ? 1 : 0;
           break;
         case "capture-pane": stdout = config.output; code = config.failRead ? 1 : 0; config.onRead(); break;
@@ -86,6 +86,7 @@ test("neutral tools start shell panels with explicit parent and retain exited na
   assert.deepEqual([...f.commands.keys()], ["panels"]);
   const started = await f.run("panel-start", { command: "printf ready", folder: "." });
   assert.equal(started.details.target.kind, "shell");
+  assert.match(started.content[0].text, new RegExp(`^Started: ${f.name} \\[tmux\\] in /`));
   assert.equal(readTarget(f.name)?.id, "%9");
   assert.ok(f.calls[0].includes("%1"));
   assert.ok(f.calls[1].includes("$1"));
@@ -94,61 +95,24 @@ test("neutral tools start shell panels with explicit parent and retain exited na
   assert.match((await f.run("panel-read")).content[0].text, /finished output/);
   await assert.rejects(f.run("panel-start", { command: "other" }), /Close it explicitly/);
   await f.list();
-  assert.ok(f.notifications[0].includes(`${f.name} (tmux:%9; endpoint: ${endpoint}) [shell]`));
+  assert.ok(f.notifications[0].includes(`${f.name} [tmux] shell (%9)`));
   await f.run("panel-close");
   assert.equal(readTarget(f.name), undefined);
   claimName(f.name)();
   assert.ok(f.calls.at(-1)?.includes("kill-pane"));
 });
 
-test("literal and regex readiness use snapshots and check before treating process exit as failure", async (t) => {
+test("vanished native surfaces report clearly and release their name to the next start", async (t) => {
   const f = fixture(t);
-  let reads = 0;
-  f.config.onRead = () => { reads++; f.config.output = "server listening: 8080"; };
-  const ready = await f.run("panel-start", { command: "server", waitFor: { match: "listening: \\d+", regex: true, timeoutMs: 1000 } });
-  assert.equal(reads, 2);
-  assert.match(ready.content[0].text, /^Ready:/);
-  await f.run("panel-close");
-  f.config.dead = true;
-  const exitedReady = await f.run("panel-start", { command: "echo listening", waitFor: { match: "listening: 8080" } });
-  assert.match(exitedReady.content[0].text, /^Ready:/);
-});
-
-test("readiness timeout retains identity, recent output, registry and releaseable claim", async (t) => {
-  const f = fixture(t);
-  await assert.rejects(f.run("panel-start", { command: "sleep 1", waitFor: { match: "ready", timeoutMs: 20 } }), (error: unknown) => {
-    assert.ok(error instanceof Error);
-    assert.match(error.message, /Readiness timed out after 20ms/);
-    assert.ok(error.message.includes(`${f.name} (tmux:%9; endpoint: ${endpoint})`));
-    assert.match(error.message, /booting/);
-    return true;
-  });
+  await f.run("panel-start", { command: "server" });
+  f.config.missing = true;
+  f.config.failRead = true;
+  await assert.rejects(f.run("panel-read"), new RegExp(`Panel '${f.name}' no longer exists on tmux`));
+  f.config.failRead = false;
+  const restarted = await f.run("panel-start", { command: "server" });
+  assert.match(restarted.content[0].text, /^Started:/);
   assert.equal(readTarget(f.name)?.id, "%9");
-  assert.equal(f.calls.some((args) => args.includes("kill-pane")), false);
-  claimName(f.name)();
-  await f.run("panel-close");
-});
-
-test("process exit and missing target fail readiness without deleting diagnostic registration", async (t) => {
-  const f = fixture(t);
-  f.config.dead = true;
-  await assert.rejects(f.run("panel-start", { command: "false", waitFor: { match: "ready" } }), /Process exited before readiness matched[\s\S]*booting/);
-  assert.ok(readTarget(f.name));
-  await f.run("panel-close");
-  f.config.dead = false;
-  f.config.onRead = () => { f.config.missing = true; };
-  await assert.rejects(f.run("panel-start", { command: "true", waitFor: { match: "ready" } }), /Process missing/);
-  assert.ok(readTarget(f.name));
-});
-
-test("cancellation while awaiting readiness closes and unregisters only the newly owned target", async (t) => {
-  const f = fixture(t);
-  const abort = new AbortController();
-  f.config.onRead = () => abort.abort();
-  await assert.rejects(f.run("panel-start", { command: "sleep 1", waitFor: { match: "ready" } }, abort.signal), /abort/i);
-  assert.equal(readTarget(f.name), undefined);
-  assert.equal(f.calls.filter((args) => args.includes("kill-pane")).length, 1);
-  claimName(f.name)();
+  assert.equal(f.calls.some((args) => args.includes("kill-pane")), false, "a vanished panel needs no native close");
 });
 
 test("cancellation during creation and pre-aborted calls do not orphan or touch existing work", async (t) => {
@@ -163,9 +127,8 @@ test("cancellation during creation and pre-aborted calls do not orphan or touch 
   assert.equal(f.calls.length, before);
 });
 
-test("invalid readiness, missing folders, startup failures and name conflicts release their claims", async (t) => {
+test("missing folders, startup failures and name conflicts release their claims", async (t) => {
   const f = fixture(t);
-  await assert.rejects(f.run("panel-start", { command: "true", waitFor: { match: "[", regex: true } }), /Invalid regular expression/);
   await assert.rejects(f.run("panel-start", { command: "true", folder: `/missing-panel-${process.pid}` }), /folder does not exist/);
   assert.equal(f.calls.length, 0);
   f.config.failStart = true;
@@ -202,23 +165,25 @@ test("reads are repeatable bounded snapshots and truncate oversized Unicode outp
   assert.match(manyLines.content[0].text, /line 2999$/);
 });
 
-test("send distinguishes literal text from keys, validates combinations, and allows supervised input", async (t) => {
+test("send submits literal lines or keys, validates combinations, and answers with the resulting output", async (t) => {
   const f = fixture(t);
   await f.run("panel-start", { command: "server" });
   const release = claimName(f.name); // An active parent request owns the name, but human input is still allowed.
   try {
-    await f.run("panel-send", { text: "Enter ctrl+c\nmore", enter: false });
-    assert.deepEqual(f.calls.at(-1)?.slice(2), ["send-keys", "-t", "%9", "-l", "--", "Enter ctrl+c\nmore"]);
-    await f.run("panel-send", { text: "" });
-    assert.deepEqual(f.calls.at(-1)?.slice(2), ["send-keys", "-t", "%9", "Enter"]);
+    f.config.output = "prompt> Enter ctrl+c";
+    const typed = await f.run("panel-send", { text: "Enter ctrl+c" });
+    assert.deepEqual(f.calls.at(-3)?.slice(2), ["send-keys", "-t", "%9", "-l", "--", "Enter ctrl+c"]);
+    assert.deepEqual(f.calls.at(-2)?.slice(2), ["send-keys", "-t", "%9", "Enter"]);
+    assert.deepEqual(f.calls.at(-1)?.slice(2), ["capture-pane", "-p", "-t", "%9", "-S", "-500"]);
+    assert.match(typed.content[0].text, /prompt> Enter ctrl\+c/);
     await f.run("panel-send", { keys: ["ctrl+c", "Escape"] });
-    assert.deepEqual(f.calls.at(-1)?.slice(2), ["send-keys", "-t", "%9", "C-c", "Escape"]);
+    assert.deepEqual(f.calls.at(-2)?.slice(2), ["send-keys", "-t", "%9", "C-c", "Escape"]);
     await assert.rejects(f.run("panel-close"), /already being used/);
   } finally { release(); }
   await assert.rejects(f.run("panel-send"), /exactly one/);
   await assert.rejects(f.run("panel-send", { text: "x", keys: ["Enter"] }), /exactly one/);
-  await assert.rejects(f.run("panel-send", { keys: ["Enter"], enter: false }), /only valid with text/);
   await assert.rejects(f.run("panel-read", { name: "%9" }), /Name must/);
+  await assert.rejects(f.run("panel-read", { name: `${f.name}-unknown` }), /No panel named/);
 });
 
 test("stored host survives environment changes, close completes despite cancellation and failed close retains recovery", async (t) => {
@@ -245,10 +210,11 @@ test("stored host survives environment changes, close completes despite cancella
   }
 });
 
-test("read failures preserve diagnostic identity; cancelling a read never closes pre-existing work", async (t) => {
+test("live read failures keep their native cause and cancelled reads never close existing panels", async (t) => {
   const f = fixture(t);
+  await f.run("panel-start", { command: "server" });
   f.config.failRead = true;
-  await assert.rejects(f.run("panel-start", { command: "server", waitFor: { match: "ready" } }), /fake native failure[\s\S]*Panel retained:[\s\S]*no output captured/);
+  await assert.rejects(f.run("panel-read"), /fake native failure/);
   assert.ok(readTarget(f.name));
   f.config.failRead = false;
   const abort = new AbortController();
@@ -257,14 +223,4 @@ test("read failures preserve diagnostic identity; cancelling a read never closes
   await assert.rejects(f.run("panel-read", {}, abort.signal), /abort/i);
   assert.equal(f.calls.length, count);
   assert.ok(readTarget(f.name));
-});
-
-test("failed cancellation cleanup reports retained target instead of losing recovery identity", async (t) => {
-  const f = fixture(t);
-  const abort = new AbortController();
-  f.config.failClose = true;
-  f.config.onRead = () => abort.abort();
-  await assert.rejects(f.run("panel-start", { command: "sleep 1", waitFor: { match: "ready" } }, abort.signal), /Could not close .*tmux:%9/);
-  assert.ok(readTarget(f.name));
-  claimName(f.name)();
 });
