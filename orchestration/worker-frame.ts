@@ -10,7 +10,7 @@ const WORKER_RUN_COMMAND = "worker-run";
 const CONTINUE_WORKER_COMMAND = "worker-continue";
 const SUBMIT_WORKER_COMMAND = "worker-submit";
 const FINISH_WORKER_NOW_COMMAND = "finish-worker-now";
-const SUBWORKER_TOOLS = new Set(["delegate", "coding-agent", "fresh-history"]);
+const SUBWORKER_TOOLS = new Set(["do", "delegate", "fresh_look", "coding-agent", "fresh-history"]);
 const FIRST_ACTION_SUBWORKER_WARNING =
   "This is an automated warning heuristic. You are in a worker frame. Do not simply forward the entire task; investigate it and/or split it into a distinct subtask. Continue working, and retry the worker call if this warning was triggered in error.";
 

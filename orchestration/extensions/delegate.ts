@@ -1,32 +1,48 @@
-import { StringEnum } from "@earendil-works/pi-ai";
+import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { renderWorkerCall } from "../worker-call.ts";
 import { Type, type Static } from "typebox";
-import {
-  DELEGATE_CONTEXTS,
-  inheritContextWarningPercent,
-} from "../delegate-policy.ts";
+import { renderWorkerCall } from "../worker-call.ts";
+import { EPHEMERAL_WORKER_CONTEXTS, inheritContextWarningPercent, type EphemeralWorkerTool } from "../delegate-policy.ts";
 import { prepareDelegateSession } from "../context.ts";
+import { createDelegateAltController, delegateModelLabel, type DelegateModelPair } from "../delegate-alt.ts";
 import { createWorkerArtifacts, formatWorkerResult, makeWorkerId, writeWorkerRequest } from "../worker-frame.ts";
 import { runEphemeralWorker } from "../workers.ts";
 import { createWorkerToolResolver } from "../worker-tools.ts";
 import { WORKER_DESIGN_PRINCIPLES } from "../worker-principles.ts";
 
 const delegateParams = Type.Object({
-  task: Type.String({
-    minLength: 1,
-    description: "Task to complete in one ephemeral delegated worker. For project/clean context, include all required conversation-specific context in this task.",
-  }),
-  context: StringEnum(DELEGATE_CONTEXTS, {
-    description:
-      "Required context mode. 'inherit' forks the current conversation before this call. 'project' starts a blank conversation with normal project/global resources but no conversation history. 'clean' starts a blank conversation without discovered instructions, skills, prompts, or extensions.",
-  }),
-  folder: Type.Optional(Type.String({
-    description: "Working directory. Defaults to the current directory. Inherit permits the current directory only; use project/clean to change it.",
+  task: Type.String({ minLength: 1, description: "Complete brief: requirements, relevant context, and desired result." }),
+  folder: Type.Optional(Type.String({ description: "Working directory; defaults to the current one." })),
+  alt: Type.Optional(Type.Boolean({
+    default: false,
+    description: "Use the other configured model for a second opinion. Defaults to false.",
   })),
-});
+}, { additionalProperties: false });
+const doParams = Type.Object({
+  task: Type.String({ minLength: 1, description: "Goal, scope, and desired result. Do not repeat established context." }),
+  alt: delegateParams.properties.alt,
+}, { additionalProperties: false });
 
 export type DelegateParams = Static<typeof delegateParams>;
+
+const toolGuidance: Record<EphemeralWorkerTool, { label: string; description: string; snippet: string }> = {
+  do: {
+    label: "Do",
+    description: "Execute part of the current task with this conversation's context. Give a brief goal; don't investigate merely to prepare the handoff. Prefer do for non-trivial work.",
+    snippet: "Execute part of the current task with the conversation's context (preferred)",
+  },
+  delegate: {
+    label: "Delegate",
+    description: "Assign a large standalone task using the target directory's project instructions, without this conversation. Give a complete brief. Rarely needed; prefer do.",
+    snippet: "Assign a large standalone task with a complete brief (rare; prefer do)",
+  },
+  fresh_look: {
+    label: "Fresh Look",
+    description: "Review a self-contained question without this conversation or discovered project/global instructions. Include everything needed in the task.",
+    snippet: "Review a self-contained question without conversation or project instructions",
+  },
+};
+const concurrencyGuideline = "Batch independent do, delegate, fresh_look, and coding-agent calls; they run concurrently. Wait for results before dependent reads, edits, or checks. Workers share files, not each other's conversation.";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -36,7 +52,7 @@ function branchHasInheritContextWarning(ctx: ExtensionContext): boolean {
   return ctx.sessionManager.getBranch().some(
     (entry) => entry.type === "message"
       && entry.message.role === "toolResult"
-      && entry.message.toolName === "delegate"
+      && entry.message.toolName === "do"
       && isRecord(entry.message.details)
       && entry.message.details.inheritContextWarning === true,
   );
@@ -51,62 +67,99 @@ export default function delegateExtension(pi: ExtensionAPI): void {
     inheritContextWarningWasReturned = branchHasInheritContextWarning(ctx);
   }
 
-  pi.on("session_start", async (_event, ctx) => restoreWarningState(ctx));
+  pi.on("session_start", async (_event, ctx) => {
+    restoreWarningState(ctx);
+    // Optional by default. Tool profiles restore explicit saved selections, and
+    // /worker-run applies the caller's selected tools after startup.
+    pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "fresh_look"));
+  });
   pi.on("session_tree", async (_event, ctx) => restoreWarningState(ctx));
 
-  pi.registerTool({
-    name: "delegate",
-    label: "Delegate",
-    description: "Run one task in an ephemeral worker and wait for its result and automatic retrospective. Calls in the same batch run concurrently; listing another tool after delegate does not make it wait for the worker. Results return before the parent's next response. context='inherit' copies the parent conversation from before this call; context='project' or 'clean' starts a blank conversation. context is required. Failures throw with recovery details.",
-    promptSnippet: "Run an ephemeral task with inherited, project, or clean context",
-    promptGuidelines: [
-      "Use delegate with context='inherit' when the task depends on context established in the current conversation. Use context='project' for a self-contained task that needs normal project guidance but no conversation history; include all relevant requirements, decisions, paths, findings, and constraints in task. Use context='clean' for independent fresh-eyes work.",
-      "Issue independent, non-overlapping delegate and coding-agent calls together. Calls in the same batch run concurrently, regardless of their order. Do not include reads, edits, or checks that depend on a worker's changes in that batch; wait for its result first. Sibling delegates can see each other's filesystem changes, but do not receive each other's reasoning or conversation output.",
-    ],
-    parameters: delegateParams,
-    executionMode: "parallel",
-    renderCall: (args) => renderWorkerCall("delegate", args),
-    async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const warningPercent = inheritContextWarningPercent(
-        params.context,
-        ctx.getContextUsage()?.percent,
-        inheritContextWarningWasReturned,
-      );
-      if (warningPercent !== undefined) {
-        inheritContextWarningWasReturned = true;
-        return {
-          content: [{
-            type: "text",
-            text: `Delegate not started: this conversation uses ${warningPercent.toFixed(1)}% of its context window. Prefer context='project' with a self-contained task unless the worker requires the conversation history. Retry with context='inherit' to proceed; this warning is shown once per conversation branch.`,
-          }],
-          details: { inheritContextWarning: true, contextPercent: warningPercent },
-        };
-      }
+  function register(pair: DelegateModelPair | null): void {
+    for (const tool of Object.keys(EPHEMERAL_WORKER_CONTEXTS) as EphemeralWorkerTool[]) {
+      const context = EPHEMERAL_WORKER_CONTEXTS[tool];
+      const guidance = toolGuidance[tool];
+      const schema = tool === "do" ? doParams : delegateParams;
+      const parameters = pair ? schema : Type.Omit(schema, ["alt"]);
+      pi.registerTool({
+        name: tool,
+        label: guidance.label,
+        description: guidance.description
+          + (pair ? ` Models: ${pair.map(delegateModelLabel).join(" and ")}. Set alt=true to use the other model.` : ""),
+        promptSnippet: guidance.snippet,
+        promptGuidelines: [
+          ...(tool === "do" ? ["Prefer do for non-trivial investigation, verification, review, and implementation within the current task. Give a brief goal; use delegate only occasionally for large, fully specified standalone assignments. Handle trivial work directly."] : []),
+          concurrencyGuideline,
+        ],
+        parameters,
+        prepareArguments(args) {
+          // Pi may strip undeclared fields. Reject them before validation so an
+          // obsolete context/folder/alt request cannot silently change meaning.
+          if (isRecord(args)) {
+            for (const key of Object.keys(args)) {
+              if (!Object.hasOwn(parameters.properties, key)) {
+                throw new Error(`${tool} does not accept '${key}'.${key === "alt" ? " Configure /delegate-alt first." : ""}`);
+              }
+            }
+            if (Object.hasOwn(args, "alt") && typeof args.alt !== "boolean") {
+              throw new Error(`${tool} alt must be a boolean.`);
+            }
+          }
+          return args as DelegateParams;
+        },
+        executionMode: "parallel",
+        renderCall: (args) => renderWorkerCall(tool, args),
+        async execute(toolCallId, params: DelegateParams, signal, onUpdate, ctx) {
+          const model = alternate.resolve(ctx, params.alt === true);
+          const thinkingLevel = clampThinkingLevel(model, pi.getThinkingLevel());
+          const modelInfo = `Worker model: ${delegateModelLabel(model)}; thinking: ${thinkingLevel}.`;
+          const warningPercent = inheritContextWarningPercent(context, ctx.getContextUsage()?.percent, inheritContextWarningWasReturned);
+          if (warningPercent !== undefined) {
+            inheritContextWarningWasReturned = true;
+            return {
+              content: [{
+                type: "text",
+                text: `do not started: this conversation uses ${warningPercent.toFixed(1)}% of Pi's reported context window. Retry do to proceed, or use delegate with a complete brief. This warning is shown once per conversation branch.`,
+              }],
+              details: { inheritContextWarning: true, contextPercent: warningPercent },
+            };
+          }
 
-      const prepared = prepareDelegateSession(params, ctx, toolCallId, pi.getThinkingLevel());
-      const id = makeWorkerId();
-      const paths = createWorkerArtifacts();
-      if (!ctx.model) throw new Error("Current session has no selected model.");
-      writeWorkerRequest(paths, {
-        id,
-        task: [params.context === "inherit"
-          ? "You are inside an inherited delegate frame. The parent delegated the task below from its current conversation. Complete it here; use nested delegation only for a genuinely separate subtask."
-          : "", WORKER_DESIGN_PRINCIPLES, "", "Task:", params.task].filter(Boolean).join("\n\n"),
-        tools: workerTools.current(),
-        model: { provider: ctx.model.provider, id: ctx.model.id },
-        thinkingLevel: pi.getThinkingLevel(),
-        resultPath: paths.resultPath,
-        statusPath: paths.statusPath,
-        closeWhenDone: true,
+          const prepared = prepareDelegateSession({ ...params, tool }, ctx, toolCallId, { model, thinkingLevel });
+          const id = makeWorkerId();
+          const paths = createWorkerArtifacts();
+          writeWorkerRequest(paths, {
+            id,
+            task: [tool === "do"
+              ? "Complete the task below using the existing conversation. Use nested do calls only for genuinely separate subtasks; do not forward the whole assignment."
+              : "", WORKER_DESIGN_PRINCIPLES, "Task:", params.task].filter(Boolean).join("\n\n"),
+            tools: workerTools.current(),
+            model: { provider: model.provider, id: model.id },
+            thinkingLevel,
+            resultPath: paths.resultPath,
+            statusPath: paths.statusPath,
+            closeWhenDone: true,
+          });
+          const output = await runEphemeralWorker(pi, {
+            ...prepared, id, name: `${tool}-${id}`, paths, task: params.task, signal,
+            onUpdate: onUpdate ? (update) => onUpdate({
+              ...update, content: [{ type: "text", text: modelInfo }, ...update.content],
+            }) : undefined,
+          });
+          return {
+            content: [{ type: "text", text: `${modelInfo}\n\n${formatWorkerResult(output.result)}` }],
+            details: { ...output.details, context, cwd: prepared.cwd, result: output.result,
+              model: { provider: model.provider, id: model.id }, thinkingLevel, alt: params.alt === true,
+              args: prepared.args, sessionCommand: `pi --session ${prepared.sessionFile}` },
+          };
+        },
       });
-      const output = await runEphemeralWorker(pi, {
-        ...prepared, id, name: `delegate-${id}`, paths, task: params.task, signal, onUpdate,
-      });
-      return {
-        content: [{ type: "text", text: formatWorkerResult(output.result) }],
-        details: { ...output.details, context: params.context, cwd: prepared.cwd, result: output.result,
-          args: prepared.args, sessionCommand: `pi --session ${prepared.sessionFile}` },
-      };
-    },
+    }
+  }
+  register(null);
+  const alternate = createDelegateAltController(pi, (pair) => {
+    const activeTools = pi.getActiveTools();
+    register(pair);
+    pi.setActiveTools(activeTools);
   });
 }

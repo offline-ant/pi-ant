@@ -3,8 +3,9 @@
 Personal Pi extensions for development tools. Unified orchestration lives in
 [`orchestration/`](orchestration/README.md), loaded alongside this root package.
 One worker protocol supports tmux, Herdr, and Emacs/Pilish with EAT terminals.
-`/fork-here` opens independent interactive conversations; `delegate`,
-`coding-agent`, `fresh-history`, and neutral `panel-*` tools provide orchestration.
+`/fork-here` opens independent interactive conversations; `do`, `delegate`,
+`fresh_look`, `coding-agent`, `fresh-history`, and neutral `panel-*` tools provide
+orchestration.
 The replaced backend packages and legacy semaphore/Claude bridge tools are removed.
 Emacs startup must load `orchestration/emacs/pi-orchestration.el` in Pilish's
 `use-package :config` before the first Pi spawn. The companion owns host/server
@@ -28,6 +29,47 @@ Browser automation and web retrieval are provided by the separately loaded
 with the standalone `pagent` application. `PI_WEB_BACKEND=auto` (default) prefers
 Codex and reports browser fallback when unavailable; `codex` and `browser` select
 strict backends. Backend selection is host configuration, not a tool argument.
+
+## Herdr finish prompts
+
+Inside a Herdr Pi TUI, while this Pi is idle:
+
+```text
+/start-tab-finish Review the changes and run the tests
+/start-space-finish Check the combined work across this workspace
+/start-finish-cancel
+```
+
+The first two commands wait, without model calls, until **all other recognized
+agents** in the caller's tab or workspace are `idle` or `done`, then submit the
+prompt once to this Pi. They do not create a tab, workspace, or session. Herdr
+change events trigger fresh checks of the live scope: late arrivals and agents
+that become busy again count; agents that leave no longer count. Ordinary shells
+are ignored. `working`, `blocked`, and `unknown` prevent starting. No other agents
+means the prompt can start immediately.
+
+Waiting Pi sessions report `blocked` through the installed Herdr Pi integration
+(`herdr:blocked`). Two waiters in each other's scope deliberately block each other;
+cancel one to release the other. The integration must be active and its blocked
+report must be observed before a prompt can start. The widget shows the pending
+prompt and remaining agents. Only one prompt may be scheduled at a time.
+
+Cancellation, another submitted prompt, this Pi starting work, branch/session
+changes, reload, exit, connection failure, or the caller leaving its scope clear
+the wait. Waits are not persisted or automatically retried. Submission uses Pi's
+local message API and preserves human drafts. This is a live readiness check,
+not an atomic scheduler or proof that the other agents succeeded. Commands are
+absent outside Herdr and in RPC/print/JSON mode.
+
+Focused checks from this directory:
+
+```sh
+node scripts/test.mjs extensions/herdr-finish.test.ts extensions/herdr-finish-client.test.ts
+PI_HERDR_FINISH_NATIVE=1 node scripts/test.mjs extensions/herdr-finish-native.test.ts
+```
+
+The opt-in native test creates only disposable Herdr topology and real Pi TUIs
+with faux inference; it never makes paid model calls or changes existing panes.
 
 ## Mail configuration
 
@@ -80,11 +122,13 @@ mailbox.
 - Document flow review command: `/document-flow-review <document-path> [--profile <reader profile>]` runs a persistent isolated agent with no discovered context, skills, prompts, extensions, or built-in tools. The agent-callable `document_flow_review({ file, prompt? })` tool is inactive by default and can be enabled through `/tools`, so it consumes no model context until selected. Both entry points reveal Markdown in visually coherent 3–6-sentence reading units and assess whether each unit follows coherently from what preceded it. They show each consumed source unit with its recorded friction and current reader thinking/output, then save the full session, metadata, and final review under `scratch/document-flow-review/` in the active working directory. This review concerns the document's internal consistency and sequence, not the factual truth or external validity of its claims. Slash-command results are inserted into the current agent context; tool results enter it normally as tool output.
 - Vim conversation edit command: `/vim` — opens the current conversation transcript in `$VISUAL`/`$EDITOR`/`vim`; changed lines are sent as the next user message.
 - Reflection memory checkpoint command: `/reflect`.
+- Work reflection command: `/reflect-on-work` runs five independent single-shot reviews of the current session branch concurrently (confidence and assumptions, requirements and coverage, risk and failure analysis, complexity and maintainability, verification and evidence) and inserts one combined `# Reflection` message with one `##` section per review into the session. Each review sees a text rendering of the branch (tool results truncated as in compaction) and has no tools, no prompt-cache writes, and its own `sessionId`. A failed review becomes an `unavailable` section instead of losing the others.
 - Working-directory switch command: `/cwd <path>`.
 - Git commit command: `/git-commit [message]` runs `git add -A && git commit -m <message>`, defaulting to `auto`.
 - Git worktree creation command: `/worktree <name>`.
 - Execution safety toggle: `/exec-lints`.
-- Tool configuration: `/tools` opens a branch-persistent selector in TUI or standard RPC dialogs. The Tools tab enables or disables individual ordinary tools immediately; Tab opens Profiles for the saved `Default`, `coding`, `research`, `orchestration`, `full`, and `bobs`. Ctrl+S saves the exact current ordinary tool selection to `~/.pi/agent/tool-selection.json` as the global default for new sessions. `research` is the built-in fallback until a default is saved. The deterministic `bobs` profile restricts the root to delegation tools, gives structured workers the delegated Research tool set, and injects root orchestration instructions. `delegate` requires `context: "inherit" | "project" | "clean"`; the modes respectively fork the current conversation, start a blank conversation with project/global resources, or start a blank conversation without discovered resources. Independent sibling `delegate` and `coding-agent` calls execute concurrently and join before the parent continues. Structured workers receive the caller's active tools that are available in the child, plus `delegate`; `bobs` supplies its delegated Research set instead. A worker that tries to start another worker as its first tool call receives a one-time warning before retries are allowed. Ugo keeps its own tool control; required dynamic tools such as `sqlite` and `present_guidance` remain active when applicable.
+- Alternate delegate model: `/delegate-alt` chooses a globally saved model pair or disables alternate selection. Disabled by default, with no required configuration file. Choosing immediately adds/removes optional `alt` from the actual schemas and descriptions of `do`, `delegate`, and `fresh_look` without a reload; omitted/false retains the caller's model, true selects the other configured model. `/delegate-alt off` disables it; `/delegate-alt status` reports the selection. See [orchestration](orchestration/README.md#alternate-model-delegation).
+- Tool configuration: `/tools` opens a branch-persistent selector in TUI or standard RPC dialogs. The Tools tab enables or disables individual ordinary tools immediately; Tab opens Profiles for the saved `Default`, `coding`, `research`, `orchestration`, `full`, and `bobs`. Ctrl+S saves the exact current ordinary tool selection to `~/.pi/agent/tool-selection.json` as the global default for new sessions. `research` is the built-in fallback until a default is saved. The deterministic `bobs` profile restricts the root to delegation tools, gives structured workers the delegated Research tool set, and injects root orchestration instructions. `do({task})` is the preferred worker tool: it continues from the current conversation in the current directory, so the task is a brief goal. `delegate({task, folder?})` is the occasional exception for a large standalone assignment; its worker sees project instructions but no conversation, so the task must be a complete brief. `fresh_look({task, folder?})` starts without conversation or discovered instructions; it is in no profile and is enabled manually in `/tools`. Independent sibling `do`, `delegate`, and `coding-agent` calls execute concurrently and join before the parent continues. Structured workers receive the caller's active tools that are available in the child, plus `do`; `bobs` supplies its delegated Research set instead. A worker that tries to start another worker as its first tool call receives a one-time warning before retries are allowed. Ugo keeps its own tool control; required dynamic tools such as `sqlite` and `present_guidance` remain active when applicable.
 - Workboard command/context: `/new-workboard` creates `workboard.md`; when `workboard.md` exists in the current working directory, it is autoloaded into agent context as active operational state. `/new-workflow` creates editable `workflow.md` guidance policy; `/ugo` and guidance mode also create it when missing. Cold ideas/backlog items belong in project files outside `workboard.md` until promoted to `needs-enrichment` or `ready`.
 - AGENTS.d auto-loading: when a `./AGENTS.d/` directory exists in the workspace, its top-level files and file-target symlinks are automatically loaded and injected into the system prompt before every agent start. Subdirectories are listed in a tree structure (at the end of the injected block) but their contents are not loaded. Symlinks show their resolved real path. Dangling symlinks appear in the tree listing but are excluded from content loading.
 - Guidance mode: `PI_GUIDANCE=true pi -p "inspect workboard.md and present_guidance"` loads editable `workflow.md` guidance policy and requires a structured `present_guidance` result. `bin/pi-guidance-loop` repeatedly runs guidance, executes `CONTINUE_WORK` prompts, applies `UPDATE_WORK` workboard updates, and stops on `REQUIRE_HUMAN_DECISION` or `EMPTY_WORKBOARD`.

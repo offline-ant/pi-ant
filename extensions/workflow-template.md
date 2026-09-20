@@ -37,9 +37,10 @@ Choose one mode:
    separate artifact for a short-lived plan.
 3. **Plan, review, execute** — public API, persistence, protocol, architecture,
    security boundaries, durable naming, authority docs, or broad cross-file
-   work. Write/update a plan under `scratch/`, review it with `delegate` using
-   `context: "clean"`, triage the review, then execute if sound. Apply good feedback, reject bad feedback,
-   and move material unresolved choices to `needs-decision` with an artifact.
+   work. Write/update a plan under `scratch/`, review it with `do`
+   (`alt: true` if available), triage the review, then execute if sound. Apply
+   good feedback, reject bad feedback, and move material unresolved choices to
+   `needs-decision` with an artifact.
 4. **Supervise workers** — broad, phaseable, parallelizable, or context-heavy
    work. Drive serial or parallel workers as appropriate, verify each result,
    preserve a handoff before context rollover, and stop only when complete or
@@ -82,7 +83,7 @@ background first.
 
 Inspect required reading, handoffs, plans, code, and docs. Do not change source
 or authority docs. If a plan is written or materially changed, review it with
-`delegate` using `context: "clean"` and triage the result in the same pass.
+`do` (`alt: true` if available) and triage the result in the same pass.
 
 Return factual state with file references, stale or contradictory docs, open
 design questions, local versus human decisions, overcomplication risks, and the
@@ -90,12 +91,13 @@ exact workboard update. Separate facts, inferences, and guesses.
 
 ### Supervision
 
-Give each worker only its task-specific context, files, extra constraints, and
-handoff facts. Run dependent or overlapping work serially; parallelize only
-independent work. Verify results before the next phase. A rollover handoff must
-retain decisions, changed files, checks, blockers, and next actions. Avoid quick
-fixes, compatibility shims, duplicate mechanisms, stale names, and abstractions
-without a demonstrated use.
+Prefer `do`: state each worker's goal, scope, and constraints without repeating
+established context. A `delegate` worker needs a complete brief and handoff
+facts. Run dependent or overlapping work serially; parallelize only independent
+work. Verify results before the next phase. A rollover handoff must retain
+decisions, changed files, checks, blockers, and next actions. Avoid quick fixes,
+compatibility shims, duplicate mechanisms, stale names, and abstractions without
+a demonstrated use.
 
 ### Distillation
 

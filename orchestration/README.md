@@ -1,6 +1,7 @@
 # Pi orchestration
 
-One worker implementation with native tmux, Herdr, and Emacs/Pilish hosts.
+One worker implementation with native tmux, Herdr, and Emacs/Pilish hosts, plus
+a browser host backed by a tau web server.
 Load this package and the parent `pi-ant` package directly from local paths in
 Pi's settings. No extension-local npm installation is needed.
 
@@ -26,11 +27,35 @@ Pi's settings. No extension-local npm installation is needed.
   ```
 
   The adapter also loads the companion when handling native operations.
+- **Web:** a [tau](https://github.com/milanglacier/pi-tau-web-server) server (this
+  workspace's `../../tau` fork) owning `pi --mode rpc` children, each one a live
+  browser tab. Prompts are RPC commands, so submission is draft-safe without a
+  terminal control socket, and `read` returns the transcript tail rather than a
+  pane snapshot. The host has no terminal: shell panels stay on a terminal host,
+  and typed text or key presses are refused. A finished worker's tab disappears
+  from the server with its child; its session file remains in Pi's session list.
 
-Select one host per Pi process with `PI_ORCHESTRATION_HOST=tmux|herdr|emacs`
-and `PI_ORCHESTRATION_ENDPOINT` (tmux/Herdr socket or Emacs server endpoint).
+Select one host per Pi process with `PI_ORCHESTRATION_HOST=tmux|herdr|emacs|web`
+and `PI_ORCHESTRATION_ENDPOINT` (tmux/Herdr socket, Emacs server endpoint, or the
+tau server URL, whose userinfo carries its HTTP Basic credentials).
 Without explicit selection, an unambiguous tmux or Herdr environment is used.
-Conflicting native environments fail rather than guessing. The companion uses
+Conflicting native environments fail rather than guessing.
+`PI_ORCHESTRATION_ENDPOINT` belongs to the explicitly selected host only; other
+reachable hosts use their native endpoint (`HERDR_SOCKET_PATH`, `TMUX`).
+
+A running tau server publishes its endpoint in `~/.pi/agent/tau/server.json`, so
+the web host is reachable from any Pi process on the machine. It never wins
+automatic selection away from a terminal: a session in tmux, Herdr, or Emacs
+keeps that host until someone selects `web`. Only a session with no terminal host
+at all falls back to a published server.
+
+`/orchestration-host [tmux|herdr|emacs|web|reset|status]` overrides that environment
+default for the current session branch, with a picker when the argument is
+omitted. Only hosts reachable from this process are offered, for example Herdr
+when Pilish itself runs inside a Herdr pane. The override applies to new workers,
+panels, and forks; existing targets keep their host. It survives reload/resume
+and normal forks, and `reset` returns to the environment default. The footer
+shows `host:<kind>` (`*` for an override) when there is a choice. The companion uses
 Pilish's generic `pilish-session-environment-functions` hook to set the Emacs
 host, live server endpoint, and root session target before spawn. Owned children
 retain their explicit target identity and endpoint across reload.
@@ -38,45 +63,114 @@ Targets retain their host and endpoint; later environment changes cannot redirec
 operations. Execution and session/artifact files must be local; TRAMP is unsupported.
 
 Child startup preserves the parent agent directory override, provider, model,
-thinking level, and nesting depth. Root depth is zero; children at depths one
-through three are allowed. A depth-three session remains usable but cannot start
+thinking level, and nesting depth unless a `do`, `delegate`, or `fresh_look` call
+explicitly selects the configured alternate model (see below). Root depth is
+zero; children at depths one through three are allowed. A depth-three session remains usable but cannot start
 another Pi child. Shell panels do not consume worker nesting depth.
 
 ## Tools
 
-- `delegate({task, context, folder?})`: ephemeral task plus retrospective.
-  `context` is required: `inherit` forks before the calling assistant message;
-  `project` starts blank with normal project/global resources; `clean` starts
-  blank without discovered context, extensions, skills, templates, or system
-  prompts. Inherited delegates cannot change cwd. Project/clean tasks must
-  contain every necessary conversation-specific requirement.
+- `do({task})`: the preferred worker tool. The ephemeral worker continues from
+  the conversation as it stood before the calling assistant message, in the
+  current directory, so `task` is a brief goal.
+- `delegate({task, folder?})`: the occasional exception for a large standalone
+  assignment. The worker starts blank with normal project/global resources;
+  `task` must contain every necessary requirement.
+- `fresh_look({task, folder?})`: like `delegate`, but also without discovered
+  context files, skills, templates, or system prompts. It is in no tool profile;
+  enable it manually in `/tools`.
+
+  Saved tool selections remain exact; enable `do` in `/tools` or reapply a preset
+  if an existing selection does not include it.
+
+  All three share one implementation and return the worker's result plus an
+  automatic retrospective. Optional `alt` appears on all three only when enabled
+  with `/delegate-alt`; omitted/false retains the caller's model, true uses the
+  other configured model.
 - `coding-agent({name, task, folder?})`: persistent fresh-context worker;
   subsequent requests reuse its session and reapply the caller's model,
   thinking level, and tools. Each name has one active request at a time.
 - `fresh-history({prompt, history})`: ephemeral worker seeded with recent
   user requests and direct assistant replies, excluding tool activity. Includes
   session-file/history-root references for recovery.
-- `panel-start({name, command, folder?, waitFor?})`: terminal command;
-  `waitFor: {match, regex?, timeoutMs?}` checks readiness, not completion.
+- `panel-start({name, command, folder?})`: start a server, watcher, or
+  interactive program. There is no readiness wait: probe the service from `bash`
+  or read the panel. Panels need a terminal host; the web host refuses them.
 - `panel-read({name, lines?})`: bounded snapshot, default 500 lines, maximum
   2,000 lines/50KB. Reads may overlap; no incremental/lossless-log promise.
-- `panel-send({name, text?, keys?, enter?})`: exactly one of literal text or
-  terminal keys such as `ctrl+c` and `Escape`. Text presses Enter by default.
-  This is terminal input, not draft-safe Pi prompt delivery. Pilish Pi targets
-  are RPC conversations, not terminals; supervise them in their input buffers.
+- `panel-send({name, text?, keys?})`: exactly one of a literal line of text or
+  terminal keys such as `ctrl+c` and `Escape`; text always presses Enter. The
+  result is the panel's output shortly after the input. This is terminal input,
+  not draft-safe Pi prompt delivery. Pilish Pi targets are RPC conversations,
+  not terminals; supervise them in their input buffers. Web targets are RPC
+  sessions with no terminal at all; supervise them in the browser tab.
 - `panel-close({name})`: stop the owned target and release its name. Cancel an
   active worker request rather than closing it through this tool.
 
-Ordinary foreground `bash` remains Pi's built-in tool. Readiness failures retain
-the target and recent output for diagnosis; cancelling startup closes owned work.
+Ordinary foreground `bash` remains Pi's built-in tool. Hosts close their own
+half-created targets, so a failed or cancelled start leaves nothing registered.
 All logical names share one registry and must match `^[a-z][a-z0-9_-]{0,31}$`.
 Registered names, including exited panels and forks, remain reserved until
-explicit close. Native IDs are diagnostic details, not public lookup names.
+explicit close; a panel whose native surface was destroyed elsewhere reports
+that on read and releases its name to the next `panel-start`. Native IDs are
+diagnostic details, not public lookup names.
 
-Independent sibling delegate/coding-agent calls run concurrently and join before
-the parent continues. Different persistent names are required. Pi startup alone
+Independent sibling `do`/`delegate`/`fresh_look`/`coding-agent` calls run
+concurrently and join before the parent continues. Different persistent names are required. Pi startup alone
 is serialized to avoid authentication races. Batches containing `fresh-history`
 remain sequential.
+
+## Alternate-model delegation
+
+Disabled by default: no configuration file is required or created, and `do`,
+`delegate`, and `fresh_look` contain neither an `alt` parameter nor
+alternate-model guidance.
+
+Use `/delegate-alt` in TUI or RPC for **Disabled** or **Choose model pair**, then
+select two distinct authenticated models. You can also use exact identifiers:
+
+```text
+/delegate-alt openai-codex/gpt-6-astra claude-agent/claude-fable-5-1
+/delegate-alt status
+/delegate-alt off
+```
+
+Choosing immediately re-registers `do`, `delegate`, and `fresh_look` with or
+without optional boolean `alt` (default false), updating the actual schemas and
+descriptions without a reload. The active-tool selection is preserved, including
+disabled tools. This does not affect `coding-agent`, `fresh-history`, or forks.
+
+When enabled, `alt: true` selects the other member relative to the current
+caller's provider/model; nested workers follow the same rule. Missing auth,
+an unavailable model, a caller outside the pair, or a stale alternate request
+after disabling produces an error, never a same-model fallback. Model IDs starting
+with their own provider prefix are refused because Pi's child CLI interprets them
+ambiguously. Parent model/thinking remain unchanged. The worker inherits thinking
+clamped to the selected model's capabilities; startup flags and the structured
+request use that same selection. Progress and results identify the selected model.
+Once started, a request is not redirected by later configuration changes.
+
+Selection is global to Pi's agent directory, saved atomically as private
+`delegate-alt.json` (honoring `PI_CODING_AGENT_DIR`):
+
+```json
+{
+  "models": ["openai-codex/gpt-6-astra", "claude-agent/claude-fable-5-1"]
+}
+```
+
+`off` removes that optional file. Reload/resume, new sessions, and workers read
+the same global setting; this is not branch-local state. Other running sessions
+refresh before their next submitted prompt or worker-tool invocation, without file
+watchers. Invalid configuration reports an error and hides the option while
+ordinary same-model calls remain usable. Picker cancellation preserves the
+previous selection. `/scoped-models` does not enable or disable this feature.
+
+Model selection is independent of the tool. `do` with `alt: true` is the ordinary
+second opinion and still carries the conversation; the Claude Agent provider may
+represent unmatched inherited history as a lossy text handoff rather than native
+tool/thinking history. For a review without the conversation, use `delegate`
+with a complete brief, or `fresh_look` when project guidance is also unwanted.
 
 ## Interactive commands
 
@@ -130,19 +224,22 @@ Both tmux paste and Herdr 0.8.2 `agent prompt` append to human drafts. Therefore
 both terminal adapters explicitly load the same internal `terminal-input`
 extension and submit machine prompts over a private local Unix socket. It calls
 Pi's supported extension input API without reading or modifying the editor.
-This is only input delivery, not another worker protocol or scheduler. Clean
-terminal workers load this input extension and the common worker frame explicitly;
-clean Emacs workers need only the common frame. Providers registered only by
-other extensions are unavailable in clean mode.
+This is only input delivery, not another worker protocol or scheduler.
+`fresh_look` terminal workers load this input extension and the common worker
+frame explicitly; on Emacs they need only the common frame. `fresh_look` blanks
+the worker's conversation and instructions, not its runtime: extension discovery stays enabled, because
+providers are registered by extensions and a worker cannot reach an
+extension-registered model without them.
 
 The parent polls structured status and bounded native output through the same
 `onUpdate` contract on every host. The complete transcript remains in the child
 pane/buffer and session file. Cancellation stops owned work, including persistent
 workers, instead of abandoning the wait. Session files and diagnostics remain
-available for recovery. Workers receive available parent tools plus `delegate`;
+available for recovery. Workers receive available parent tools plus `do`;
 the `bobs` profile supplies its delegated Research set. First-action re-delegation
-gets a one-time warning. Above 50% parent context, the first inherited delegate
-on a branch recommends project context; explicitly retrying inheritance proceeds.
+gets a one-time warning. Above 90% parent context (using Pi's reported model
+limit), the first `do` on a branch is not started and suggests `delegate`;
+explicitly retrying `do` proceeds. `delegate` and `fresh_look` never warn.
 
 ## Files and recovery
 
@@ -165,6 +262,7 @@ From `pi-ant/`:
 ```sh
 npm run check
 node scripts/test.mjs orchestration/worker-frame.test.ts orchestration/workers.test.ts
+node scripts/test.mjs orchestration/delegate-alt.test.ts orchestration/extensions/delegate.test.ts orchestration/context.test.ts orchestration/worker-call.test.ts
 PI_NATIVE_HOST_SMOKE=1 node scripts/test.mjs orchestration/hosts/native-smoke.test.ts
 PI_LIFECYCLE_SMOKE=1 node scripts/test.mjs orchestration/hosts/lifecycle-smoke.test.ts
 PI_FORK_SMOKE=1 node scripts/test.mjs orchestration/hosts/fork-smoke.test.ts

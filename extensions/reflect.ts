@@ -1,10 +1,3 @@
-import type {
-	Api,
-	Context,
-	Model,
-	SimpleStreamOptions,
-} from "@earendil-works/pi-ai";
-import { completeSimple } from "@earendil-works/pi-ai/compat";
 import {
 	buildSessionContext,
 	type ContextEvent,
@@ -13,6 +6,7 @@ import {
 	estimateTokens,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
+import { completeOnce } from "./model-request.ts";
 
 type AgentMessage = ContextEvent["messages"][number];
 
@@ -367,43 +361,15 @@ function getVisibleMessages(ctx: ExtensionCommandContext): AgentMessage[] {
 	return messages;
 }
 
-function createReflectionOptions(
-	model: Model<Api>,
-	apiKey: string | undefined,
-	headers: SimpleStreamOptions["headers"],
-	env: SimpleStreamOptions["env"],
-	thinkingLevel: ReturnType<ExtensionAPI["getThinkingLevel"]>,
-): SimpleStreamOptions {
-	const maxTokens = Math.min(
-		12000,
-		model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
-	);
-	const options: SimpleStreamOptions = { maxTokens, apiKey, headers, env };
-	if (model.reasoning && thinkingLevel !== "off") {
-		options.reasoning = thinkingLevel;
-	}
-	return options;
-}
-
 async function generateReflectionPlan(
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
 	customInstructions?: string,
 ): Promise<ReflectionPlan> {
-	const model = ctx.model;
-	if (!model) {
-		throw new Error("No model selected");
-	}
-
 	const messages = getVisibleMessages(ctx);
 	const blocks = createReflectionBlocks(messages);
 	if (blocks.length === 0) {
 		throw new Error("Nothing to reflect (no context blocks)");
-	}
-
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-	if (auth.ok === false) {
-		throw new Error(auth.error);
 	}
 
 	let promptText = `${REFLECTION_PROMPT}\n\n<blocks>\n${formatBlocksForPrompt(blocks)}\n</blocks>`;
@@ -411,26 +377,13 @@ async function generateReflectionPlan(
 		promptText += `\n\nAdditional reflection focus:\n${customInstructions}`;
 	}
 
-	const response = await completeSimple(
-		auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model,
-		{
-			systemPrompt: REFLECTION_SYSTEM_PROMPT,
-			messages: [
-				{
-					role: "user",
-					content: [{ type: "text", text: promptText }],
-					timestamp: Date.now(),
-				},
-			],
-		} satisfies Context,
-		createReflectionOptions(
-			model,
-			auth.apiKey,
-			auth.headers,
-			auth.env,
-			pi.getThinkingLevel(),
-		),
-	);
+	const response = await completeOnce(ctx, {
+		systemPrompt: REFLECTION_SYSTEM_PROMPT,
+		prompt: promptText,
+		maxTokens: 12000,
+		sessionId: "reflect",
+		thinkingLevel: pi.getThinkingLevel(),
+	});
 
 	if (response.stopReason === "error") {
 		throw new Error(

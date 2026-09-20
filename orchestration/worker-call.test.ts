@@ -12,7 +12,9 @@ function lines(component: Component, width = 100): string[] {
 }
 
 for (const [name, extension, field] of [
+  ["do", delegateExtension, "task"],
   ["delegate", delegateExtension, "task"],
+  ["fresh_look", delegateExtension, "task"],
   ["coding-agent", codingAgentExtension, "task"],
   ["fresh-history", freshHistoryExtension, "prompt"],
 ] as const) {
@@ -21,7 +23,8 @@ for (const [name, extension, field] of [
     extension({
       on: () => {},
       events: { on: () => () => {} },
-      registerTool: (tool: typeof registered) => { registered = tool; },
+      registerTool: (tool: typeof registered) => { if (tool?.name === name) registered = tool; },
+      registerCommand: () => {},
     } as unknown as ExtensionAPI);
     assert.equal(registered?.name, name);
     const args = Object.freeze({ [field]: 'First "paragraph".\n\n  Indented second paragraph.\n' });
@@ -52,9 +55,9 @@ test("literal backslash escapes stay literal while CRLF becomes a line break", (
 test("metadata and partial streamed arguments remain visible", () => {
   assert.deepEqual(lines(renderWorkerCall("delegate", {})), ["delegate(", ")"]);
   assert.deepEqual(lines(renderWorkerCall("delegate", {
-    context: "project", folder: "/tmp/work folder", task: "", history: 0,
+    folder: "/tmp/work folder", task: "", alt: false,
   })), [
-    "delegate(", "  context: project", "  folder: /tmp/work folder", "  task:", "  history: 0", ")",
+    "delegate(", "  folder: /tmp/work folder", "  task:", "  alt: false", ")",
   ]);
 });
 

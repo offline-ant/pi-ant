@@ -31,6 +31,8 @@
       "./extensions/ugo.ts",
       "./extensions/ask.ts",
       "./extensions/reflect.ts",
+      "./extensions/reflect-on-work.ts",
+      "./extensions/herdr-finish.ts",
       "./extensions/working-text.ts",
       "./extensions/sqlite.ts",
       "./extensions/cwd.ts",

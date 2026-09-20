@@ -8,6 +8,8 @@ import {
   profileIsModified,
   toolControlStatesEqual,
   toggleTool,
+  TOOL_PROFILES,
+  type ToolProfileName,
 } from "./tool-control-state.ts";
 
 test("profile state is exact and detects manual changes", () => {
@@ -32,11 +34,31 @@ test("active tools filter unavailable entries and add required tools", () => {
   );
 });
 
+test("every preset includes do and delegate but leaves fresh_look opt-in", () => {
+  for (const profile of Object.keys(TOOL_PROFILES) as ToolProfileName[]) {
+    const state = createProfileState(profile);
+    assert.ok(state.enabledTools.includes("do"), profile);
+    assert.ok(state.enabledTools.includes("delegate"), profile);
+    assert.ok(!state.enabledTools.includes("fresh_look"), profile);
+    const optedIn = toggleTool(state, "fresh_look");
+    assert.ok(activeToolsForState(optedIn, ["do", "delegate", "fresh_look"], []).includes("fresh_look"));
+    assert.deepEqual(toggleTool(optedIn, "fresh_look").enabledTools, state.enabledTools);
+  }
+});
+
 test("Bob's profile has deterministic delegated research tools", () => {
   const state = createProfileState("bobs", "now");
-  const event = eventForState(state, ["delegate", "coding-agent", "ask", "fresh-history", "read", "bash", "web_search"]);
-  assert.deepEqual(event.enabledTools, ["delegate", "coding-agent", "ask", "fresh-history"]);
-  assert.deepEqual(event.delegatedTools, ["read", "bash", "ask", "delegate", "web_search"]);
+  const event = eventForState(state, ["do", "delegate", "fresh_look", "coding-agent", "ask", "fresh-history", "read", "bash", "web_search"]);
+  assert.deepEqual(event.enabledTools, ["do", "delegate", "coding-agent", "ask", "fresh-history"]);
+  assert.deepEqual(event.delegatedTools, ["read", "bash", "ask", "do", "delegate", "web_search"]);
+});
+
+test("saved selections remain exact without inserting new profile tools", () => {
+  const saved = { profile: "research", enabledTools: ["read", "delegate"], updatedAt: "before-split" };
+  const parsed = parseToolControlState(saved);
+  assert.deepEqual(parsed, saved);
+  assert.ok(parsed);
+  assert.deepEqual(activeToolsForState(parsed, ["read", "delegate", "do", "fresh_look"], []), ["read", "delegate"]);
 });
 
 test("orchestration profile contains only neutral panel names", () => {

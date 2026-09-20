@@ -21,7 +21,7 @@ export default function codingAgentExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "coding-agent",
     label: "Coding Agent",
-    description: "Run one task in a named persistent fresh-context worker and wait for completion. The worker remains available by name for follow-ups. Sibling calls with different worker names can run concurrently. Returns its result, automatic retrospective, idle status, and context use; failures throw with recovery details. Cancellation closes owned work while retaining its session file.",
+    description: "Use a named worker when follow-ups need its own continuing conversation. Give a complete initial brief; reuse the name for follow-ups. Different names can run concurrently. For ordinary current-task work, prefer do.",
     parameters: codingAgentParams,
     executionMode: "parallel",
     renderCall: (args) => renderWorkerCall("coding-agent", args),

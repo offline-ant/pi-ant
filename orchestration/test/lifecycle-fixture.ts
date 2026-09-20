@@ -67,5 +67,8 @@ export default function lifecycleFixture(pi: ExtensionAPI): void {
   pi.on("session_compact_failed", (event) => { trace({ event: "compaction-failed", reason: event.reason, error: event.errorMessage }); });
   pi.on("agent_settled", () => { trace({ event: "settled" }); });
   pi.registerCommand("lifecycle-report", { handler: async (_args, ctx) => { report("report", ctx); } });
+  pi.registerCommand("lifecycle-tools", { handler: async (args) => {
+    pi.setActiveTools(args.split(",").filter(Boolean));
+  } });
   pi.registerCommand("lifecycle-clear-draft", { handler: async (_args, ctx) => { ctx.ui.setEditorText(""); } });
 }

@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const TOOL_CONTROL_EVENT = "pi-ant:tool-control-changed";
-const DELEGATE_TOOL = "delegate";
+const DEFAULT_WORKER_TOOL = "do";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -25,7 +25,7 @@ export function createWorkerToolResolver(pi: ExtensionAPI): WorkerToolResolver {
   });
 
   return {
-    current: () => [...new Set([...(delegatedTools ?? pi.getActiveTools()), DELEGATE_TOOL])],
+    current: () => [...new Set([...(delegatedTools ?? pi.getActiveTools()), DEFAULT_WORKER_TOOL])],
     dispose: unsubscribe,
   };
 }

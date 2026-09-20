@@ -19,7 +19,7 @@ export default function freshHistoryExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "fresh-history",
     label: "Fresh History",
-    description: "Run one task in an ephemeral fresh-context worker with recent user requests and direct assistant replies; tool activity is omitted. Fresh-history calls run serially. Use when a small excerpt is enough, not for full-context or persistent follow-up work. Returns the answer and automatic retrospective; failures throw with recovery details.",
+    description: "Run a task using only recent user requests and direct assistant replies, without tool history. Use when an excerpt is specifically wanted; otherwise prefer do. Calls run serially.",
     parameters: freshHistoryParams,
     executionMode: "sequential",
     renderCall: (args) => renderWorkerCall("fresh-history", args),
