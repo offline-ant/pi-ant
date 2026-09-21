@@ -17,9 +17,7 @@
       "./extensions/orchestration-host.ts",
       "./extensions/panels.ts",
       "./extensions/fork-here.ts",
-      "./extensions/delegate.ts",
-      "./extensions/coding-agent.ts",
-      "./extensions/fresh-history.ts"
+      "./extensions/delegate.ts"
     ]
   }
 }

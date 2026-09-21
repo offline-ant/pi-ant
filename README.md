@@ -4,8 +4,7 @@ Personal Pi extensions for development tools. Unified orchestration lives in
 [`orchestration/`](orchestration/README.md), loaded alongside this root package.
 One worker protocol supports tmux, Herdr, and Emacs/Pilish with EAT terminals.
 `/fork-here` opens independent interactive conversations; `do`, `delegate`,
-`fresh_look`, `coding-agent`, `fresh-history`, and neutral `panel-*` tools provide
-orchestration.
+`fresh_look`, and neutral `panel-*` tools provide orchestration.
 The replaced backend packages and legacy semaphore/Claude bridge tools are removed.
 Emacs startup must load `orchestration/emacs/pi-orchestration.el` in Pilish's
 `use-package :config` before the first Pi spawn. The companion owns host/server
@@ -18,8 +17,7 @@ These are the pi tools registered by this package:
 
 - `ask` — ask the user interactive multiple-choice or free-form questions. In TUI and RPC sessions, each question also offers `Fork (discuss separately)`: edit a discussion prompt, launch an inherited session on the selected host, then return to the unchanged question and answer it.
 - `document_flow_review` — read one document strictly in sequence without lookahead and assess its internal coherence, including logical flow, definitions, transitions, expectations, internal contradictions, and misplaced or late information. It does not verify factual truth or external validity. The tool is inactive by default and can be exposed through `/tools`.
-- `send_mail` — review, confirm, and send plain-text mail through an externally configured implicit-TLS SMTP account. Sender and recipients cannot be selected by the model.
-- `sqlite` — run `sqlite3` against `AGENTS.db` in the current working directory; auto-enabled when that database exists.
+- `mail_user` — review, confirm, and send plain-text mail to the user through an externally configured implicit-TLS SMTP account. Sender and recipients cannot be selected by the model.
 - Core `edit` and `write` are wrapped by `lints` to display post-write safety warnings.
 - `present_guidance` — validates structured guidance output for guidance-mode final answers. It is only registered for `PI_GUIDANCE=true` runs or dynamically inside `/ugo` guide-phase sessions.
 
@@ -73,7 +71,7 @@ with faux inference; it never makes paid model calls or changes existing panes.
 
 ## Mail configuration
 
-`send_mail` reads `mail.json` from Pi's global agent directory (normally
+`mail_user` reads `mail.json` from Pi's global agent directory (normally
 `~/.pi/agent/mail.json`) on each invocation. Set `PI_MAIL_CONFIG` to an absolute
 path to use another file. The file must be owned by the current user and have
 mode `0600` on POSIX systems:
@@ -95,6 +93,10 @@ tool accepts only a subject and plain-text body, shows the complete body in the
 editor, and requires explicit confirmation before connecting. It is unavailable
 in modes without interactive confirmation.
 
+The former `send_mail` name is removed, with no alias. Existing `mail.json`
+configuration is unchanged. After `/reload`, enable `mail_user` in `/tools` if
+needed; saved selections that enabled the old name must select the new one.
+
 For the current Mox deployment, `self.pi@roelof.solar` belongs to the
 `postmaster` account, while `pi-sender@roelof.solar` belongs to a dedicated
 `pi-mail` account. Configure them from the Mox container with:
@@ -111,24 +113,29 @@ mailbox.
 
 ## Skills
 
+The package exports `skills/`. After `/reload` or in a new session, invoke
+`/skill:himalaya-mail` or ask the agent to use the skill. Other agents can read
+[`skills/himalaya-mail/SKILL.md`](skills/himalaya-mail/SKILL.md) directly.
+
 - `herdr` — local guidance for Herdr 0.9.0 CLI operations, with ownership safeguards and a separate managed Pi orchestration workflow.
+- `himalaya-mail` — send, list, search, read without marking Seen, and reply through the ordinary Himalaya CLI using the separate `llm` mailbox with public From `llm@roelof.solar` and IMAP/SMTP login `llm-inbox@roelof.solar`. Mox's native public-address alias also delivers new incoming mail to postmaster; existing messages and outgoing Sent copies are not replicated. Himalaya 1.1.0 is configured locally with private files under `~/.config/himalaya/`; no credentials are included in this package. This is general correspondence, distinct from the fixed-recipient `mail_user` tool. The skill covers authorization, MML attachment safety, and uncertain-send handling.
+
+Verify package skill discovery without model calls:
+
+```sh
+node scripts/test.mjs scripts/skills.test.ts
+```
 
 ## Commands, snippets, and safety extensions
 
-- Complete context injection commands: `/read-complete`, `/bash-complete`.
-- SQLite workflow commands: `/sqlite-init`, `/agent-db`.
-- Context explorer commands: `/context-explorer`, `/context-explorer-stop`.
-- Prompt history command: `/prompt-history`.
 - Document flow review command: `/document-flow-review <document-path> [--profile <reader profile>]` runs a persistent isolated agent with no discovered context, skills, prompts, extensions, or built-in tools. The agent-callable `document_flow_review({ file, prompt? })` tool is inactive by default and can be enabled through `/tools`, so it consumes no model context until selected. Both entry points reveal Markdown in visually coherent 3–6-sentence reading units and assess whether each unit follows coherently from what preceded it. They show each consumed source unit with its recorded friction and current reader thinking/output, then save the full session, metadata, and final review under `scratch/document-flow-review/` in the active working directory. This review concerns the document's internal consistency and sequence, not the factual truth or external validity of its claims. Slash-command results are inserted into the current agent context; tool results enter it normally as tool output.
 - Vim conversation edit command: `/vim` — opens the current conversation transcript in `$VISUAL`/`$EDITOR`/`vim`; changed lines are sent as the next user message.
-- Reflection memory checkpoint command: `/reflect`.
-- Work reflection command: `/reflect-on-work` runs five independent single-shot reviews of the current session branch concurrently (confidence and assumptions, requirements and coverage, risk and failure analysis, complexity and maintainability, verification and evidence) and inserts one combined `# Reflection` message with one `##` section per review into the session. Each review sees a text rendering of the branch (tool results truncated as in compaction) and has no tools, no prompt-cache writes, and its own `sessionId`. A failed review becomes an `unavailable` section instead of losing the others.
 - Working-directory switch command: `/cwd <path>`.
 - Git commit command: `/git-commit [message]` runs `git add -A && git commit -m <message>`, defaulting to `auto`.
 - Git worktree creation command: `/worktree <name>`.
 - Execution safety toggle: `/exec-lints`.
 - Alternate delegate model: `/delegate-alt` chooses a globally saved model pair or disables alternate selection. Disabled by default, with no required configuration file. Choosing immediately adds/removes optional `alt` from the actual schemas and descriptions of `do`, `delegate`, and `fresh_look` without a reload; omitted/false retains the caller's model, true selects the other configured model. `/delegate-alt off` disables it; `/delegate-alt status` reports the selection. See [orchestration](orchestration/README.md#alternate-model-delegation).
-- Tool configuration: `/tools` opens a branch-persistent selector in TUI or standard RPC dialogs. The Tools tab enables or disables individual ordinary tools immediately; Tab opens Profiles for the saved `Default`, `coding`, `research`, `orchestration`, `full`, and `bobs`. Ctrl+S saves the exact current ordinary tool selection to `~/.pi/agent/tool-selection.json` as the global default for new sessions. `research` is the built-in fallback until a default is saved. The deterministic `bobs` profile restricts the root to delegation tools, gives structured workers the delegated Research tool set, and injects root orchestration instructions. `do({task})` is the preferred worker tool: it continues from the current conversation in the current directory, so the task is a brief goal. `delegate({task, folder?})` is the occasional exception for a large standalone assignment; its worker sees project instructions but no conversation, so the task must be a complete brief. `fresh_look({task, folder?})` starts without conversation or discovered instructions; it is in no profile and is enabled manually in `/tools`. Independent sibling `do`, `delegate`, and `coding-agent` calls execute concurrently and join before the parent continues. Structured workers receive the caller's active tools that are available in the child, plus `do`; `bobs` supplies its delegated Research set instead. A worker that tries to start another worker as its first tool call receives a one-time warning before retries are allowed. Ugo keeps its own tool control; required dynamic tools such as `sqlite` and `present_guidance` remain active when applicable.
+- Tool configuration: `/tools` opens a branch-persistent toggle list in TUI or standard RPC dialogs that enables or disables individual tools immediately. Ctrl+S (RPC: **Save as default**) saves the exact current selection as `{"enabledTools": [...]}` in `~/.pi/agent/tool-selection.json`, the global default for branches without their own selection. Without a saved default, Pi's own active tool set is left unchanged. `do({task})` is the preferred worker tool: it continues from the current conversation in the current directory, so the task is a brief goal. `delegate({task, folder?})` is the occasional exception for a large standalone assignment; its worker sees project instructions but no conversation, so the task must be a complete brief. `fresh_look({task, folder?})` starts without conversation or discovered instructions; it is disabled at startup and is enabled manually in `/tools`. Independent sibling `do`, `delegate`, and `fresh_look` calls execute concurrently and join before the parent continues. Structured workers receive the caller's active tools that are available in the child, plus `do`. A worker that tries to start another worker as its first tool call receives a one-time warning before retries are allowed. Ugo keeps its own tool control; `present_guidance` remains required when registered.
 - Workboard command/context: `/new-workboard` creates `workboard.md`; when `workboard.md` exists in the current working directory, it is autoloaded into agent context as active operational state. `/new-workflow` creates editable `workflow.md` guidance policy; `/ugo` and guidance mode also create it when missing. Cold ideas/backlog items belong in project files outside `workboard.md` until promoted to `needs-enrichment` or `ready`.
 - AGENTS.d auto-loading: when a `./AGENTS.d/` directory exists in the workspace, its top-level files and file-target symlinks are automatically loaded and injected into the system prompt before every agent start. Subdirectories are listed in a tree structure (at the end of the injected block) but their contents are not loaded. Symlinks show their resolved real path. Dangling symlinks appear in the tree listing but are excluded from content loading.
 - Guidance mode: `PI_GUIDANCE=true pi -p "inspect workboard.md and present_guidance"` loads editable `workflow.md` guidance policy and requires a structured `present_guidance` result. `bin/pi-guidance-loop` repeatedly runs guidance, executes `CONTINUE_WORK` prompts, applies `UPDATE_WORK` workboard updates, and stops on `REQUIRE_HUMAN_DECISION` or `EMPTY_WORKBOARD`.

@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { createProfileState, parseToolControlState, TOOL_CONTROL_STATE_TYPE } from "../../extensions/tool-control-state.ts";
+import { TOOL_SELECTION_ENTRY } from "../../extensions/tool-selection.ts";
 import { flushSessionFile, modelCliArgs, resolveCwd } from "../context.ts";
 import { getHost, hostForTarget } from "../host.ts";
 import type { HostTarget } from "../host-types.ts";
@@ -105,15 +105,9 @@ export async function forkHere(
     if (branchFromId === null) forked.resetLeaf();
     else forked.branch(branchFromId);
     forked.appendCustomEntry("pi-orchestration:fork", { name, parentSession, sourceCwd: cwd, targetCwd });
-    // Persist the actual tool selection, not merely a profile default. This also
-    // lets /tools change it normally in the independent interactive child.
-    const previous = sessionManager.getBranch().filter((entry) => entry.type === "custom" && entry.customType === TOOL_CONTROL_STATE_TYPE).at(-1);
-    const state = previous?.type === "custom" ? parseToolControlState(previous.data) : undefined;
-    forked.appendCustomEntry(TOOL_CONTROL_STATE_TYPE, {
-      ...(state ?? createProfileState("research")),
-      enabledTools: pi.getActiveTools(),
-      updatedAt: new Date().toISOString(),
-    });
+    // Persist the actual active tools, not the saved default. This also lets
+    // /tools change them normally in the independent interactive child.
+    forked.appendCustomEntry(TOOL_SELECTION_ENTRY, { enabledTools: pi.getActiveTools() });
     flushSessionFile(forked, sessionFile);
     target = await host.start({
       kind: "pi", name, cwd: targetCwd, sessionFile, args: piArgs,
@@ -135,9 +129,9 @@ export async function forkHere(
 export default function forkHereExtension(pi: ExtensionAPI): void {
   pi.on("before_agent_start", (event, ctx) => {
     const purpose = ctx.sessionManager.getBranch().findLast((entry) => entry.type === "custom"
-      && /^pi-orchestration:(?:fork|delegate(?:-runtime)?|coding-agent|fresh-history)$/.test(entry.customType));
-    if (purpose?.type !== "custom" || purpose.customType !== "pi-orchestration:fork") return undefined;
-    return { systemPrompt: `${event.systemPrompt}\n\nYou are running in an independent interactive fork, not the original controlling session. Continue assisting the user in this forked session.` };
+      && /^pi-orchestration:(?:fork|delegate(?:-runtime)?)$/.test(entry.customType));
+    if (purpose?.type !== "custom" || purpose.customType !== "pi-orchestration:fork") return;
+    event.systemPromptOptions.sections.fork = "You are running in an independent interactive fork, not the original controlling session. Continue assisting the user in this forked session.";
   });
   let starting = false;
   const start = async (input: ForkInput, ctx: ExtensionContext): Promise<void> => {

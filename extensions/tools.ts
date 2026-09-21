@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import {
   getAgentDir,
@@ -18,32 +18,14 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import {
-  activeToolsForState,
-  createProfileState,
-  DEFAULT_TOOL_PROFILE,
-  eventForState,
-  parseToolControlState,
-  profileIsModified,
-  TOOL_CONTROL_EVENT,
-  TOOL_CONTROL_STATE_TYPE,
-  TOOL_PROFILES,
-  toolControlStatesEqual,
+  activeTools,
+  parseToolSelection,
+  sameToolSelection,
   toggleTool,
-  type ToolControlState,
-  type ToolProfileName,
-} from "./tool-control-state.ts";
+  TOOL_SELECTION_ENTRY,
+} from "./tool-selection.ts";
 
-const SAVED_DEFAULT_PATH = path.join(getAgentDir(), "tool-selection.json");
-const STRUCTURED_WORKER_TYPES = new Set([
-  "pi-orchestration:delegate-runtime",
-  "pi-orchestration:delegate",
-  "pi-orchestration:coding-agent",
-  "pi-orchestration:fresh-history",
-]);
-const BOBS_INSTRUCTIONS =
-  "Root orchestration mode: prefer do for non-trivial repository or environment work; give a brief goal without investigating just to prepare a handoff. Use delegate only occasionally for large standalone tasks with a complete brief. Use coding-agent for persistent work, fresh-history for a recent excerpt, and ask for required decisions. Answer directly when no inspection or tool work is needed.";
-
-type Tab = "tools" | "profiles";
+const STRUCTURED_WORKER_TYPES = new Set(["pi-orchestration:delegate-runtime", "pi-orchestration:delegate"]);
 
 interface CustomEntryLike {
   customType?: string;
@@ -60,33 +42,36 @@ function customEntries(ctx: ExtensionContext): CustomEntryLike[] {
   );
 }
 
-function loadSavedDefault(): ToolControlState {
+function savedDefaultPath(): string {
+  return path.join(getAgentDir(), "tool-selection.json");
+}
+
+/** The global default for new branches; without one, Pi's own active tool set stands. */
+function loadSavedDefault(): string[] | undefined {
   try {
-    const state = parseToolControlState(JSON.parse(readFileSync(SAVED_DEFAULT_PATH, "utf8")) as unknown);
-    if (state) return state;
+    return parseToolSelection(JSON.parse(readFileSync(savedDefaultPath(), "utf8")) as unknown);
   } catch {
-    // Missing or malformed saved defaults fall back to the built-in default profile.
+    return undefined;
   }
-  return createProfileState(DEFAULT_TOOL_PROFILE);
 }
 
-function saveDefault(state: ToolControlState): void {
-  mkdirSync(path.dirname(SAVED_DEFAULT_PATH), { recursive: true, mode: 0o700 });
-  const saved = { ...state, enabledTools: [...state.enabledTools], updatedAt: new Date().toISOString() };
-  const temporaryPath = `${SAVED_DEFAULT_PATH}.${process.pid}.${Date.now()}.tmp`;
-  writeFileSync(temporaryPath, `${JSON.stringify(saved, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  renameSync(temporaryPath, SAVED_DEFAULT_PATH);
+function saveDefault(selection: readonly string[]): void {
+  const file = savedDefaultPath();
+  mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temporaryPath = `${file}.${process.pid}.${Date.now()}.tmp`;
+  writeFileSync(temporaryPath, `${JSON.stringify({ enabledTools: selection }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  renameSync(temporaryPath, file);
 }
 
-function latestState(ctx: ExtensionContext, savedDefault: ToolControlState): ToolControlState {
+function branchSelection(ctx: ExtensionContext): string[] | undefined {
   const entries = customEntries(ctx);
   for (let index = entries.length - 1; index >= 0; index--) {
     const entry = entries[index];
-    if (entry.customType !== TOOL_CONTROL_STATE_TYPE) continue;
-    const state = parseToolControlState(entry.data);
-    if (state) return state;
+    if (entry.customType !== TOOL_SELECTION_ENTRY) continue;
+    const selection = parseToolSelection(entry.data);
+    if (selection) return selection;
   }
-  return { ...savedDefault, enabledTools: [...savedDefault.enabledTools] };
+  return undefined;
 }
 
 function specializedOwner(ctx: ExtensionContext): string | undefined {
@@ -102,11 +87,10 @@ function specializedOwner(ctx: ExtensionContext): string | undefined {
   return undefined;
 }
 
-function requiredTools(pi: ExtensionAPI, ctx: ExtensionContext): Set<string> {
+function requiredTools(pi: ExtensionAPI): Set<string> {
   const available = new Set(pi.getAllTools().map((tool) => tool.name));
   const required = new Set<string>();
   if (available.has("present_guidance")) required.add("present_guidance");
-  if (available.has("sqlite") && existsSync(path.join(ctx.cwd, "AGENTS.db"))) required.add("sqlite");
   return required;
 }
 
@@ -115,48 +99,42 @@ function toolDescription(tool: ToolInfo, required: boolean): string {
   return `${tool.description}${suffix}`;
 }
 
-class ToolControlComponent implements Component, Focusable {
-  private tab: Tab = "tools";
-  private state: ToolControlState;
-  private savedDefault: ToolControlState;
+function defaultStatus(selection: readonly string[], savedDefault: readonly string[] | undefined): string {
+  if (!savedDefault) return " · no saved default";
+  return sameToolSelection(selection, savedDefault) ? " · saved default" : " · differs from saved default";
+}
+
+class ToolSelectionComponent implements Component, Focusable {
+  private selection: string[];
+  private savedDefault: string[] | undefined;
   private readonly tools: ToolInfo[];
   private readonly required: Set<string>;
   private readonly theme: Theme;
   private readonly keybindings: KeybindingsManager;
   private readonly search = new Input();
-  private readonly onStateChange: (state: ToolControlState) => void;
-  private readonly onSaveDefault: (state: ToolControlState) => boolean;
+  private readonly onChange: (selection: string[]) => void;
+  private readonly onSaveDefault: (selection: string[]) => boolean;
   private readonly requestRender: () => void;
   private readonly onClose: () => void;
   private selectedTool = 0;
-  private selectedProfile = 0;
   private _focused = false;
 
-  constructor(options: {
-    state: ToolControlState;
-    savedDefault: ToolControlState;
-    tools: ToolInfo[];
-    required: Set<string>;
+  constructor(options: ToolDialogOptions & {
     theme: Theme;
     keybindings: KeybindingsManager;
-    onStateChange: (state: ToolControlState) => void;
-    onSaveDefault: (state: ToolControlState) => boolean;
     requestRender: () => void;
     onClose: () => void;
   }) {
-    this.state = options.state;
+    this.selection = options.selection;
     this.savedDefault = options.savedDefault;
     this.tools = options.tools;
     this.required = options.required;
     this.theme = options.theme;
     this.keybindings = options.keybindings;
-    this.onStateChange = options.onStateChange;
+    this.onChange = options.onChange;
     this.onSaveDefault = options.onSaveDefault;
     this.requestRender = options.requestRender;
     this.onClose = options.onClose;
-    this.selectedProfile = toolControlStatesEqual(this.state, this.savedDefault)
-      ? 0
-      : Object.keys(TOOL_PROFILES).indexOf(this.state.profile) + 1;
   }
 
   get focused(): boolean {
@@ -165,7 +143,7 @@ class ToolControlComponent implements Component, Focusable {
 
   set focused(value: boolean) {
     this._focused = value;
-    this.search.focused = value && this.tab === "tools";
+    this.search.focused = value;
   }
 
   private filteredTools(): ToolInfo[] {
@@ -173,92 +151,34 @@ class ToolControlComponent implements Component, Focusable {
     return query ? fuzzyFilter(this.tools, query, (tool) => `${tool.name} ${tool.description}`) : this.tools;
   }
 
-  private move(delta: number): void {
-    const length = this.tab === "tools" ? this.filteredTools().length : Object.keys(TOOL_PROFILES).length + 1;
-    if (length === 0) return;
-    if (this.tab === "tools") this.selectedTool = (this.selectedTool + delta + length) % length;
-    else this.selectedProfile = (this.selectedProfile + delta + length) % length;
-  }
-
-  private activate(): void {
-    if (this.tab === "profiles") {
-      if (this.selectedProfile === 0) {
-        this.state = { ...this.savedDefault, enabledTools: [...this.savedDefault.enabledTools], updatedAt: new Date().toISOString() };
-        this.onStateChange(this.state);
-        return;
-      }
-      const profile = Object.keys(TOOL_PROFILES)[this.selectedProfile - 1] as ToolProfileName | undefined;
-      if (!profile) return;
-      this.state = createProfileState(profile);
-      this.onStateChange(this.state);
-      return;
-    }
-
-    const tool = this.filteredTools()[this.selectedTool];
-    if (!tool || this.required.has(tool.name)) return;
-    this.state = toggleTool(this.state, tool.name);
-    this.onStateChange(this.state);
-  }
-
   handleInput(data: string): void {
-    if (this.keybindings.matches(data, "tui.input.tab")) {
-      this.tab = this.tab === "tools" ? "profiles" : "tools";
-      this.search.focused = this._focused && this.tab === "tools";
-      this.requestRender();
-      return;
-    }
-    if (this.keybindings.matches(data, "tui.select.up")) {
-      this.move(-1);
-      this.requestRender();
-      return;
-    }
-    if (this.keybindings.matches(data, "tui.select.down")) {
-      this.move(1);
-      this.requestRender();
-      return;
-    }
-    if (this.keybindings.matches(data, "tui.select.confirm")) {
-      this.activate();
-      this.requestRender();
-      return;
-    }
-    if (this.keybindings.matches(data, "app.models.save")) {
-      if (this.onSaveDefault(this.state)) {
-        this.savedDefault = { ...this.state, enabledTools: [...this.state.enabledTools] };
+    const tools = this.filteredTools();
+    if (this.keybindings.matches(data, "tui.select.up") || this.keybindings.matches(data, "tui.select.down")) {
+      const delta = this.keybindings.matches(data, "tui.select.up") ? -1 : 1;
+      if (tools.length > 0) this.selectedTool = (this.selectedTool + delta + tools.length) % tools.length;
+    } else if (this.keybindings.matches(data, "tui.select.confirm")) {
+      const tool = tools[this.selectedTool];
+      if (tool && !this.required.has(tool.name)) {
+        this.selection = toggleTool(this.selection, tool.name);
+        this.onChange(this.selection);
       }
-      this.requestRender();
-      return;
-    }
-    if (this.keybindings.matches(data, "tui.select.cancel")) {
+    } else if (this.keybindings.matches(data, "app.models.save")) {
+      if (this.onSaveDefault(this.selection)) this.savedDefault = [...this.selection];
+    } else if (this.keybindings.matches(data, "tui.select.cancel")) {
       this.onClose();
       return;
-    }
-    if (this.tab === "tools") {
+    } else {
       this.search.handleInput(data);
       this.selectedTool = 0;
-      this.requestRender();
     }
+    this.requestRender();
   }
 
   render(width: number): string[] {
     const lines: string[] = [];
-    const modified = profileIsModified(this.state) ? " modified" : "";
-    const unsaved = toolControlStatesEqual(this.state, this.savedDefault) ? "" : " · unsaved default";
     lines.push(this.theme.fg("accent", this.theme.bold("Tool Configuration")));
-    lines.push(this.theme.fg("muted", `Session branch · ${this.state.profile}${modified}${unsaved}`));
+    lines.push(this.theme.fg("muted", `Session branch${defaultStatus(this.selection, this.savedDefault)}`));
     lines.push("");
-    const toolsTab = this.tab === "tools" ? this.theme.fg("accent", this.theme.bold("[Tools]")) : " Tools ";
-    const profilesTab = this.tab === "profiles" ? this.theme.fg("accent", this.theme.bold("[Profiles]")) : " Profiles ";
-    lines.push(truncateToWidth(`${toolsTab}  ${profilesTab}  ${this.theme.fg("dim", "Tab switches")}`, width));
-    lines.push("");
-
-    if (this.tab === "profiles") this.renderProfiles(lines, width);
-    else this.renderTools(lines, width);
-
-    return lines.map((line) => truncateToWidth(line, width));
-  }
-
-  private renderTools(lines: string[], width: number): void {
     lines.push(...this.search.render(width));
     lines.push("");
     const tools = this.filteredTools();
@@ -272,12 +192,11 @@ class ToolControlComponent implements Component, Focusable {
         const tool = tools[index];
         if (!tool) continue;
         const selected = index === this.selectedTool;
-        const enabled = this.required.has(tool.name) || this.state.enabledTools.includes(tool.name);
         const cursor = selected ? this.theme.fg("accent", "→ ") : "  ";
         const name = selected ? this.theme.fg("accent", tool.name) : tool.name;
         const status = this.required.has(tool.name)
           ? this.theme.fg("warning", "required")
-          : enabled
+          : this.selection.includes(tool.name)
             ? this.theme.fg("success", "enabled")
             : this.theme.fg("dim", "disabled");
         lines.push(`${cursor}${name}  ${status}`);
@@ -290,33 +209,8 @@ class ToolControlComponent implements Component, Focusable {
       }
     }
     lines.push("");
-    lines.push(this.theme.fg("dim", `  Type to search · Enter toggles · Tab profiles · ${keyHint("app.models.save", "save default")} · Esc closes`));
-  }
-
-  private renderProfiles(lines: string[], width: number): void {
-    const defaultSelected = this.selectedProfile === 0;
-    const defaultCursor = defaultSelected ? this.theme.fg("accent", "→ ") : "  ";
-    const defaultLabel = defaultSelected ? this.theme.fg("accent", "Default") : "Default";
-    const defaultActive = toolControlStatesEqual(this.state, this.savedDefault) ? this.theme.fg("success", " active") : "";
-    lines.push(`${defaultCursor}${defaultLabel}${defaultActive}`);
-    if (defaultSelected) {
-      lines.push(this.theme.fg("muted", "  Saved global default for new sessions"));
-    }
-
-    const profiles = Object.entries(TOOL_PROFILES) as Array<[ToolProfileName, (typeof TOOL_PROFILES)[ToolProfileName]]>;
-    for (let index = 0; index < profiles.length; index++) {
-      const [name, profile] = profiles[index];
-      const selected = index + 1 === this.selectedProfile;
-      const cursor = selected ? this.theme.fg("accent", "→ ") : "  ";
-      const label = selected ? this.theme.fg("accent", profile.label) : profile.label;
-      const active = name === this.state.profile ? this.theme.fg("success", profileIsModified(this.state) ? " active*" : " active") : "";
-      lines.push(`${cursor}${label}${active}`);
-      if (selected) {
-        lines.push(...wrapTextWithAnsi(profile.description, Math.max(1, width - 4)).map((line) => `  ${this.theme.fg("muted", line)}`));
-      }
-    }
-    lines.push("");
-    lines.push(this.theme.fg("dim", `  Enter applies profile · ${keyHint("app.models.save", "save default")} · Tab tools · Esc closes`));
+    lines.push(this.theme.fg("dim", `  Type to search · Enter toggles · ${keyHint("app.models.save", "save default")} · Esc closes`));
+    return lines.map((line) => truncateToWidth(line, width));
   }
 
   invalidate(): void {
@@ -325,90 +219,57 @@ class ToolControlComponent implements Component, Focusable {
 }
 
 interface ToolDialogOptions {
-  state: ToolControlState;
-  savedDefault: ToolControlState;
+  selection: string[];
+  savedDefault: string[] | undefined;
   tools: ToolInfo[];
   required: Set<string>;
-  onStateChange: (state: ToolControlState) => void;
-  onSaveDefault: (state: ToolControlState) => boolean;
+  onChange: (selection: string[]) => void;
+  onSaveDefault: (selection: string[]) => boolean;
 }
 
-/** Standard RPC dialogs share the TUI's profile, toggle, and persistence policy. */
-export async function showToolDialogs(ctx: ExtensionContext, options: ToolDialogOptions): Promise<void> {
-  let state = options.state;
+const SAVE_DEFAULT_CHOICE = "Save as default";
+const DONE_CHOICE = "Done";
+
+/** Standard RPC dialogs share the TUI's toggle and persistence policy. */
+export async function showToolDialog(ctx: ExtensionContext, options: ToolDialogOptions): Promise<void> {
+  let selection = options.selection;
   let savedDefault = options.savedDefault;
   while (!ctx.signal?.aborted) {
-    const action = await ctx.ui.select(`Tools: ${state.profile}${profileIsModified(state) ? " modified" : ""}`, [
-      "Toggle tools", "Apply profile", "Save as default", "Done",
-    ], { signal: ctx.signal });
-    if (!action || action === "Done") return;
-    if (action === "Save as default") {
-      if (options.onSaveDefault(state)) savedDefault = { ...state, enabledTools: [...state.enabledTools] };
+    const choices = options.tools.map((tool) => ({
+      tool,
+      label: `${options.required.has(tool.name) ? "[required]" : selection.includes(tool.name) ? "[x]" : "[ ]"} ${tool.name} — ${tool.description}`,
+    }));
+    const selected = await ctx.ui.select(`Tools${defaultStatus(selection, savedDefault)}`,
+      [...choices.map((choice) => choice.label), SAVE_DEFAULT_CHOICE, DONE_CHOICE], { signal: ctx.signal });
+    if (!selected || selected === DONE_CHOICE) return;
+    if (selected === SAVE_DEFAULT_CHOICE) {
+      if (options.onSaveDefault(selection)) savedDefault = [...selection];
       continue;
     }
-    if (action === "Apply profile") {
-      const profiles = Object.entries(TOOL_PROFILES) as Array<[ToolProfileName, (typeof TOOL_PROFILES)[ToolProfileName]]>;
-      const selected = await ctx.ui.select("Apply profile", ["Default", ...profiles.map(([, profile]) => `${profile.label} — ${profile.description}`)], { signal: ctx.signal });
-      const profile = profiles.find(([, value]) => `${value.label} — ${value.description}` === selected);
-      if (selected === "Default") state = { ...savedDefault, enabledTools: [...savedDefault.enabledTools], updatedAt: new Date().toISOString() };
-      else if (profile) state = createProfileState(profile[0]);
-      else continue;
-      options.onStateChange(state);
+    const choice = choices.find((item) => item.label === selected);
+    if (!choice) continue;
+    if (options.required.has(choice.tool.name)) {
+      ctx.ui.notify(toolDescription(choice.tool, true), "info");
       continue;
     }
-    while (!ctx.signal?.aborted) {
-      const choices = options.tools.map((tool) => ({
-        tool,
-        label: `${options.required.has(tool.name) ? "[required]" : state.enabledTools.includes(tool.name) ? "[x]" : "[ ]"} ${tool.name} — ${tool.description}`,
-      }));
-      const selected = await ctx.ui.select("Toggle tools", [...choices.map((choice) => choice.label), "Done"], { signal: ctx.signal });
-      const choice = choices.find((item) => item.label === selected);
-      if (!choice) break;
-      if (options.required.has(choice.tool.name)) {
-        ctx.ui.notify(toolDescription(choice.tool, true), "info");
-        continue;
-      }
-      state = toggleTool(state, choice.tool.name);
-      options.onStateChange(state);
-    }
+    selection = toggleTool(selection, choice.tool.name);
+    options.onChange(selection);
   }
 }
 
 export default function toolsExtension(pi: ExtensionAPI): void {
-  let savedDefault = loadSavedDefault();
-  let currentState = { ...savedDefault, enabledTools: [...savedDefault.enabledTools] };
-
-  function applyState(ctx: ExtensionContext, state: ToolControlState): string[] {
-    currentState = state;
-    if (specializedOwner(ctx)) return pi.getActiveTools();
-    const allTools = pi.getAllTools();
-    const available = allTools.map((tool) => tool.name);
-    const active = activeToolsForState(state, available, requiredTools(pi, ctx));
-    pi.setActiveTools(active);
-    pi.events.emit(TOOL_CONTROL_EVENT, eventForState(state, available));
-    const suffix = profileIsModified(state) ? "*" : "";
-    ctx.ui.setStatus("tools", ctx.ui.theme.fg("accent", `tools:${state.profile}${suffix}`));
-    return active;
+  function apply(selection: readonly string[]): void {
+    pi.setActiveTools(activeTools(selection, pi.getAllTools().map((tool) => tool.name), requiredTools(pi)));
   }
 
   function refresh(ctx: ExtensionContext): void {
-    savedDefault = loadSavedDefault();
-    currentState = latestState(ctx, savedDefault);
-    const owner = specializedOwner(ctx);
-    if (owner) {
-      ctx.ui.setStatus("tools", undefined);
-      return;
-    }
-    applyState(ctx, currentState);
-  }
-
-  function persistAndApply(ctx: ExtensionContext, state: ToolControlState): void {
-    pi.appendEntry(TOOL_CONTROL_STATE_TYPE, state);
-    applyState(ctx, state);
+    if (specializedOwner(ctx)) return;
+    const selection = branchSelection(ctx) ?? loadSavedDefault();
+    if (selection) apply(selection);
   }
 
   pi.registerCommand("tools", {
-    description: "Interactively enable tools or apply a tool profile",
+    description: "Interactively enable or disable tools",
     handler: async (_args, ctx) => {
       await ctx.waitForIdle();
       if (!ctx.hasUI) {
@@ -421,24 +282,20 @@ export default function toolsExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      savedDefault = loadSavedDefault();
-      currentState = latestState(ctx, savedDefault);
-      const tools = pi.getAllTools().sort((left, right) => left.name.localeCompare(right.name));
-      const required = requiredTools(pi, ctx);
+      const savedDefault = loadSavedDefault();
       const options: ToolDialogOptions = {
-        state: currentState,
+        selection: branchSelection(ctx) ?? savedDefault ?? pi.getActiveTools(),
         savedDefault,
-        tools,
-        required,
-        onStateChange: (state) => {
-          currentState = state;
-          persistAndApply(ctx, state);
+        tools: pi.getAllTools().sort((left, right) => left.name.localeCompare(right.name)),
+        required: requiredTools(pi),
+        onChange: (selection) => {
+          pi.appendEntry(TOOL_SELECTION_ENTRY, { enabledTools: selection });
+          apply(selection);
         },
-        onSaveDefault: (state) => {
+        onSaveDefault: (selection) => {
           try {
-            saveDefault(state);
-            savedDefault = { ...state, enabledTools: [...state.enabledTools] };
-            ctx.ui.notify(`Saved default tool selection to ${SAVED_DEFAULT_PATH}`, "info");
+            saveDefault(selection);
+            ctx.ui.notify(`Saved default tool selection to ${savedDefaultPath()}`, "info");
             return true;
           } catch (error) {
             ctx.ui.notify(`Could not save default tool selection: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -447,10 +304,10 @@ export default function toolsExtension(pi: ExtensionAPI): void {
         },
       };
       if (ctx.mode !== "tui") {
-        await showToolDialogs(ctx, options);
+        await showToolDialog(ctx, options);
         return;
       }
-      await ctx.ui.custom<void>((tui, theme, keybindings, done) => new ToolControlComponent({
+      await ctx.ui.custom<void>((tui, theme, keybindings, done) => new ToolSelectionComponent({
         ...options,
         theme,
         keybindings,
@@ -463,9 +320,4 @@ export default function toolsExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => refresh(ctx));
   pi.on("session_tree", async (_event, ctx) => refresh(ctx));
   pi.on("input", async (_event, ctx) => refresh(ctx));
-
-  pi.on("before_agent_start", async (event, ctx) => {
-    if (specializedOwner(ctx) || currentState.profile !== "bobs") return undefined;
-    return { systemPrompt: `${event.systemPrompt}\n\n${BOBS_INSTRUCTIONS}` };
-  });
 }

@@ -11,7 +11,7 @@ import {
 	validateMailContent,
 } from "./mail-core.ts";
 
-const SEND_MAIL_PARAMS = Type.Object({
+const MAIL_USER_PARAMS = Type.Object({
 	subject: Type.String({
 		description:
 			"Plain-text mail subject. Line breaks are not allowed; maximum 256 UTF-8 bytes.",
@@ -25,9 +25,9 @@ const SEND_MAIL_PARAMS = Type.Object({
 	}),
 });
 
-type SendMailParams = Static<typeof SEND_MAIL_PARAMS>;
+type MailUserParams = Static<typeof MAIL_USER_PARAMS>;
 
-interface SendMailDetails {
+interface MailUserDetails {
 	cancelled: boolean;
 	messageId?: string;
 	recipients: string[];
@@ -45,7 +45,7 @@ function configPath(): string {
 function cancelledResult(recipients: string[], reason: string) {
 	return {
 		content: [{ type: "text" as const, text: reason }],
-		details: { cancelled: true, recipients } satisfies SendMailDetails,
+		details: { cancelled: true, recipients } satisfies MailUserDetails,
 	};
 }
 
@@ -53,22 +53,22 @@ export default function (pi: ExtensionAPI) {
 	let sendInProgress = false;
 
 	pi.registerTool({
-		name: "send_mail",
-		label: "Send Mail",
+		name: "mail_user",
+		label: "Mail User",
 		description:
-			"Send a confirmed plain-text email through the implicit-TLS SMTP account configured in the external mail.json file. " +
+			"Send a confirmed plain-text email to the user through the implicit-TLS SMTP account configured in the external mail.json file. " +
 			"Recipients and sender are fixed by configuration and cannot be supplied by the model. The user reviews the complete body and confirms every send. " +
 			"Messages are limited to a 256-byte subject and 64 KiB body.",
 		promptSnippet:
-			"Send a user-confirmed plain-text email to externally configured recipients",
+			"Email the user at externally configured recipients after review and confirmation",
 		promptGuidelines: [
-			"Use send_mail only when the user asks to send an email or when email delivery is clearly required; never send status mail automatically.",
+			"Use mail_user only when the user asks to email them or when email delivery to the user is clearly required; never send status mail automatically.",
 		],
-		parameters: SEND_MAIL_PARAMS,
-		async execute(_toolCallId, params: SendMailParams, signal, onUpdate, ctx) {
+		parameters: MAIL_USER_PARAMS,
+		async execute(_toolCallId, params: MailUserParams, signal, onUpdate, ctx) {
 			if (sendInProgress)
 				throw new Error(
-					"Another send_mail call is already awaiting confirmation or delivery.",
+					"Another mail_user call is already awaiting confirmation or delivery.",
 				);
 			sendInProgress = true;
 			try {
@@ -76,7 +76,7 @@ export default function (pi: ExtensionAPI) {
 				const config = await loadMailConfig(configPath());
 				if (!ctx.hasUI) {
 					throw new Error(
-						"send_mail requires interactive confirmation and is disabled in non-interactive modes.",
+						"mail_user requires interactive confirmation and is disabled in non-interactive modes.",
 					);
 				}
 				if (signal?.aborted)
@@ -135,7 +135,7 @@ export default function (pi: ExtensionAPI) {
 						messageId: message.messageId,
 						recipients: [...config.to],
 						hostname: message.hostname,
-					} satisfies SendMailDetails,
+					} satisfies MailUserDetails,
 				};
 			} finally {
 				sendInProgress = false;

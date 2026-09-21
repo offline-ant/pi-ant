@@ -100,90 +100,98 @@ for (const kind of ["tmux", "herdr", "emacs"] as const) {
         artifacts.push(paths);
         const id = randomUUID();
         writeWorkerRequest(paths, { id, task, tools, model: { provider: "orchestration-fixture", id: model }, thinkingLevel: model === "one" ? "high" : "low",
-          resultPath: paths.resultPath, statusPath: paths.statusPath, closeWhenDone: false });
+          resultPath: paths.resultPath, statusPath: paths.statusPath });
         return { id, task, paths };
       }
-      const first = request("first");
-      target = await host.start({ kind: "pi", name: `life-${randomUUID().slice(0, 8)}`, cwd: directory, sessionFile,
-        args: ["--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--provider", "orchestration-fixture", "--model", "one", "--thinking", "high", "-e", frame, "-e", fixture],
-        env: { PI_CODING_AGENT_DIR: agentDirectory, PI_NESTED: "0" }, placement: "worker", parent, prompt: `/worker-run ${first.paths.requestPath}` });
-      const managed = target;
       const nativeHost = host;
-      async function wait(work: ReturnType<typeof request>) {
-        return waitForWorkerResult(pi, { ...work, target: managed, sessionFile, signal: AbortSignal.timeout(20_000) });
+      const args = ["--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--provider", "orchestration-fixture", "--model", "one", "--thinking", "high", "-e", frame, "-e", fixture];
+      async function start(prompt?: string): Promise<HostTarget> {
+        target = await nativeHost.start({ kind: "pi", name: `life-${randomUUID().slice(0, 8)}`, cwd: directory, sessionFile, args,
+          env: { PI_CODING_AGENT_DIR: agentDirectory, PI_NESTED: "0" }, placement: "worker", parent, prompt });
+        return target;
       }
-      const completed = await wait(first);
+      const run = (work: ReturnType<typeof request>) => start(`/worker-run ${work.paths.requestPath}`);
+      // Every worker process closes itself after writing its final result.
+      async function wait(work: ReturnType<typeof request>, worker: HostTarget) {
+        const output = await waitForWorkerResult(pi, { ...work, target: worker, sessionFile, signal: AbortSignal.timeout(20_000) });
+        await until(async () => await nativeHost.state(worker) !== "running", "worker closes after its result");
+        assert.equal(readWorkerStatus(work.paths.statusPath)?.state, "closed");
+        target = undefined;
+        return output;
+      }
+
+      const first = request("first");
+      const completed = await wait(first, await run(first));
       assert.equal(completed.result.result, "fixture result: first");
       assert.equal(completed.result.retrospective, "fixture retrospective");
       assert.equal(fs.readFileSync(first.paths.resultMarkdownPath, "utf8"), completed.result.result);
       assert.equal(fs.readFileSync(first.paths.retrospectiveMarkdownPath, "utf8"), completed.result.retrospective);
-      assert.equal(await host.state(target), "running");
-      assert.equal(readWorkerStatus(first.paths.statusPath)?.state, "idle");
       const firstCalls = traces(directory).filter((entry) => entry.event === "request");
-      assert.deepEqual(firstCalls.map((entry) => entry.tools), [["read"], []]);
+      assert.deepEqual(firstCalls.map((entry) => entry.tools), [["read"], ["read"]]);
       assert.equal(firstCalls[0].model, "one");
       assert.equal(firstCalls[0].reasoning, "high");
 
-      // Machine submissions must never append to or consume the human's editor.
-      if (kind === "emacs") await emacsInput(endpoint, target.id, "human draft preserved");
-      else await host.send(target, { kind: "text", text: "human draft preserved", enter: false });
-      await delay(200);
       const second = request("second", "two", ["bash"]);
-      await host.send(target, { kind: "prompt", text: `/worker-run ${second.paths.requestPath}` });
-      assert.equal((await wait(second)).result.result, "fixture result: second");
+      assert.equal((await wait(second, await run(second))).result.result, "fixture result: second");
       const secondCall = traces(directory).find((entry) => entry.event === "request" && entry.prompt?.endsWith("second"));
       assert.deepEqual(secondCall?.tools, ["bash"]);
       assert.equal(secondCall?.model, "two");
       assert.equal(secondCall?.reasoning, "low");
-      if (kind === "emacs") assert.equal(await emacsInput(endpoint, target.id), "human draft preserved");
-      else {
-        await host.send(target, { kind: "prompt", text: "/lifecycle-report" });
-        await until(() => traces(directory).some((entry) => entry.event === "report"), "draft report");
-        assert.equal(traces(directory).findLast((entry) => entry.event === "report")?.draft, "human draft preserved");
-      }
-      await host.send(target, { kind: "prompt", text: "/lifecycle-clear-draft" });
+
+      // Machine submissions must never append to or consume the human's editor.
+      const startups = () => traces(directory).filter((entry) => entry.event === "startup").length;
+      const startupsBefore = startups();
+      const idle = await start();
+      await until(() => startups() > startupsBefore, "idle target startup");
+      if (kind === "emacs") await emacsInput(endpoint, idle.id, "human draft preserved");
+      else await host.send(idle, { kind: "text", text: "human draft preserved", enter: false });
       await delay(200);
+      await host.send(idle, { kind: "prompt", text: "/lifecycle-report" });
+      await until(() => traces(directory).some((entry) => entry.event === "report"), "draft report");
+      if (kind === "emacs") assert.equal(await emacsInput(endpoint, idle.id), "human draft preserved");
+      else assert.equal(traces(directory).findLast((entry) => entry.event === "report")?.draft, "human draft preserved");
+      await host.close(idle);
+      target = undefined;
 
       // Takeover must happen at submission, while the slow automatic run is open.
       const supervised = request("[hold] supervised");
-      await host.send(target, { kind: "prompt", text: `/worker-run ${supervised.paths.requestPath}` });
+      const supervisedWorker = await run(supervised);
       await until(() => traces(directory).some((entry) => entry.prompt?.endsWith("[hold] supervised")), "slow worker start");
-      if (kind === "emacs") await emacsInput(endpoint, target.id, "human takeover", true);
-      else await host.send(target, { kind: "text", text: "human takeover", enter: true });
+      if (kind === "emacs") await emacsInput(endpoint, supervisedWorker.id, "human takeover", true);
+      else await host.send(supervisedWorker, { kind: "text", text: "human takeover", enter: true });
       await until(() => readWorkerStatus(supervised.paths.statusPath)?.state === "supervised", "human takeover before completion");
       assert.equal(fs.existsSync(supervised.paths.resultPath), false);
       fs.writeFileSync(path.join(directory, "release"), "release");
       await until(() => traces(directory).some((entry) => entry.event === "request" && entry.prompt === "human takeover"), "human follow-up runs");
       await delay(300);
       assert.equal(fs.existsSync(supervised.paths.resultPath), false);
-      await host.send(target, { kind: "prompt", text: "/worker-submit supervised main" });
-      const submitted = (await wait(supervised)).result;
+      await host.send(supervisedWorker, { kind: "prompt", text: "/worker-submit supervised main" });
+      const submitted = (await wait(supervised, supervisedWorker)).result;
       assert.equal(submitted.result, "supervised main");
       assert.equal(submitted.retrospective, "fixture retrospective");
 
       // Guidance dispatched during streaming keeps automatic capture and waits for guidance.
       fs.rmSync(path.join(directory, "release"));
       const continued = request("[hold] continued");
-      await host.send(target, { kind: "prompt", text: `/worker-run ${continued.paths.requestPath}` });
+      const continuedWorker = await run(continued);
       await until(() => traces(directory).some((entry) => entry.prompt?.endsWith("[hold] continued")), "continue worker start");
-      await host.send(target, { kind: "prompt", text: "/worker-continue continued guidance" });
+      await host.send(continuedWorker, { kind: "prompt", text: "/worker-continue continued guidance" });
       fs.writeFileSync(path.join(directory, "release"), "release");
-      assert.equal((await wait(continued)).result.result, "fixture result: continued guidance");
+      assert.equal((await wait(continued, continuedWorker)).result.result, "fixture result: continued guidance");
 
       const retry = request("[retry-once] retried");
-      await host.send(target, { kind: "prompt", text: `/worker-run ${retry.paths.requestPath}` });
-      assert.equal((await wait(retry)).result.result, "fixture result: [retry-once] retried");
+      assert.equal((await wait(retry, await run(retry))).result.result, "fixture result: [retry-once] retried");
       assert.equal(traces(directory).filter((entry) => entry.event === "request" && entry.prompt?.endsWith("[retry-once] retried")).length, 2);
 
       const beforeOverflow = traces(directory).length;
       const overflow = request("[overflow-once] recovered");
-      await host.send(target, { kind: "prompt", text: `/worker-run ${overflow.paths.requestPath}` });
+      const overflowWorker = await run(overflow);
       await until(() => traces(directory).slice(beforeOverflow).some((entry) => entry.summary), "default overflow compaction calls faux summary provider");
       assert.equal(fs.existsSync(overflow.paths.resultPath), false, "overflow must not settle as a worker failure before compaction retries");
       assert.equal(readWorkerStatus(overflow.paths.statusPath)?.state, "running");
       assert.equal(traces(directory).slice(beforeOverflow).some((entry) => entry.event === "settled"), false);
       fs.writeFileSync(path.join(directory, "release-compaction"), "release");
-      const recovered = (await wait(overflow)).result;
+      const recovered = (await wait(overflow, overflowWorker)).result;
       assert.equal(recovered.result, "fixture result: [overflow-once] recovered");
       assert.equal(recovered.retrospective, "fixture retrospective");
       const recoveryTrace = traces(directory).slice(beforeOverflow);
@@ -197,8 +205,7 @@ for (const kind of ["tmux", "herdr", "emacs"] as const) {
 
       fs.writeFileSync(path.join(directory, "fail-retrospective"), "fail");
       const retrospectiveFailure = request("main survives");
-      await host.send(target, { kind: "prompt", text: `/worker-run ${retrospectiveFailure.paths.requestPath}` });
-      const preserved = (await wait(retrospectiveFailure)).result;
+      const preserved = (await wait(retrospectiveFailure, await run(retrospectiveFailure))).result;
       assert.equal(preserved.result, "fixture result: main survives");
       assert.match(preserved.retrospective ?? "", /retrospective unavailable/);
       assert.equal(preserved.isError, false);
@@ -206,23 +213,23 @@ for (const kind of ["tmux", "herdr", "emacs"] as const) {
 
       fs.rmSync(path.join(directory, "release"));
       const override = request("[hold] override");
-      await host.send(target, { kind: "prompt", text: `/worker-run ${override.paths.requestPath}` });
+      const overrideWorker = await run(override);
       await until(() => traces(directory).some((entry) => entry.prompt?.endsWith("[hold] override")), "override worker start");
-      await host.send(target, { kind: "prompt", text: "/finish-worker-now explicit recovery" });
-      assert.equal((await wait(override)).result.result, "explicit recovery");
+      await host.send(overrideWorker, { kind: "prompt", text: "/finish-worker-now explicit recovery" });
+      assert.equal((await wait(override, overrideWorker)).result.result, "explicit recovery");
 
       const cancelled = request("[hold] cancelled");
-      await host.send(target, { kind: "prompt", text: `/worker-run ${cancelled.paths.requestPath}` });
+      const cancelledWorker = await run(cancelled);
       await until(() => traces(directory).some((entry) => entry.prompt?.endsWith("[hold] cancelled")), "cancel worker start");
       const controller = new AbortController();
-      const pending = waitForWorkerResult(pi, { ...cancelled, target, sessionFile, signal: controller.signal });
+      const pending = waitForWorkerResult(pi, { ...cancelled, target: cancelledWorker, sessionFile, signal: controller.signal });
       controller.abort();
       await assert.rejects(pending, /abort/i);
-      await nativeHost.close(managed);
+      await nativeHost.close(cancelledWorker);
       target = undefined;
-      assert.notEqual(await nativeHost.state(managed), "running", "a closed native target must not remain running");
+      assert.notEqual(await nativeHost.state(cancelledWorker), "running", "a closed native target must not remain running");
       assert.equal(fs.existsSync(cancelled.paths.resultPath), false);
-      t.diagnostic("Passed: matching result + separate retrospective, persistent model/thinking/tool changes, draft-safe request submission, busy human takeover, submit/continue/finish recovery, real retry and default overflow-compaction settlement, retrospective failure, cancelled wait and owned close.");
+      t.diagnostic("Passed: matching result + separate retrospective, self-closing workers, per-request model/thinking/tool selection, draft-safe prompt submission, busy human takeover, submit/continue/finish recovery, real retry and default overflow-compaction settlement, retrospective failure, cancelled wait and owned close.");
     } catch (error) {
       t.diagnostic(`Fixture trace: ${JSON.stringify(traces(directory))}`);
       if (host && target) t.diagnostic(`Native output: ${await host.read(target, 80).catch(String)}`);

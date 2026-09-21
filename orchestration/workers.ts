@@ -13,15 +13,8 @@ const PROGRESS_UPDATE_INTERVAL_MS = 5000;
 const STATE_POLL_INTERVAL_MS = 1000;
 const STATE_UNAVAILABLE_GRACE_MS = 5000;
 
-export interface PersistentWorker {
-  target: HostTarget;
-  cwd: string;
-  sessionFile: string;
-  statusPath: string;
-}
 interface RegistryEntry {
   target: HostTarget;
-  worker?: PersistentWorker;
 }
 
 export function validateName(name: string): string {
@@ -88,16 +81,6 @@ export function listTargets(): HostTarget[] {
   if (!fs.existsSync(REGISTRY_DIR)) return [];
   return fs.readdirSync(REGISTRY_DIR).filter((file) => file.endsWith(".json"))
     .map((file) => readTarget(file.slice(0, -5))).filter((target): target is HostTarget => target !== undefined);
-}
-
-export function readPersistentWorker(name: string): PersistentWorker | undefined {
-  const entry = readEntry(name);
-  if (entry && !entry.worker) throw new Error(`'${name}' belongs to another panel or interactive fork, not a persistent worker.`);
-  return entry?.worker;
-}
-
-export function savePersistentWorker(worker: PersistentWorker): void {
-  saveEntry({ target: worker.target, worker });
 }
 
 export interface WorkerToolDetails {

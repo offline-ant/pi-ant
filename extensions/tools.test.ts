@@ -1,20 +1,20 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import test from "node:test";
 import type { ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
-import toolsExtension, { showToolDialogs } from "./tools.ts";
-import { createProfileState, TOOL_CONTROL_STATE_TYPE, type ToolControlState } from "./tool-control-state.ts";
+import toolsExtension, { showToolDialog } from "./tools.ts";
+import { TOOL_SELECTION_ENTRY } from "./tool-selection.ts";
 
-test("RPC tool dialogs toggle, enforce required tools, save, and apply profiles", async () => {
-  const selections = ["Toggle tools", "[required] sqlite", "[ ] browser", "Done", "Save as default", "Apply profile", "Coding", "Apply profile", "Default", "Done"];
-  const changes: ToolControlState[] = [];
-  const saves: ToolControlState[] = [];
-  const notices: string[] = [];
-  const ctx = {
+function scriptedContext(selections: string[], notices: string[] = []): ExtensionContext {
+  return {
     mode: "rpc",
     ui: {
       select: async (_title: string, options: string[]) => {
         const expected = selections.shift();
-        const choice = options.find((option) => option.startsWith(expected ?? ""));
+        if (expected === undefined) return undefined;
+        const choice = options.find((option) => option.startsWith(expected));
         assert.ok(choice, `No choice for ${expected}: ${options.join(", ")}`);
         return choice;
       },
@@ -22,109 +22,78 @@ test("RPC tool dialogs toggle, enforce required tools, save, and apply profiles"
       custom: () => assert.fail("RPC must not call custom"),
     },
   } as unknown as ExtensionContext;
-  await showToolDialogs(ctx, {
-    state: createProfileState("coding"),
-    savedDefault: createProfileState("research"),
-    tools: ["read", "browser", "sqlite"].map((name) => ({ name, description: name })) as ToolInfo[],
-    required: new Set(["sqlite"]),
-    onStateChange: (state) => changes.push(state),
-    onSaveDefault: (state) => { saves.push(state); return true; },
+}
+
+test("RPC tool dialog toggles, enforces required tools, and saves the default", async () => {
+  const selections = ["[required] present_guidance", "[ ] browser", "[x] browser", "[ ] fresh_look", "Save as default", "Done"];
+  const notices: string[] = [];
+  const changes: string[][] = [];
+  const saves: string[][] = [];
+  const initial = ["read"];
+  await showToolDialog(scriptedContext(selections, notices), {
+    selection: initial,
+    savedDefault: undefined,
+    tools: ["read", "browser", "fresh_look", "present_guidance"].map((name) => ({ name, description: name })) as ToolInfo[],
+    required: new Set(["present_guidance"]),
+    onChange: (selection) => changes.push(selection),
+    onSaveDefault: (selection) => { saves.push(selection); return true; },
   });
   assert.equal(selections.length, 0);
-  assert.equal(changes.length, 3);
-  assert.ok(changes[0].enabledTools.includes("browser"));
-  assert.ok(!changes[1].enabledTools.includes("browser"));
-  assert.deepEqual(changes[2].enabledTools, changes[0].enabledTools);
-  assert.equal(saves.length, 1);
+  assert.deepEqual(changes, [["read", "browser"], ["read"], ["read", "fresh_look"]]);
+  assert.deepEqual(saves, [["read", "fresh_look"]]);
   assert.equal(notices.length, 1);
+  assert.deepEqual(initial, ["read"]);
 });
 
-test("RPC tool dialogs enable fresh_look only by explicit selection and preserve it as a saved default", async () => {
-  const selections = ["Toggle tools", "[ ] fresh_look", "Done", "Save as default", "Apply profile", "Coding", "Apply profile", "Default", "Done"];
-  const changes: ToolControlState[] = [];
-  const saves: ToolControlState[] = [];
-  const initial = createProfileState("coding");
-  const ctx = {
-    ui: {
-      select: async (_title: string, options: string[]) => {
-        const expected = selections.shift();
-        const choice = options.find((option) => option.startsWith(expected ?? ""));
-        assert.ok(choice, `No choice for ${expected}: ${options.join(", ")}`);
-        return choice;
-      },
-    },
-  } as unknown as ExtensionContext;
-  await showToolDialogs(ctx, {
-    state: initial,
-    savedDefault: initial,
-    tools: ["do", "delegate", "fresh_look"].map((name) => ({ name, description: name })) as ToolInfo[],
-    required: new Set(),
-    onStateChange: (state) => changes.push(state),
-    onSaveDefault: (state) => { saves.push(state); return true; },
+test("RPC tool dialog cancellation leaves the selection unchanged", async () => {
+  await showToolDialog(scriptedContext([]), {
+    selection: ["read"], savedDefault: ["read"], tools: [], required: new Set(),
+    onChange: () => assert.fail("cancel changed the selection"),
+    onSaveDefault: () => assert.fail("cancel saved the selection"),
   });
-  assert.equal(selections.length, 0);
-  assert.equal(changes.length, 3);
-  assert.ok(changes[0].enabledTools.includes("fresh_look"));
-  assert.ok(!changes[1].enabledTools.includes("fresh_look"));
-  assert.deepEqual(changes[2].enabledTools, changes[0].enabledTools);
-  assert.deepEqual(saves[0].enabledTools, changes[0].enabledTools);
-  assert.ok(!initial.enabledTools.includes("fresh_look"));
 });
 
-test("RPC tool dialog cancellation leaves state unchanged", async () => {
-  const ctx = { ui: { select: async () => undefined } } as unknown as ExtensionContext;
-  await showToolDialogs(ctx, {
-    state: createProfileState("coding"), savedDefault: createProfileState("research"), tools: [], required: new Set(),
-    onStateChange: () => assert.fail("cancel changed state"),
-    onSaveDefault: () => { assert.fail("cancel saved state"); },
-  });
+async function startSession(branch: unknown[], savedDefault?: unknown): Promise<string[] | undefined> {
+  const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-tools-test-"));
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    if (savedDefault !== undefined) fs.writeFileSync(path.join(agentDir, "tool-selection.json"), JSON.stringify(savedDefault));
+    const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+    let active: string[] | undefined;
+    toolsExtension({
+      on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, handler),
+      registerCommand: () => undefined,
+      getAllTools: () => ["read", "ask", "do", "delegate", "fresh_look"].map((name) => ({ name })),
+      setActiveTools: (tools: string[]) => { active = tools; },
+    } as unknown as Parameters<typeof toolsExtension>[0]);
+    await handlers.get("session_start")?.({}, { cwd: "/tmp", sessionManager: { getBranch: () => branch } });
+    return active;
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+    fs.rmSync(agentDir, { recursive: true, force: true });
+  }
+}
+
+test("without a branch selection or saved default, Pi's active tools are left alone", async () => {
+  assert.equal(await startSession([]), undefined);
+});
+
+test("the saved default applies to branches without their own selection", async () => {
+  assert.deepEqual(await startSession([], { enabledTools: ["read", "do"] }), ["read", "do"]);
 });
 
 test("an interactive fork releases inherited worker ownership and restores exact available tools", async () => {
-  const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
-  let active: string[] = [];
-  const pi = {
-    on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, handler),
-    registerCommand: () => undefined,
-    getAllTools: () => ["read", "ask", "do", "delegate", "fresh_look"].map((name) => ({ name })),
-    setActiveTools: (tools: string[]) => { active = tools; },
-    events: { emit: () => undefined },
-  } as unknown as Parameters<typeof toolsExtension>[0];
-  toolsExtension(pi);
-  const ctx = {
-    cwd: "/tmp",
-    sessionManager: { getBranch: () => [
-      { type: "custom", customType: "pi-orchestration:delegate-runtime", data: {} },
-      { type: "custom", customType: "pi-orchestration:fork", data: {} },
-      { type: "custom", customType: TOOL_CONTROL_STATE_TYPE, data: { ...createProfileState("research"), enabledTools: ["read", "unavailable"] } },
-    ] },
-    ui: { setStatus: () => undefined, theme: { fg: (_color: string, text: string) => text } },
-  };
-  await handlers.get("session_start")?.({}, ctx);
-  assert.deepEqual(active, ["read"]);
+  assert.deepEqual(await startSession([
+    { type: "custom", customType: "pi-orchestration:delegate-runtime", data: {} },
+    { type: "custom", customType: "pi-orchestration:fork", data: {} },
+    { type: "custom", customType: TOOL_SELECTION_ENTRY, data: { enabledTools: ["read", "unavailable"] } },
+  ], { enabledTools: ["do"] }), ["read"]);
 });
 
-test("Bob's prompt prefers do and reserves delegate for standalone assignments", async () => {
-  const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
-  const pi = {
-    on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, handler),
-    registerCommand: () => undefined,
-    getAllTools: () => ["do", "delegate", "fresh_look", "ask"].map((name) => ({ name })),
-    setActiveTools: () => undefined,
-    events: { emit: () => undefined },
-  } as unknown as Parameters<typeof toolsExtension>[0];
-  toolsExtension(pi);
-  const ctx = {
-    cwd: "/tmp",
-    sessionManager: { getBranch: () => [
-      { type: "custom", customType: TOOL_CONTROL_STATE_TYPE, data: createProfileState("bobs") },
-    ] },
-    ui: { setStatus: () => undefined, theme: { fg: (_color: string, text: string) => text } },
-  };
-  await handlers.get("session_start")?.({}, ctx);
-  const result = await handlers.get("before_agent_start")?.({ systemPrompt: "Base prompt" }, ctx) as { systemPrompt: string };
-  assert.match(result.systemPrompt, /^Base prompt\n\n/);
-  assert.match(result.systemPrompt, /prefer do/);
-  assert.match(result.systemPrompt, /delegate only occasionally for large standalone tasks with a complete brief/);
-  assert.doesNotMatch(result.systemPrompt, /context=|retrospective|fresh_look/);
+test("structured workers keep the tools their request selected", async () => {
+  assert.equal(await startSession([
+    { type: "custom", customType: "pi-orchestration:delegate-runtime", data: {} },
+  ], { enabledTools: ["do"] }), undefined);
 });

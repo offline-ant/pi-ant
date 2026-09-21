@@ -5,7 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import { fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime, resolveCliModel, SessionManager, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
-import { collectHistoryItems, flushSessionFile, getPreToolCallLeafId, modelCliArgs, prepareDelegateSession } from "./context.ts";
+import { flushSessionFile, getPreToolCallLeafId, modelCliArgs, prepareDelegateSession } from "./context.ts";
 
 function assistant(content: Extract<Extract<SessionEntry, { type: "message" }>["message"], { role: "assistant" }>["content"]): Extract<Extract<SessionEntry, { type: "message" }>["message"], { role: "assistant" }> {
   return { role: "assistant", content, timestamp: Date.now(), stopReason: "stop", api: "openai-responses", provider: "fake", model: "fake", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
@@ -89,18 +89,6 @@ test("child model arguments round-trip through Pi's CLI resolver or explicitly r
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });
 
-test("history uses Pi context entries and omits tool activity", () => {
-  const session = SessionManager.inMemory("/tmp");
-  session.appendMessage({ role: "user", content: "Question", timestamp: Date.now() });
-  session.appendMessage(assistant([{ type: "text", text: "Answer" }]));
-  session.appendMessage(assistant([{ type: "toolCall", id: "call", name: "read", arguments: {} }]));
-  session.appendMessage({ role: "toolResult", toolName: "read", toolCallId: "call", content: [{ type: "text", text: "Hidden tool output" }], isError: false, timestamp: Date.now() });
-  assert.deepEqual(collectHistoryItems(session.buildContextEntries(), 1), [
-    { role: "user", text: "Question" }, { role: "assistant", text: "Answer" },
-  ]);
-  assert.deepEqual(collectHistoryItems(session.buildContextEntries(), 0), []);
-  const newest = session.appendMessage({ role: "user", content: "After compaction", timestamp: Date.now() });
-  session.appendCompaction("Summary", newest, 100);
-  assert.deepEqual(collectHistoryItems(session.buildContextEntries(), 10), [{ role: "user", text: "After compaction" }]);
+test("child model arguments require a selected model", () => {
   assert.throws(() => modelCliArgs(undefined, "high"), /no selected model/);
 });

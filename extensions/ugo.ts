@@ -28,7 +28,7 @@ import {
 import {
   ensureAndReadWorkflowFile,
   ensureWorkflowFile,
-  formatGuidanceSystemPrompt,
+  formatGuidancePromptSection,
   WORKFLOW_FILE,
 } from "./workflow-core.ts";
 
@@ -1533,9 +1533,7 @@ export default function (pi: ExtensionAPI) {
             "info",
           );
         }
-        return {
-          systemPrompt: `${event.systemPrompt}\n\n${formatGuidanceSystemPrompt(workflow.content)}`,
-        };
+        event.systemPromptOptions.sections.guidance = formatGuidancePromptSection(workflow.content);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         ctx.ui.notify(
@@ -1545,11 +1543,8 @@ export default function (pi: ExtensionAPI) {
       }
     }
     if (currentState?.active && currentState.phase === "do_retrospective") {
-      return {
-        systemPrompt: `${event.systemPrompt}\n\nAnswer only the ugo-do reflection prompt; tools are disabled.`,
-      };
+      event.systemPromptOptions.sections.ugo_retrospective = "Answer only the ugo-do reflection prompt; tools are disabled.";
     }
-    return undefined;
   });
 
   pi.on("agent_end", async (event, ctx) => {

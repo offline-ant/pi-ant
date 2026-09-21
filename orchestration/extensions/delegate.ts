@@ -7,7 +7,6 @@ import { prepareDelegateSession } from "../context.ts";
 import { createDelegateAltController, delegateModelLabel, type DelegateModelPair } from "../delegate-alt.ts";
 import { createWorkerArtifacts, formatWorkerResult, makeWorkerId, writeWorkerRequest } from "../worker-frame.ts";
 import { runEphemeralWorker } from "../workers.ts";
-import { createWorkerToolResolver } from "../worker-tools.ts";
 import { WORKER_DESIGN_PRINCIPLES } from "../worker-principles.ts";
 
 const delegateParams = Type.Object({
@@ -42,7 +41,7 @@ const toolGuidance: Record<EphemeralWorkerTool, { label: string; description: st
     snippet: "Review a self-contained question without conversation or project instructions",
   },
 };
-const concurrencyGuideline = "Batch independent do, delegate, fresh_look, and coding-agent calls; they run concurrently. Wait for results before dependent reads, edits, or checks. Workers share files, not each other's conversation.";
+const concurrencyGuideline = "Batch independent do, delegate, and fresh_look calls; they run concurrently. Wait for results before dependent reads, edits, or checks. Workers share files, not each other's conversation.";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -59,8 +58,6 @@ function branchHasInheritContextWarning(ctx: ExtensionContext): boolean {
 }
 
 export default function delegateExtension(pi: ExtensionAPI): void {
-  const workerTools = createWorkerToolResolver(pi);
-  pi.on("session_shutdown", () => workerTools.dispose());
   let inheritContextWarningWasReturned = false;
 
   function restoreWarningState(ctx: ExtensionContext): void {
@@ -69,7 +66,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     restoreWarningState(ctx);
-    // Optional by default. Tool profiles restore explicit saved selections, and
+    // Optional by default. Saved /tools selections restore explicit choices, and
     // /worker-run applies the caller's selected tools after startup.
     pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "fresh_look"));
   });
@@ -133,12 +130,11 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             task: [tool === "do"
               ? "Complete the task below using the existing conversation. Use nested do calls only for genuinely separate subtasks; do not forward the whole assignment."
               : "", WORKER_DESIGN_PRINCIPLES, "Task:", params.task].filter(Boolean).join("\n\n"),
-            tools: workerTools.current(),
+            tools: [...new Set([...pi.getActiveTools(), "do"])],
             model: { provider: model.provider, id: model.id },
             thinkingLevel,
             resultPath: paths.resultPath,
             statusPath: paths.statusPath,
-            closeWhenDone: true,
           });
           const output = await runEphemeralWorker(pi, {
             ...prepared, id, name: `${tool}-${id}`, paths, task: params.task, signal,

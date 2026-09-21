@@ -83,23 +83,3 @@ export function prepareDelegateSession(
   flushSessionFile(forked, sessionFile);
   return { cwd, sessionFile, args };
 }
-
-export interface HistoryItem {
-  role: "user" | "assistant";
-  text: string;
-}
-
-export function collectHistoryItems(entries: SessionEntry[], count: number): HistoryItem[] {
-  if (count <= 0) return [];
-  const items: HistoryItem[] = [];
-  const messages = entries.flatMap((entry) => entry.type === "message" ? [entry.message] : []);
-  for (const message of messages) {
-    if (message.role !== "user" && message.role !== "assistant") continue;
-    if (message.role === "assistant" && message.content.some((block) => block.type === "toolCall")) continue;
-    const text = typeof message.content === "string" ? message.content : message.content
-      .flatMap((block) => block.type === "text" ? [block.text] : block.type === "image" ? ["[image]"] : []).join("\n\n").trim();
-    if (text) items.push({ role: message.role, text });
-  }
-  const start = Math.max(0, items.length - count);
-  return items.slice(items[start]?.role === "assistant" && items[start - 1]?.role === "user" ? start - 1 : start);
-}

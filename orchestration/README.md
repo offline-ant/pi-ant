@@ -10,9 +10,9 @@ Pi's settings. No extension-local npm installation is needed.
 - **tmux:** direct machine-oriented CLI; Pi TUI in owned panes.
 - **Herdr:** tested with 0.8.2; named Pi agents in owned panes.
 - **Emacs:** local Pilish with the named-session API in this workspace's
-  `/home/claude/.local/share/pilish` checkout. The required generic APIs are
+  `/home/devops/Projects/pi/pilish` checkout. The required generic APIs are
   published on [offline-ant/pilish's pi-orchestration branch](https://github.com/offline-ant/pilish/tree/pi-orchestration)
-  (verified revision `9613b9e`); stock Pilish 3.0.1 does not include them.
+  (verified revision `3987521`, on v3.1.0); stock Pilish does not include them.
   EAT 0.9.4 is the sole shell terminal. Pi uses RPC chat/input pairs; shell panels support terminal keys
   and fullscreen applications. Load Pilish and EAT on the server's load path.
   Load `emacs/pi-orchestration.el` in Pilish's `use-package :config`, before
@@ -77,22 +77,16 @@ another Pi child. Shell panels do not consume worker nesting depth.
   assignment. The worker starts blank with normal project/global resources;
   `task` must contain every necessary requirement.
 - `fresh_look({task, folder?})`: like `delegate`, but also without discovered
-  context files, skills, templates, or system prompts. It is in no tool profile;
-  enable it manually in `/tools`.
+  context files, skills, templates, or system prompts. It is disabled at
+  startup; enable it manually in `/tools`.
 
-  Saved tool selections remain exact; enable `do` in `/tools` or reapply a preset
-  if an existing selection does not include it.
+  Saved tool selections remain exact; enable `do` in `/tools` if an existing
+  selection does not include it.
 
   All three share one implementation and return the worker's result plus an
   automatic retrospective. Optional `alt` appears on all three only when enabled
   with `/delegate-alt`; omitted/false retains the caller's model, true uses the
   other configured model.
-- `coding-agent({name, task, folder?})`: persistent fresh-context worker;
-  subsequent requests reuse its session and reapply the caller's model,
-  thinking level, and tools. Each name has one active request at a time.
-- `fresh-history({prompt, history})`: ephemeral worker seeded with recent
-  user requests and direct assistant replies, excluding tool activity. Includes
-  session-file/history-root references for recovery.
 - `panel-start({name, command, folder?})`: start a server, watcher, or
   interactive program. There is no readiness wait: probe the service from `bash`
   or read the panel. Panels need a terminal host; the web host refuses them.
@@ -115,10 +109,9 @@ explicit close; a panel whose native surface was destroyed elsewhere reports
 that on read and releases its name to the next `panel-start`. Native IDs are
 diagnostic details, not public lookup names.
 
-Independent sibling `do`/`delegate`/`fresh_look`/`coding-agent` calls run
-concurrently and join before the parent continues. Different persistent names are required. Pi startup alone
-is serialized to avoid authentication races. Batches containing `fresh-history`
-remain sequential.
+Independent sibling `do`/`delegate`/`fresh_look` calls run concurrently and
+join before the parent continues. Pi startup alone is serialized to avoid
+authentication races.
 
 ## Alternate-model delegation
 
@@ -138,7 +131,7 @@ select two distinct authenticated models. You can also use exact identifiers:
 Choosing immediately re-registers `do`, `delegate`, and `fresh_look` with or
 without optional boolean `alt` (default false), updating the actual schemas and
 descriptions without a reload. The active-tool selection is preserved, including
-disabled tools. This does not affect `coding-agent`, `fresh-history`, or forks.
+disabled tools. This does not affect forks.
 
 When enabled, `alt: true` selects the other member relative to the current
 caller's provider/model; nested workers follow the same rule. Missing auth,
@@ -190,7 +183,7 @@ contains no orchestration environment, server dependency, or fork shortcut.
 prompt, fork immediately before
 the active ask call, then return to the unchanged question and selections. This
 works while the parent waits for the answer. `/tools` works in TUI and RPC using
-shared selection/profile policy with native presentation. Pilish's multiline
+shared selection policy with native presentation. Pilish's multiline
 editor dialogs use separate buffers, never the parent prompt draft.
 
 - `/panels`: list registered shell panels, workers, and interactive forks.
@@ -206,7 +199,8 @@ editor dialogs use separate buffers, never the parent prompt draft.
 
 The shared `worker-frame.ts` owns one current request/result schema. The parent
 writes `request.json`; `/worker-run` reads it and applies model/tool policy. The
-child saves `result.md`, runs a no-tools retrospective, saves `retrospective.md`,
+child saves `result.md`, runs a retrospective (its prompt forbids tool calls; the
+tool set is unchanged, so no transcript system message is added), saves `retrospective.md`,
 and atomically publishes a matching `result.json`. Only that matching final
 artifact means completion—not an input acknowledgement, idle screen, spinner,
 or process exit. Failure resolution waits for Pi's `agent_settled`, including
@@ -215,8 +209,9 @@ human supervision. A failed retrospective returns the successful main result
 with an unavailable-retrospective note.
 
 Ordinary submitted human input takes supervision before it is queued. Merely
-editing a draft does not. Pilish uses RPC `prompt` with `streamingBehavior`, not
-the input-hook-bypassing `steer`/`follow_up` RPC commands. Backend queue snapshots,
+editing a draft does not. Pilish submits ordinary input through RPC `prompt` with
+`streamingBehavior`; every RPC submission runs extension `input` handlers, so
+supervision is taken however the human sends it. Backend queue snapshots,
 `clear_queue`, and `agent_settled` replace local follow-up queues/timers. Rejected
 ordinary prompts, including compaction rejection, keep the input draft.
 
@@ -233,10 +228,9 @@ extension-registered model without them.
 
 The parent polls structured status and bounded native output through the same
 `onUpdate` contract on every host. The complete transcript remains in the child
-pane/buffer and session file. Cancellation stops owned work, including persistent
-workers, instead of abandoning the wait. Session files and diagnostics remain
-available for recovery. Workers receive available parent tools plus `do`;
-the `bobs` profile supplies its delegated Research set. First-action re-delegation
+pane/buffer and session file. Every worker closes itself after writing its
+final result. Cancellation stops owned work instead of abandoning the wait. Session files and diagnostics remain
+available for recovery. Workers receive available parent tools plus `do`. First-action re-delegation
 gets a one-time warning. Above 90% parent context (using Pi's reported model
 limit), the first `do` on a branch is not started and suggests `delegate`;
 explicitly retrying `do` proceeds. `delegate` and `fresh_look` never warn.
@@ -270,7 +264,7 @@ PI_FORK_SMOKE=1 node scripts/test.mjs orchestration/hosts/fork-smoke.test.ts
 
 The last two use the installed real Pi with its in-process faux provider and
 owned tmux/Herdr/Emacs targets. They exercise result/retrospective separation,
-persistent model/tool changes, draft protection, supervision/recovery, retry and
+self-closing workers, per-request model/tool selection, draft protection, supervision/recovery, retry and
 overflow compaction settlement, and public idle/prompted forks. Unit tests cover
 claims, cancellation cleanup, mismatched results, context preparation, sibling
 startup ordering, and TUI/RPC ask selection preservation. No paid provider calls

@@ -60,7 +60,7 @@ function createHarness(): WorkerFrameHarness {
 
   const pi = {
     getActiveTools: () => [...harness.activeTools],
-    getAllTools: () => ["read", "bash", "do", "delegate", "fresh_look", "coding-agent", "fresh-history"].map((name) => ({ name })),
+    getAllTools: () => ["read", "bash", "do", "delegate", "fresh_look"].map((name) => ({ name })),
     on: (name: string, handler: EventHandler) => {
       handlers.set(name, [...(handlers.get(name) ?? []), handler]);
     },
@@ -165,7 +165,7 @@ function assistantAbortEvent(): unknown {
   };
 }
 
-for (const toolName of ["do", "delegate", "fresh_look", "coding-agent", "fresh-history"]) {
+for (const toolName of ["do", "delegate", "fresh_look"]) {
   test(`${toolName}: worker tools follow the request and only the first immediate subworker call is warned`, async () => {
     const harness = createHarness();
     const paths = createWorkerArtifacts();
@@ -176,7 +176,6 @@ for (const toolName of ["do", "delegate", "fresh_look", "coding-agent", "fresh-h
         tools: ["read", toolName, "unavailable-tool"],
         resultPath: paths.resultPath,
         statusPath: paths.statusPath,
-        closeWhenDone: false,
       });
 
       await runCommand(harness, "worker-run", paths.requestPath);
@@ -206,7 +205,6 @@ test("human input supervises result and retrospective capture until explicit sub
       tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
-      closeWhenDone: true,
     });
 
     await runCommand(harness, "worker-run", paths.requestPath);
@@ -232,7 +230,7 @@ test("human input supervises result and retrospective capture until explicit sub
     await runCommand(harness, "worker-submit");
     assert.equal(fs.readFileSync(paths.resultMarkdownPath, "utf8"), "Discussion reply");
     assert.equal(readWorkerStatus(paths.statusPath)?.state, "retrospective");
-    assert.deepEqual(harness.activeTools, []);
+    assert.deepEqual(harness.activeTools, ["read", "bash"]);
     assert.equal(harness.sentMessages.length, 2);
 
     await emit(harness, "input", { source: "interactive", text: "One more question" });
@@ -268,7 +266,6 @@ test("worker-continue gives guidance and restores automatic result capture", asy
       tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
-      closeWhenDone: true,
     });
 
     await runCommand(harness, "worker-run", paths.requestPath);
@@ -317,7 +314,6 @@ test("worker-continue preserves the main result while resuming an automatic retr
       tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
-      closeWhenDone: true,
     });
 
     await runCommand(harness, "worker-run", paths.requestPath);
@@ -329,7 +325,7 @@ test("worker-continue preserves the main result while resuming an automatic retr
 
     await runCommand(harness, "worker-continue", "Include only the important observation");
     assert.equal(readWorkerStatus(paths.statusPath)?.state, "retrospective");
-    assert.deepEqual(harness.activeTools, []);
+    assert.deepEqual(harness.activeTools, ["read", "bash"]);
     assert.equal(harness.sentMessages.at(-1), "Include only the important observation");
     assert.equal(harness.sentDeliveryModes.at(-1), "steer");
     await emit(harness, "message_start", userMessageStart("Include only the important observation"));
@@ -358,7 +354,6 @@ test("worker-continue clears supervised failure state before retrying automatica
       tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
-      closeWhenDone: true,
     });
 
     await runCommand(harness, "worker-run", paths.requestPath);
@@ -401,7 +396,6 @@ test("worker-continue does not race a pending worker submission", async () => {
       tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
-      closeWhenDone: false,
     });
     await runCommand(harness, "worker-run", paths.requestPath);
     harness.waitForIdle = () => new Promise<void>((resolve) => {
@@ -436,7 +430,6 @@ test("worker-continue requires an active request and guidance prompt", async () 
       tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
-      closeWhenDone: false,
     });
     await runCommand(harness, "worker-run", paths.requestPath);
     await runCommand(harness, "worker-continue", "   ");
@@ -458,7 +451,6 @@ test("extension messages preserve automatic result capture", async () => {
       tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
-      closeWhenDone: false,
     });
 
     await runCommand(harness, "worker-run", paths.requestPath);
@@ -472,7 +464,7 @@ test("extension messages preserve automatic result capture", async () => {
     const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "automatic-worker");
     assert.equal(result.result, "Automatic result");
     assert.equal(result.retrospective, "everything was ok");
-    assert.equal(harness.shutdowns, 0);
+    assert.equal(harness.shutdowns, 1);
   } finally {
     fs.rmSync(paths.artifactDir, { recursive: true, force: true });
   }
@@ -488,7 +480,6 @@ test("retryable result failure enters supervision only after retries settle", as
       tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
-      closeWhenDone: true,
     });
 
     await runCommand(harness, "worker-run", paths.requestPath);
@@ -537,7 +528,6 @@ test("retryable retrospective failure preserves the main result after retries se
       tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
-      closeWhenDone: true,
     });
 
     await runCommand(harness, "worker-run", paths.requestPath);
@@ -570,7 +560,6 @@ test("cancelled result enters supervision after the worker run settles", async (
       tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
-      closeWhenDone: true,
     });
 
     await runCommand(harness, "worker-run", paths.requestPath);
@@ -597,7 +586,6 @@ test("cancelled retrospective preserves the main result", async () => {
       tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
-      closeWhenDone: true,
     });
 
     await runCommand(harness, "worker-run", paths.requestPath);
@@ -631,7 +619,6 @@ test("non-retryable result failure completes after automatic recovery settles", 
       tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
-      closeWhenDone: true,
     });
 
     await runCommand(harness, "worker-run", paths.requestPath);
@@ -658,7 +645,6 @@ test("context overflow remains pending while Pi runs automatic compaction recove
       tools: ["read", "bash"],
       resultPath: paths.resultPath,
       statusPath: paths.statusPath,
-      closeWhenDone: true,
     });
 
     await runCommand(harness, "worker-run", paths.requestPath);
@@ -682,7 +668,7 @@ test("RPC busy prompts supervise immediately, before an assistant reply can comp
   const harness = createHarness();
   const paths = createWorkerArtifacts();
   try {
-    writeWorkerRequest(paths, { id: "rpc-supervision", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath, closeWhenDone: false });
+    writeWorkerRequest(paths, { id: "rpc-supervision", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
     await runCommand(harness, "worker-run", paths.requestPath);
     await emit(harness, "input", { source: "rpc", text: "Discuss first", streamingBehavior: "followUp" });
     await emit(harness, "agent_end", assistantEvent("Reply before follow-up"));
@@ -696,7 +682,7 @@ test("finish-worker-now cannot replace the immutable main result during retrospe
   const harness = createHarness();
   const paths = createWorkerArtifacts();
   try {
-    writeWorkerRequest(paths, { id: "finish-retrospective", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath, closeWhenDone: false });
+    writeWorkerRequest(paths, { id: "finish-retrospective", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
     await runCommand(harness, "worker-run", paths.requestPath);
     await emit(harness, "agent_end", assistantEvent("Immutable result"));
     await runCommand(harness, "finish-worker-now", "Manual retrospective");
@@ -709,37 +695,12 @@ test("finish-worker-now cannot replace the immutable main result during retrospe
   } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
 });
 
-test("a persistent frame accepts a new request and reapplies tools and model after completion", async () => {
-  const harness = createHarness();
-  const first = createWorkerArtifacts();
-  const second = createWorkerArtifacts();
-  try {
-    writeWorkerRequest(first, { id: "first", task: "First", tools: ["read"], resultPath: first.resultPath, statusPath: first.statusPath, closeWhenDone: false });
-    await runCommand(harness, "worker-run", first.requestPath);
-    await emit(harness, "agent_end", assistantEvent("First result"));
-    await emit(harness, "agent_end", assistantEvent("everything was ok"));
-    writeProtocolRequest(second, { id: "second", task: "Second", tools: ["bash"], model: { provider: "other", id: "next" }, thinkingLevel: "low", resultPath: second.resultPath, statusPath: second.statusPath, closeWhenDone: false });
-    await runCommand(harness, "worker-run", second.requestPath);
-    assert.deepEqual(harness.activeTools, ["bash"]);
-    assert.deepEqual(harness.selectedModel, { provider: "other", id: "next" });
-    assert.equal(harness.thinkingLevel, "low");
-    await emit(harness, "agent_end", assistantEvent("Second result"));
-    await emit(harness, "agent_end", assistantEvent("Second retrospective"));
-    assert.equal(parseWorkerResult(fs.readFileSync(first.resultPath, "utf8"), first.resultPath, "first").result, "First result");
-    assert.equal(parseWorkerResult(fs.readFileSync(second.resultPath, "utf8"), second.resultPath, "second").result, "Second result");
-    assert.equal(harness.shutdowns, 0);
-  } finally {
-    fs.rmSync(first.artifactDir, { recursive: true, force: true });
-    fs.rmSync(second.artifactDir, { recursive: true, force: true });
-  }
-});
-
 test("finish-worker-now holds completion while abort and settlement events drain", async () => {
   const harness = createHarness();
   const paths = createWorkerArtifacts();
   const context = harness.context as { isIdle(): boolean; abort(): Promise<void> };
   try {
-    writeWorkerRequest(paths, { id: "busy-finish", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath, closeWhenDone: true });
+    writeWorkerRequest(paths, { id: "busy-finish", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
     await runCommand(harness, "worker-run", paths.requestPath);
     await emit(harness, "agent_end", assistantEvent("Saved main result"));
     context.isIdle = () => false;
@@ -763,7 +724,7 @@ for (const [label, event] of [
     const harness = createHarness();
     const paths = createWorkerArtifacts();
     try {
-      writeWorkerRequest(paths, { id: "unfinished", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath, closeWhenDone: false });
+      writeWorkerRequest(paths, { id: "unfinished", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
       await runCommand(harness, "worker-run", paths.requestPath);
       await emit(harness, "agent_end", event);
       assert.equal(readWorkerStatus(paths.statusPath)?.state, "running");
@@ -782,12 +743,12 @@ test("model setup errors produce a matching failure instead of stranding the par
   const paths = createWorkerArtifacts();
   try {
     harness.modelFailure = new Error("Model initialization failed");
-    writeWorkerRequest(paths, { id: "model-error", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath, closeWhenDone: false });
+    writeWorkerRequest(paths, { id: "model-error", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
     await runCommand(harness, "worker-run", paths.requestPath);
     const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "model-error");
     assert.equal(result.isError, true);
     assert.match(result.result, /Model initialization failed/);
-    assert.equal(readWorkerStatus(paths.statusPath)?.state, "idle");
+    assert.equal(readWorkerStatus(paths.statusPath)?.state, "closed");
     assert.deepEqual(harness.sentMessages, []);
   } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
 });
@@ -798,7 +759,7 @@ test("finishing during asynchronous model selection cannot restart a completed r
   let releaseModel!: () => void;
   harness.modelReady = new Promise<void>((resolve) => { releaseModel = resolve; });
   try {
-    writeWorkerRequest(paths, { id: "model-pending", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath, closeWhenDone: false });
+    writeWorkerRequest(paths, { id: "model-pending", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
     const startup = runCommand(harness, "worker-run", paths.requestPath);
     await Promise.resolve();
     await runCommand(harness, "finish-worker-now", "Recovered during startup");
@@ -807,7 +768,7 @@ test("finishing during asynchronous model selection cannot restart a completed r
     const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "model-pending");
     assert.equal(result.result, "Recovered during startup");
     assert.deepEqual(harness.sentMessages, []);
-    assert.equal(readWorkerStatus(paths.statusPath)?.state, "idle");
+    assert.equal(readWorkerStatus(paths.statusPath)?.state, "closed");
   } finally { releaseModel(); fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
 });
 
@@ -815,7 +776,7 @@ test("an unfinished retrospective preserves the result when the run settles", as
   const harness = createHarness();
   const paths = createWorkerArtifacts();
   try {
-    writeWorkerRequest(paths, { id: "empty-retrospective", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath, closeWhenDone: true });
+    writeWorkerRequest(paths, { id: "empty-retrospective", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
     await runCommand(harness, "worker-run", paths.requestPath);
     await emit(harness, "agent_end", assistantEvent("Saved main result"));
     await emit(harness, "agent_end", { messages: [] });
@@ -833,7 +794,7 @@ test("exhausted overflow recovery fails only at settlement", async () => {
   const harness = createHarness();
   const paths = createWorkerArtifacts();
   try {
-    writeWorkerRequest(paths, { id: "overflow-exhausted", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath, closeWhenDone: false });
+    writeWorkerRequest(paths, { id: "overflow-exhausted", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
     await runCommand(harness, "worker-run", paths.requestPath);
     await emit(harness, "agent_end", assistantErrorEvent("input exceeds the context window"));
     assert.equal(fs.existsSync(paths.resultPath), false);
