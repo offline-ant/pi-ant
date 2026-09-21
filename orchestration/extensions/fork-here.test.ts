@@ -3,10 +3,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { TOOL_CONTROL_STATE_TYPE } from "../../extensions/tool-control-state.ts";
+import { TOOL_SELECTION_ENTRY } from "../../extensions/tool-selection.ts";
 import { flushSessionFile } from "../context.ts";
 import { forkFixture } from "../test/fork-fixture.ts";
-import { claimName, readPersistentWorker, readTarget, savePersistentWorker, saveTarget, tryClaimName } from "../workers.ts";
+import { claimName, readTarget, saveTarget, tryClaimName } from "../workers.ts";
 import type { HostTarget } from "../host-types.ts";
 import forkHereExtension, { forkHere, parseForkArgs } from "./fork-here.ts";
 
@@ -39,7 +39,7 @@ test("idle and prompted forks use explicit parent, actual branch and exact tools
     assert.equal(fs.readFileSync(fixture.sessionFile, "utf8"), bytes);
     const child = SessionManager.open(result.sessionFile);
     assert.equal(child.getBranch().some((entry) => entry.type === "message" && entry.message.role === "user" && entry.message.content === "Excluded branch"), false);
-    const tools = child.getBranch().findLast((entry) => entry.type === "custom" && entry.customType === TOOL_CONTROL_STATE_TYPE);
+    const tools = child.getBranch().findLast((entry) => entry.type === "custom" && entry.customType === TOOL_SELECTION_ENTRY);
     assert.ok(tools?.type === "custom");
     assert.deepEqual((tools.data as { enabledTools: string[] }).enabledTools, fixture.pi.getActiveTools());
     const startup = fixture.commands.find((command) => command.includes("split-window"))!;
@@ -87,7 +87,7 @@ test("concurrent unnamed forks reserve different names without changing the pare
   } finally { await fixture.cleanup(); }
 });
 
-test("exited panels, persistent workers and forks retain their registered names", async () => {
+test("exited panels, workers and forks retain their registered names", async () => {
   const fixture = forkFixture();
   try {
     for (const [index, kind] of ["shell", "worker", "fork"].entries()) {
@@ -107,19 +107,15 @@ test("exited panels, persistent workers and forks retain their registered names"
           };
           fixture.exitedPanes.add(target.id);
           fixture.targets.push(name);
-          if (kind === "worker") {
-            savePersistentWorker({ target, cwd: fixture.directory, sessionFile: fixture.sessionFile, statusPath: path.join(fixture.directory, "status.json") });
-          } else saveTarget(target);
+          saveTarget(target);
           break;
         } finally { release(); }
       }
       const registered = readTarget(name);
-      const worker = kind === "worker" ? readPersistentWorker(name) : undefined;
       const before = fixture.commands.length;
       await assert.rejects(forkHere(fixture.pi, { name }, fixture.directory, fixture.session, args), /already exists/);
       assert.equal(fixture.commands.length, before, "reserved names must not inspect or close native targets");
       assert.deepEqual(readTarget(name), registered);
-      if (kind === "worker") assert.deepEqual(readPersistentWorker(name), worker);
       const automatic = await forkHere(fixture.pi, {}, fixture.directory, fixture.session, args);
       fixture.targets.push(automatic.name);
       assert.notEqual(automatic.name, name);

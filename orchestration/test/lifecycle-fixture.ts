@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { fauxAssistantMessage, fauxProvider, type Context } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Deterministic native-host fixture: every model call stays inside Pi's faux provider. */
@@ -19,7 +19,7 @@ export default function lifecycleFixture(pi: ExtensionAPI): void {
   });
   const retryPrompts = new Set<string>();
   const overflowPrompts = new Set<string>();
-  const text = (context: Context): string => {
+  const text = (context: TranscriptContext): string => {
     const messages = context.messages.flatMap((message) => message.role !== "user" ? [] : [
       typeof message.content === "string" ? message.content
         : message.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n"),
@@ -31,7 +31,7 @@ export default function lifecycleFixture(pi: ExtensionAPI): void {
     const retrospective = prompt.startsWith("The main result has already been saved");
     const summary = prompt.startsWith("<conversation>\n");
     trace({ event: "request", prompt, retrospective, summary, model: model.id, reasoning: options?.reasoning,
-      tools: context.tools?.map((tool) => tool.name) ?? [] });
+      tools: getCurrentTools(context.messages).map((tool) => tool.name) });
     if (summary) {
       while (!fs.existsSync(path.join(directory, "release-compaction"))) await delay(25, undefined, { signal: options?.signal });
       return fauxAssistantMessage("## Goal\nContinue the active fixture task after overflow recovery.");

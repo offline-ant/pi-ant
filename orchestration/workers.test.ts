@@ -1,12 +1,9 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as net from "node:net";
-import * as os from "node:os";
 import * as path from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import codingAgentExtension from "./extensions/coding-agent.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { HostTarget } from "./host-types.ts";
 import { createWorkerArtifacts, writeWorkerRequest, type WorkerRequestFile } from "./worker-frame.ts";
 import { claimName, listTargets, readTarget, removeTarget, runEphemeralWorker, saveTarget, validateName, waitForWorkerResult } from "./workers.ts";
@@ -133,7 +130,7 @@ test("ephemeral siblings overlap their task lifetimes, inherit launch arguments,
   try {
     const run = (paths: typeof first, index: number) => {
       const id = `parallel-${process.pid}-${index}`;
-      writeWorkerRequest(paths, { id, task: id, tools: ["read", "delegate"], model: { provider: "fake", id: "fake" }, thinkingLevel: "high", resultPath: paths.resultPath, statusPath: paths.statusPath, closeWhenDone: true });
+      writeWorkerRequest(paths, { id, task: id, tools: ["read", "delegate"], model: { provider: "fake", id: "fake" }, thinkingLevel: "high", resultPath: paths.resultPath, statusPath: paths.statusPath });
       return runEphemeralWorker(fake.pi, { id, name: id, cwd: "/tmp", sessionFile: path.join(paths.artifactDir, "session.jsonl"), args: ["--provider", "fake", "--model", "fake", "--thinking", "high"], paths, task: id, onUpdate: (update) => updates.push(update) });
     };
     const results = await Promise.all([run(first, 1), run(second, 2)]);
@@ -158,7 +155,7 @@ test("cancellation closes ephemeral work instead of abandoning its wait", async 
   const paths = createWorkerArtifacts();
   const name = `cancel-${process.pid}`;
   try {
-    writeWorkerRequest(paths, { id: name, task: "wait", tools: ["read"], model: { provider: "fake", id: "fake" }, thinkingLevel: "high", resultPath: paths.resultPath, closeWhenDone: true });
+    writeWorkerRequest(paths, { id: name, task: "wait", tools: ["read"], model: { provider: "fake", id: "fake" }, thinkingLevel: "high", resultPath: paths.resultPath });
     await assert.rejects(runEphemeralWorker(fake.pi, { id: name, name, cwd: "/tmp", sessionFile: "/tmp/fake-session.jsonl", args: [], paths, task: "wait", signal: abort.signal }), /abort/i);
     assert.equal(fake.closes.length, 1);
     assert.equal(readTarget(name), undefined);
@@ -176,7 +173,7 @@ test("cleanup failure retains the original protocol error, target, and recovery 
   const paths = createWorkerArtifacts();
   const name = `close-error-${process.pid}`;
   try {
-    writeWorkerRequest(paths, { id: name, task: "wait", tools: ["read"], model: { provider: "fake", id: "fake" }, thinkingLevel: "high", resultPath: paths.resultPath, closeWhenDone: true });
+    writeWorkerRequest(paths, { id: name, task: "wait", tools: ["read"], model: { provider: "fake", id: "fake" }, thinkingLevel: "high", resultPath: paths.resultPath });
     await assert.rejects(runEphemeralWorker(fake.pi, { id: name, name, cwd: "/tmp", sessionFile: "/tmp/fake-session.jsonl", args: [], paths, task: "wait" }), (error: unknown) => {
       assert.ok(error instanceof Error);
       assert.match(error.message, /id mismatch/);
@@ -191,43 +188,5 @@ test("cleanup failure retains the original protocol error, target, and recovery 
     await fake.cleanup();
     if (owned?.controlPath) fs.rmSync(path.dirname(owned.controlPath), { recursive: true, force: true });
     removeTarget(name); restore(); fs.rmSync(paths.artifactDir, { recursive: true, force: true });
-  }
-});
-
-test("persistent calls reuse one target, reject simultaneous same-name use, and cancel owned work", async () => {
-  const restore = selectFakeTmux();
-  let hold = false;
-  const fake = fakeTmux((request) => { if (!hold) complete(request); });
-  type Execute = (id: string, params: { name: string; task: string }, signal: AbortSignal | undefined, update: undefined, ctx: ExtensionContext) => Promise<unknown>;
-  let execute: Execute | undefined;
-  fake.pi.registerTool = ((tool: { execute: Execute }) => { execute = tool.execute; }) as ExtensionAPI["registerTool"];
-  codingAgentExtension(fake.pi);
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "persistent-test-"));
-  const ctx = { cwd: root, model: { provider: "fake", id: "fake" }, thinkingLevel: "high" } as unknown as ExtensionContext;
-  const name = `persistent-${process.pid}`;
-  let sessionFile: string | undefined;
-  try {
-    assert.ok(execute);
-    await execute("one", { name, task: "First" }, undefined, undefined, ctx);
-    sessionFile = readTarget(name)?.sessionFile;
-    await execute("two", { name, task: "Second" }, undefined, undefined, ctx);
-    assert.equal(fake.startupArgs.length, 1);
-    assert.equal(fake.requests.length, 2);
-    assert.equal(fake.closes.length, 0);
-    hold = true;
-    const abort = new AbortController();
-    const pending = execute("three", { name, task: "Held" }, abort.signal, undefined, ctx);
-    await delay(20);
-    await assert.rejects(execute("four", { name, task: "Collision" }, undefined, undefined, ctx), /already being used/);
-    abort.abort();
-    await assert.rejects(pending, /abort/i);
-    assert.equal(fake.closes.length, 1);
-    assert.equal(readTarget(name), undefined);
-    claimName(name)();
-  } finally {
-    await fake.cleanup(); restore(); removeTarget(name);
-    for (const request of fake.requests) fs.rmSync(path.dirname(request.resultPath), { recursive: true, force: true });
-    if (sessionFile) fs.rmSync(sessionFile, { force: true });
-    fs.rmSync(root, { recursive: true, force: true });
   }
 });

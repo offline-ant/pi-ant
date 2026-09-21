@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as http from "node:http";
 import test, { type TestContext } from "node:test";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, InMemoryCredentialStore, type Tool } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools, InMemoryCredentialStore, type JsonObject, type Tool } from "@earendil-works/pi-ai";
 import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
 import type { EphemeralWorkerTool } from "../delegate-policy.ts";
 import type { WorkerRequestFile } from "../worker-frame.ts";
@@ -135,7 +135,7 @@ async function fixture(t: TestContext) {
     return tool;
   };
   const enable = () => current.prompt("/delegate-alt delegate-first/same-id delegate-second/same-id");
-  async function call(name: EphemeralWorkerTool, params: Record<string, unknown>) {
+  async function call(name: EphemeralWorkerTool, params: JsonObject) {
     const provider = current.model?.provider === "delegate-first" ? first : second;
     provider.setResponses([
       fauxAssistantMessage(fauxToolCall(name, params), { stopReason: "toolUse" }),
@@ -226,14 +226,14 @@ test("split schemas have no context flag, fresh_look is opt-in, and alternate re
   await pending;
   fs.writeFileSync(f.config, JSON.stringify({ models: ["delegate-first/same-id", "delegate-second/same-id"] }));
   f.second.setResponses([(context) => {
-    for (const name of toolNames) assert.ok(hasAlt(context.tools!.find((tool) => tool.name === name)!));
+    for (const name of toolNames) assert.ok(hasAlt(getCurrentTools(context.messages).find((tool) => tool.name === name)!));
     return fauxAssistantMessage("schema enabled before request");
   }]);
   await f.current.prompt("Check changed global selection.");
   assertSchemas(true);
   fs.rmSync(f.config);
   f.second.setResponses([(context) => {
-    for (const name of toolNames) assert.ok(!hasAlt(context.tools!.find((tool) => tool.name === name)!));
+    for (const name of toolNames) assert.ok(!hasAlt(getCurrentTools(context.messages).find((tool) => tool.name === name)!));
     return fauxAssistantMessage("schema disabled before request");
   }]);
   await f.current.prompt("Check disabled global selection.");
@@ -245,9 +245,8 @@ test("do inherits the pre-call conversation, delegate and fresh_look start blank
   f.current.setActiveToolsByName(["read", ...toolNames]);
   await f.run("do", { task: "Inherited investigation" });
   const inherited = SessionManager.open(f.launches.at(-1)!.sessionFile);
-  const history = inherited.getBranch().filter((entry) => entry.type === "message");
-  assert.equal(history.length, 1);
-  assert.equal(history[0].message.role, "user");
+  const inheritedRoles = () => inherited.getBranch().flatMap((entry) => entry.type === "message" ? [entry.message.role] : []);
+  assert.deepEqual(inheritedRoles(), ["system", "user"]);
   assert.equal(inherited.getCwd(), f.directory);
   const other = path.join(f.directory, "other-project");
   fs.mkdirSync(other);
@@ -256,7 +255,7 @@ test("do inherits the pre-call conversation, delegate and fresh_look start blank
     const launch = f.launches.at(-1)!;
     const child = SessionManager.open(launch.sessionFile);
     assert.equal(child.getCwd(), other);
-    assert.equal(child.getBranch().filter((entry) => entry.type === "message").length, 0);
+    assert.ok(child.getBranch().every((entry) => entry.type !== "message"));
     assert.equal(launch.args.includes("--no-context-files"), name === "fresh_look");
     assert.equal(launch.args.includes("--no-skills"), name === "fresh_look");
     assert.equal(launch.args.includes("--no-prompt-templates"), name === "fresh_look");
@@ -268,8 +267,9 @@ test("do inherits the pre-call conversation, delegate and fresh_look start blank
 test("stale context arguments, do folder, and disabled alternate flags fail without starting workers", { timeout: 30_000 }, async (t) => {
   const f = await fixture(t);
   f.current.setActiveToolsByName(["read", ...toolNames]);
+  const staleArguments: JsonObject[] = [{ context: "inherit" }, { context: "project" }, { context: "clean" }, { alt: true }, { alt: false }];
   for (const name of toolNames) {
-    for (const extra of [{ context: "inherit" }, { context: "project" }, { context: "clean" }, { alt: true }, { alt: false }]) {
+    for (const extra of staleArguments) {
       const result = await f.call(name, { task: "Invalid old input", ...extra });
       assert.equal(result.isError, true, JSON.stringify(result));
       assert.equal(f.launches.length, 0);

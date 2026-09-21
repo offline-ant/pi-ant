@@ -50,6 +50,6 @@ export async function ensureAndReadWorkflowFile(cwd: string): Promise<{
   return { content: await readWorkflowFile(cwd), created };
 }
 
-export function formatGuidanceSystemPrompt(workflow: string): string {
+export function formatGuidancePromptSection(workflow: string): string {
   return `${GUIDANCE_PROTOCOL_PROMPT}\n\nEditable workflow policy loaded from workflow.md:\n\n<workflow.md>\n${workflow}\n</workflow.md>`;
 }

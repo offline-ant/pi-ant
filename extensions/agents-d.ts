@@ -2,12 +2,10 @@
  * agents-d — auto-load AGENTS.d/ context files into model prompt.
  *
  * On every agent start, checks for ./AGENTS.d/ in ctx.cwd. If present:
- *   1. Injects top-level file contents and the full tree structure into the
- *      system prompt for that agent run.
+ *   1. Sets the `agents_d` system prompt section to the top-level file
+ *      contents and the full tree structure. Pi persists the section only
+ *      when it changes.
  *   2. Prints a notification saying the context was injected.
- *
- * If the current system prompt already contains this extension's AGENTS.d
- * marker, injection is skipped to prevent duplicate large file content.
  *
  * File loading rules (following the lace context-files.ts pattern):
  *   - Only top-level entries (files and symlinks) in AGENTS.d/ are loaded.
@@ -41,8 +39,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
-const AGENTS_D_CONTEXT_START = "<!-- pi-ant agents-d context start -->";
-const AGENTS_D_CONTEXT_END = "<!-- pi-ant agents-d context end -->";
+const AGENTS_D_SECTION = "agents_d";
 
 interface FsEntry {
   name: string;
@@ -204,7 +201,7 @@ function loadTopLevelContents(agentsDir: string, relBase: string): string {
  * Result from buildAgentsDContext.
  */
 interface AgentsDContext {
-  systemPromptBlock: string;
+  promptSection: string;
   loadedFiles: string[];
   visibleDirs: string[];
   treeBlock: string;
@@ -244,8 +241,7 @@ function buildAgentsDContext(cwd: string): AgentsDContext | null {
     .map((e) => `./${e.name}/`)
     .sort();
 
-  const systemPromptBlock = [
-    AGENTS_D_CONTEXT_START,
+  const promptSection = [
     "# AGENTS.d context",
     "Top-level files are loaded below; directories appear only in the tree. Symlink targets show their real paths.",
     "",
@@ -254,10 +250,9 @@ function buildAgentsDContext(cwd: string): AgentsDContext | null {
     "```",
     treeBlock,
     "```",
-    AGENTS_D_CONTEXT_END,
   ].join("\n");
 
-  return { systemPromptBlock, loadedFiles, visibleDirs, treeBlock };
+  return { promptSection, loadedFiles, visibleDirs, treeBlock };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -267,7 +262,7 @@ export default function (pi: ExtensionAPI) {
       return; // no AGENTS.d/ directory
     }
 
-    const { systemPromptBlock, loadedFiles, visibleDirs } = result;
+    const { promptSection, loadedFiles, visibleDirs } = result;
 
     const loadedList =
       loadedFiles.length > 0
@@ -281,21 +276,10 @@ export default function (pi: ExtensionAPI) {
     const parts: string[] = [`loaded: ${loadedList}`];
     if (dirsList) parts.push(`dirs: ${dirsList}`);
 
-    if (event.systemPrompt.includes(AGENTS_D_CONTEXT_START)) {
-      ctx.ui.notify(
-        `AGENTS.d/ already injected; skipped duplicate: ${parts.join("; ")}`,
-        "warning",
-      );
-      return;
-    }
-
+    event.systemPromptOptions.sections[AGENTS_D_SECTION] = promptSection;
     ctx.ui.notify(
       `AGENTS.d/ injected into system prompt: ${parts.join("; ")}`,
       "info",
     );
-
-    return {
-      systemPrompt: event.systemPrompt + "\n\n" + systemPromptBlock,
-    };
   });
 }

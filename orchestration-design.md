@@ -16,7 +16,7 @@ no reason to build a separate Emacs-owned worker scheduler.
 ## Implementation boundary
 
 `orchestration/workers.ts` owns the common registry, exclusive name claims,
-waiting, cancellation, and progress. `context.ts` prepares sessions and history;
+waiting, cancellation, and progress. `context.ts` prepares worker sessions;
 `worker-frame.ts` owns the child result/retrospective and supervision lifecycle.
 The former Herdr settled-retry behavior was the extraction baseline. The
 duplicated backend packages have been deleted, not wrapped.
@@ -33,10 +33,10 @@ The host-specific work is:
 
 ```text
 orchestration/
-  extensions/              # do/delegate/fresh_look, coding-agent, panel tools, fork command
-  workers.ts               # common execution and persistent worker registry
+  extensions/              # do/delegate/fresh_look, panel tools, fork command
+  workers.ts               # common execution and target registry
   worker-frame.ts          # common child task/supervision/retrospective policy
-  context.ts               # conversation/project/instruction-free/history session preparation
+  context.ts               # conversation/project/instruction-free session preparation
   host.ts                  # small interface and host selection
   hosts/
     tmux.ts
@@ -51,8 +51,7 @@ it has enough code to justify existing. No backend plugin registry, capability
 negotiation framework, or provider class hierarchy.
 
 Use one set of public tool names on every host: `do`, `delegate`, `fresh_look`,
-`coding-agent`, `fresh-history`, and neutral `panel-start`, `panel-read`, `panel-send`,
-`panel-close`. Ordinary foreground `bash` stays Pi's built-in tool.
+and neutral `panel-start`, `panel-read`, `panel-send`, `panel-close`. Ordinary foreground `bash` stays Pi's built-in tool.
 Expose interactive forking as `/fork-here`, a user slash command rather than
 another LLM-callable delegation tool. It replaces `/herdr-fork` and the old
 `/tmux-fork` command without keeping backend-specific aliases.
@@ -167,7 +166,7 @@ do / delegate / fresh_look task
        check host liveness
        host.read -> parent tool onUpdate preview
   -> matching result + retrospective
-  -> close ephemeral target / retain persistent target
+  -> worker closes itself; parent removes the target
 ```
 
 The child extension is responsible for task phase and human supervision on
@@ -186,8 +185,7 @@ child conversation remains available in its own pane/buffer and session file.
 No second child-transcript renderer is needed for this initial preview.
 
 Keep result and retrospective separate, with the main result immutable once
-retrospective starts. Human takeover, submit, continue, exclusive persistent
-worker use, sibling parallelism, and tool inheritance must behave identically.
+retrospective starts. Human takeover, submit, continue, sibling parallelism, and tool inheritance must behave identically.
 Cancellation must stop/cancel owned work, not just abandon the parent's wait.
 
 ## Emacs adapter
@@ -260,7 +258,7 @@ with semaphore orchestration, old-format output parsing, prompt detection,
 Claude-specific bridging, and global cleanup side effects.
 
 The approved cutover replaces both backend packages with `orchestration/` and
-updates active settings, root tool-control metadata, lints, fork imports, and
+updates active settings, root tool-selection metadata, lints, fork imports, and
 docs. Legacy tmux semaphore tools/commands, standalone stale cleanup, and the
 Claude-agent bridge were explicitly approved for deletion and are removed.
 There are three native adapters, not three packages or old-name aliases.
@@ -273,7 +271,7 @@ There are three native adapters, not three packages or old-name aliases.
    startup, prompt/draft handling, capture, and process death. Delete obsolete
    protocol parsing rather than bringing it into the common layer.
 3. Implement Emacs/Pilish operations and fix human-input ordering.
-4. Exercise the same ephemeral/persistent-worker lifecycle tests on all hosts:
+4. Exercise the same worker lifecycle tests on all hosts:
    retries, compaction, takeover, retrospective failure, duplicate names,
    cancellation, missing processes, and mismatched/late results. Test
    `/fork-here` both idle and with an initial prompt, unchanged parent drafts,
@@ -297,7 +295,7 @@ smoke test on each host. Do not use paid model calls for retry/failure tests.
   immutable main results, and TUI/RPC ask discussion forks.
 - Real Pi with its in-process faux provider passed worker lifecycle and public
   idle/prompted `/fork-here` tests on tmux, Herdr 0.8.2, and Emacs. These include
-  actual retry and overflow-compaction recovery, persistent model/tool changes,
+  actual retry and overflow-compaction recovery, per-request model/tool changes,
   draft preservation, and explicit native placement. Shell smoke tests exercise
   literal input, control keys, process exit, and output capture.
 - `npm run check` checks all active TypeScript using installed Pi declarations.

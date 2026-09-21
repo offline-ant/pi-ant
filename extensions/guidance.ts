@@ -6,7 +6,7 @@ import {
 } from "./guidance-core.ts";
 import {
   ensureAndReadWorkflowFile,
-  formatGuidanceSystemPrompt,
+  formatGuidancePromptSection,
   WORKFLOW_FILE,
 } from "./workflow-core.ts";
 
@@ -23,9 +23,7 @@ export default function (pi: ExtensionAPI) {
         "info",
       );
     }
-    return {
-      systemPrompt: `${event.systemPrompt}\n\n${formatGuidanceSystemPrompt(workflow.content)}`,
-    };
+    event.systemPromptOptions.sections.guidance = formatGuidancePromptSection(workflow.content);
   });
 
   pi.on("session_start", async () => {

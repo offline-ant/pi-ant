@@ -10,7 +10,7 @@ const WORKER_RUN_COMMAND = "worker-run";
 const CONTINUE_WORKER_COMMAND = "worker-continue";
 const SUBMIT_WORKER_COMMAND = "worker-submit";
 const FINISH_WORKER_NOW_COMMAND = "finish-worker-now";
-const SUBWORKER_TOOLS = new Set(["do", "delegate", "fresh_look", "coding-agent", "fresh-history"]);
+const SUBWORKER_TOOLS = new Set(["do", "delegate", "fresh_look"]);
 const FIRST_ACTION_SUBWORKER_WARNING =
   "This is an automated warning heuristic. You are in a worker frame. Do not simply forward the entire task; investigate it and/or split it into a distinct subtask. Continue working, and retry the worker call if this warning was triggered in error.";
 
@@ -33,7 +33,6 @@ export interface WorkerRequestFile {
   model: { provider: string; id: string };
   thinkingLevel: NonNullable<ExtensionContext["thinkingLevel"]>;
   resultPath: string;
-  closeWhenDone: boolean;
   statusPath?: string;
 }
 
@@ -49,7 +48,7 @@ export interface WorkerResultFile {
 
 export interface WorkerStatusFile {
   id?: string;
-  state: "idle" | "running" | "supervised" | "retrospective" | "error" | "closed";
+  state: "running" | "supervised" | "retrospective" | "error" | "closed";
   resultPath?: string;
   sessionFile?: string;
   contextPercent?: number | null;
@@ -77,7 +76,6 @@ interface PendingWorkerFailure {
 
 interface ActiveWorkerRequest {
   request: WorkerRequestFile;
-  workerTools: string[];
   hasTakenToolAction: boolean;
   phase: WorkerPhase;
   capture: WorkerCapture;
@@ -105,7 +103,6 @@ function isWorkerRequestFile(value: unknown): value is WorkerRequestFile {
     && typeof value.thinkingLevel === "string"
     && ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(value.thinkingLevel)
     && typeof value.resultPath === "string"
-    && typeof value.closeWhenDone === "boolean"
     && (value.statusPath === undefined || typeof value.statusPath === "string");
 }
 
@@ -282,7 +279,7 @@ function writeFinalResult(
   atomicWriteJsonNoOverwrite(active.request.resultPath, payload);
   writeWorkerStatus(active.request.statusPath, {
     id: active.request.id,
-    state: active.request.closeWhenDone ? "closed" : "idle",
+    state: "closed",
     resultPath: active.request.resultPath,
     sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
     contextPercent: contextPercent ?? null,
@@ -342,7 +339,6 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     const wasSupervised = request.capture === "supervised";
     request.capture = "supervised";
     if (reason !== undefined || !wasSupervised) request.supervisionReason = reason;
-    if (request.phase === "retrospective") pi.setActiveTools(request.workerTools);
     writeActiveWorkerStatus(ctx, request);
     refreshWorkerUi(ctx);
     if (!wasSupervised || reason !== undefined) {
@@ -374,7 +370,6 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     request.pendingContinuePrompt = prompt;
     request.pendingFailure = undefined;
     request.supervisionReason = undefined;
-    if (request.phase === "retrospective") pi.setActiveTools([]);
     writeActiveWorkerStatus(ctx, request);
     refreshWorkerUi(ctx);
   }
@@ -385,7 +380,6 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     request.capture = "automatic";
     request.candidate = undefined;
     writeTextArtifact(path.join(path.dirname(request.request.resultPath), "result.md"), result);
-    pi.setActiveTools([]);
     writeActiveWorkerStatus(ctx, request);
     refreshWorkerUi(ctx);
     pi.sendUserMessage(RETROSPECTIVE_PROMPT, { deliverAs: "followUp" });
@@ -399,11 +393,9 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     retrospective?: string,
   ): void {
     writeFinalResult(ctx, request, result, isError, retrospective);
-    const shouldClose = request.request.closeWhenDone;
     activeRequest = undefined;
-    pi.setActiveTools(request.workerTools);
     refreshWorkerUi(ctx);
-    if (shouldClose) ctx.shutdown();
+    ctx.shutdown();
   }
 
   pi.on("session_start", async (_event, ctx) => {
@@ -492,7 +484,6 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
       const workerTools = availableWorkerTools(parsed.tools);
       activeRequest = {
         request: parsed,
-        workerTools,
         hasTakenToolAction: false,
         phase: "result",
         capture: "automatic",

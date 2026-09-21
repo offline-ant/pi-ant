@@ -3,35 +3,27 @@ import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 import delegateExtension from "./extensions/delegate.ts";
-import codingAgentExtension from "./extensions/coding-agent.ts";
-import freshHistoryExtension from "./extensions/fresh-history.ts";
 import { renderWorkerCall } from "./worker-call.ts";
 
 function lines(component: Component, width = 100): string[] {
   return component.render(width).map((line) => line.trimEnd());
 }
 
-for (const [name, extension, field] of [
-  ["do", delegateExtension, "task"],
-  ["delegate", delegateExtension, "task"],
-  ["fresh_look", delegateExtension, "task"],
-  ["coding-agent", codingAgentExtension, "task"],
-  ["fresh-history", freshHistoryExtension, "prompt"],
-] as const) {
+for (const name of ["do", "delegate", "fresh_look"]) {
   test(`${name} preview renders real paragraphs without changing arguments`, () => {
     let registered: { name: string; renderCall(args: Record<string, unknown>): Component } | undefined;
-    extension({
+    delegateExtension({
       on: () => {},
       events: { on: () => () => {} },
       registerTool: (tool: typeof registered) => { if (tool?.name === name) registered = tool; },
       registerCommand: () => {},
     } as unknown as ExtensionAPI);
     assert.equal(registered?.name, name);
-    const args = Object.freeze({ [field]: 'First "paragraph".\n\n  Indented second paragraph.\n' });
+    const args = Object.freeze({ task: 'First "paragraph".\n\n  Indented second paragraph.\n' });
     const before = JSON.stringify(args);
     assert.deepEqual(lines(registered!.renderCall(args)), [
       `${name}(`,
-      `  ${field}:`,
+      "  task:",
       '    First "paragraph".',
       "",
       "      Indented second paragraph.",
