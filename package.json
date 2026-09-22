@@ -36,10 +36,10 @@
       "./extensions/git-commit.ts",
       "./extensions/workboard.ts",
       "./extensions/worktree.ts",
-      "./extensions/mail.ts",
       "./extensions/document-flow-review.ts",
       "./extensions/vim.ts",
       "./extensions/agents-d.ts",
+      "./extensions/self-compact.ts",
       "./extensions/tools.ts"
     ]
   }
