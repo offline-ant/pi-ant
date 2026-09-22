@@ -17,8 +17,8 @@ These are the pi tools registered by this package:
 
 - `ask` — ask the user interactive multiple-choice or free-form questions. In TUI and RPC sessions, each question also offers `Fork (discuss separately)`: edit a discussion prompt, launch an inherited session on the selected host, then return to the unchanged question and answer it.
 - `document_flow_review` — read one document strictly in sequence without lookahead and assess its internal coherence, including logical flow, definitions, transitions, expectations, internal contradictions, and misplaced or late information. It does not verify factual truth or external validity. The tool is inactive by default and can be exposed through `/tools`.
-- `mail_user` — review, confirm, and send plain-text mail to the user through an externally configured implicit-TLS SMTP account. Sender and recipients cannot be selected by the model.
 - Core `edit` and `write` are wrapped by `lints` to display post-write safety warnings.
+- `self_compact` — the agent calls `self_compact({note})` alone in its tool batch at a clean checkpoint. The run ends, Pi's native compaction runs (normal summary prompt, model, and `keepRecentTokens` retention), and the note is then delivered verbatim as the next message, which continues the work without a human prompt. It does not retry: failure, cancellation, or "nothing to compact" is reported as a message and work stops. From 50% context usage, a reminder is added to each model request but not saved in the session. Native `/compact` and automatic-compaction settings are unchanged. The tool is off unless enabled through `/tools`. Adapted from [disler/self-compact-pi-agent](https://github.com/disler/self-compact-pi-agent) (MIT). Focused test: `node scripts/test.mjs extensions/self-compact.test.ts`.
 - `present_guidance` — validates structured guidance output for guidance-mode final answers. It is only registered for `PI_GUIDANCE=true` runs or dynamically inside `/ugo` guide-phase sessions.
 
 Browser automation and web retrieval are provided by the separately loaded
@@ -69,48 +69,6 @@ PI_HERDR_FINISH_NATIVE=1 node scripts/test.mjs extensions/herdr-finish-native.te
 The opt-in native test creates only disposable Herdr topology and real Pi TUIs
 with faux inference; it never makes paid model calls or changes existing panes.
 
-## Mail configuration
-
-`mail_user` reads `mail.json` from Pi's global agent directory (normally
-`~/.pi/agent/mail.json`) on each invocation. Set `PI_MAIL_CONFIG` to an absolute
-path to use another file. The file must be owned by the current user and have
-mode `0600` on POSIX systems:
-
-```json
-{
-  "host": "mail.roelof.solar",
-  "port": 465,
-  "username": "pi-sender@roelof.solar",
-  "password": "replace-with-the-dedicated-account-password",
-  "from": "pi-sender@roelof.solar",
-  "to": ["self.pi@roelof.solar"]
-}
-```
-
-The connection always uses implicit TLS with certificate verification and TLS
-1.2 or newer. There is no plaintext or certificate-verification fallback. The
-tool accepts only a subject and plain-text body, shows the complete body in the
-editor, and requires explicit confirmation before connecting. It is unavailable
-in modes without interactive confirmation.
-
-The former `send_mail` name is removed, with no alias. Existing `mail.json`
-configuration is unchanged. After `/reload`, enable `mail_user` in `/tools` if
-needed; saved selections that enabled the old name must select the new one.
-
-For the current Mox deployment, `self.pi@roelof.solar` belongs to the
-`postmaster` account, while `pi-sender@roelof.solar` belongs to a dedicated
-`pi-mail` account. Configure them from the Mox container with:
-
-```sh
-mox config address add self.pi@roelof.solar postmaster
-mox config account add pi-mail pi-sender@roelof.solar
-mox setaccountpassword pi-mail
-```
-
-Do not reuse the postmaster password. The dedicated sender account limits a
-leaked SMTP credential to that automation account rather than the postmaster
-mailbox.
-
 ## Skills
 
 The package exports `skills/`. After `/reload` or in a new session, invoke
@@ -118,7 +76,7 @@ The package exports `skills/`. After `/reload` or in a new session, invoke
 [`skills/himalaya-mail/SKILL.md`](skills/himalaya-mail/SKILL.md) directly.
 
 - `herdr` — local guidance for Herdr 0.9.0 CLI operations, with ownership safeguards and a separate managed Pi orchestration workflow.
-- `himalaya-mail` — send, list, search, read without marking Seen, and reply through the ordinary Himalaya CLI using the separate `llm` mailbox with public From `llm@roelof.solar` and IMAP/SMTP login `llm-inbox@roelof.solar`. Mox's native public-address alias also delivers new incoming mail to postmaster; existing messages and outgoing Sent copies are not replicated. Himalaya 1.1.0 is configured locally with private files under `~/.config/himalaya/`; no credentials are included in this package. This is general correspondence, distinct from the fixed-recipient `mail_user` tool. The skill covers authorization, MML attachment safety, and uncertain-send handling.
+- `himalaya-mail` — send, list, search, read without marking Seen, and reply through the ordinary Himalaya CLI using the separate `llm` mailbox with public From `llm@roelof.solar` and IMAP/SMTP login `llm-inbox@roelof.solar`. Mox's native public-address alias also delivers new incoming mail to postmaster; existing messages and outgoing Sent copies are not replicated. Himalaya 1.1.0 is configured locally with private files under `~/.config/himalaya/`; no credentials are included in this package. The skill covers authorization, MML attachment safety, and uncertain-send handling.
 
 Verify package skill discovery without model calls:
 

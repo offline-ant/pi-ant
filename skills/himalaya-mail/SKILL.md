@@ -1,6 +1,6 @@
 ---
 name: himalaya-mail
-description: Send email from llm@roelof.solar and list, search, read, or reply to its inbox using the Himalaya CLI. Use for general email correspondence, not the separate fixed-recipient mail_user notification tool.
+description: Send email from llm@roelof.solar and list, search, read, or reply to its inbox using the Himalaya CLI. Use for email correspondence.
 compatibility: Himalaya 1.1.0 on PATH with the locally configured llm account; shell access.
 ---
 
@@ -27,10 +27,6 @@ directory. Never display/copy the password, put it in commands or transcripts,
 or commit credentials. Do not run the configuration wizard over this setup.
 IMAP uses `mail.roelof.solar:993`; SMTP uses `mail.roelof.solar:465`, both with
 verified implicit TLS. Do not disable certificate verification.
-
-`mail_user` is separate: a Pi tool for reviewed/confirmed notifications from
-`pi-sender@roelof.solar` to a fixed user address. It cannot select recipients or
-read mail. Use this skill for correspondence from `llm@roelof.solar`.
 
 ## List, search, and read
 
