@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { isContextOverflow, isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { initializeNesting } from "./nesting.ts";
+import { SELF_COMPACT_HANDOFF_EVENT, type SelfCompactHandoff } from "./self-compact-handoff.ts";
 
 const WORKER_ROOT_PREFIX = "pi-orchestration-worker-";
 const WORKER_RUN_COMMAND = "worker-run";
@@ -76,6 +77,8 @@ interface PendingWorkerFailure {
 
 interface ActiveWorkerRequest {
   request: WorkerRequestFile;
+  context: ExtensionContext;
+  pendingCompaction?: string;
   hasTakenToolAction: boolean;
   phase: WorkerPhase;
   capture: WorkerCapture;
@@ -484,6 +487,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
       const workerTools = availableWorkerTools(parsed.tools);
       activeRequest = {
         request: parsed,
+        context: ctx,
         hasTakenToolAction: false,
         phase: "result",
         capture: "automatic",
@@ -613,6 +617,14 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
   pi.on("agent_end", async (event, ctx) => {
     if (!activeRequest || fs.existsSync(activeRequest.request.resultPath)) return;
     const message = latestAssistantMessage(event.messages);
+    const handoff = activeRequest.pendingCompaction;
+    if (handoff && message?.stopReason === "toolUse"
+      && message.content.some((block) => block.type === "toolCall" && block.id === handoff)
+      && event.messages.some((item) => item.role === "toolResult" && item.toolCallId === handoff && !item.isError)) {
+      activeRequest.pendingFailure = undefined;
+      return;
+    }
+    activeRequest.pendingCompaction = undefined;
     // Terminating tool batches can end a run without final assistant text.
     // Wait for Pi settlement before treating that as a recoverable failure.
     if (!message || message.stopReason === "toolUse") {
@@ -691,9 +703,8 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     }
   });
 
-  pi.on("agent_settled", async (_event, ctx) => {
-    const request = activeRequest;
-    if (!request?.pendingFailure || fs.existsSync(request.request.resultPath)) return;
+  function settleWorkerFailure(ctx: ExtensionContext, request: ActiveWorkerRequest): void {
+    if (!request.pendingFailure || fs.existsSync(request.request.resultPath)) return;
     if (request.pendingContinuePrompt !== undefined) return;
 
     const failure = request.pendingFailure;
@@ -730,6 +741,31 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     }
 
     superviseWorker(ctx, request, `Automatic worker run ended without a result: ${failure.message}`);
+  }
+
+  const unsubscribeHandoff = pi.events.on(SELF_COMPACT_HANDOFF_EVENT, (data) => {
+    const handoff = data as SelfCompactHandoff;
+    const request = activeRequest;
+    if (!request) return;
+    if (handoff.state === "pending") {
+      request.pendingCompaction = handoff.toolCallId;
+    } else if (request.pendingCompaction === handoff.toolCallId) {
+      request.pendingCompaction = undefined;
+      if (handoff.state === "failed") {
+        request.pendingFailure = { message: handoff.reason, resolution: "supervise" };
+        // Compaction callbacks run after agent_settled; there may be no later lifecycle event.
+        settleWorkerFailure(request.context, request);
+      }
+    }
+  });
+
+  pi.on("session_shutdown", () => {
+    unsubscribeHandoff();
+    activeRequest = undefined;
+  });
+
+  pi.on("agent_settled", (_event, ctx) => {
+    if (activeRequest) settleWorkerFailure(ctx, activeRequest);
   });
 
   pi.on("turn_end", async (_event, ctx) => {

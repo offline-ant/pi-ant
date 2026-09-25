@@ -8,6 +8,7 @@ import { createDelegateAltController, delegateModelLabel, type DelegateModelPair
 import { createWorkerArtifacts, formatWorkerResult, makeWorkerId, writeWorkerRequest } from "../worker-frame.ts";
 import { runEphemeralWorker } from "../workers.ts";
 import { WORKER_DESIGN_PRINCIPLES } from "../worker-principles.ts";
+import { workerResumeCommand, workerResumeHint } from "../worker-resume.ts";
 
 const delegateParams = Type.Object({
   task: Type.String({ minLength: 1, description: "Complete brief: requirements, relevant context, and desired result." }),
@@ -123,31 +124,48 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           }
 
           const prepared = prepareDelegateSession({ ...params, tool }, ctx, toolCallId, { model, thinkingLevel });
-          const id = makeWorkerId();
-          const paths = createWorkerArtifacts();
-          writeWorkerRequest(paths, {
-            id,
-            task: [tool === "do"
-              ? "Complete the task below using the existing conversation. Use nested do calls only for genuinely separate subtasks; do not forward the whole assignment."
-              : "", WORKER_DESIGN_PRINCIPLES, "Task:", params.task].filter(Boolean).join("\n\n"),
-            tools: [...new Set([...pi.getActiveTools(), "do"])],
-            model: { provider: model.provider, id: model.id },
-            thinkingLevel,
-            resultPath: paths.resultPath,
-            statusPath: paths.statusPath,
+          const sessionCommand = workerResumeCommand(prepared.sessionFile);
+          const resumeHint = workerResumeHint(sessionCommand);
+          // Publish before native startup or its first output capture can block.
+          onUpdate?.({
+            content: [{ type: "text", text: `${resumeHint}\n\n${modelInfo}\nStarting worker.` }],
+            details: { sessionFile: prepared.sessionFile, sessionCommand, cwd: prepared.cwd, status: "starting" },
           });
-          const output = await runEphemeralWorker(pi, {
-            ...prepared, id, name: `${tool}-${id}`, paths, task: params.task, signal,
-            onUpdate: onUpdate ? (update) => onUpdate({
-              ...update, content: [{ type: "text", text: modelInfo }, ...update.content],
-            }) : undefined,
-          });
-          return {
-            content: [{ type: "text", text: `${modelInfo}\n\n${formatWorkerResult(output.result)}` }],
-            details: { ...output.details, context, cwd: prepared.cwd, result: output.result,
-              model: { provider: model.provider, id: model.id }, thinkingLevel, alt: params.alt === true,
-              args: prepared.args, sessionCommand: `pi --session ${prepared.sessionFile}` },
-          };
+          try {
+            const id = makeWorkerId();
+            const paths = createWorkerArtifacts();
+            const tools = [...new Set([...pi.getActiveTools(), "do"])];
+            writeWorkerRequest(paths, {
+              id,
+              task: [tool === "do"
+                ? "Complete the task below using the existing conversation. Use nested do calls only for genuinely separate subtasks; do not forward the whole assignment."
+                : "", WORKER_DESIGN_PRINCIPLES,
+                tools.includes("self_compact") ? "Use self_compact only when substantial work remains; never to wrap up." : "",
+                "Task:", params.task].filter(Boolean).join("\n\n"),
+              tools,
+              model: { provider: model.provider, id: model.id },
+              thinkingLevel,
+              resultPath: paths.resultPath,
+              statusPath: paths.statusPath,
+            });
+            const output = await runEphemeralWorker(pi, {
+              ...prepared, id, name: `${tool}-${id}`, paths, task: params.task, signal,
+              onUpdate: onUpdate ? (update) => onUpdate({
+                ...update, content: [{ type: "text", text: `${resumeHint}\n\n${modelInfo}` }, ...update.content],
+                details: { ...update.details, sessionCommand },
+              }) : undefined,
+            });
+            return {
+              content: [{ type: "text", text: `${resumeHint}\n\n${modelInfo}\n\n${formatWorkerResult(output.result)}` }],
+              details: { ...output.details, context, cwd: prepared.cwd, result: output.result,
+                model: { provider: model.provider, id: model.id }, thinkingLevel, alt: params.alt === true,
+                args: prepared.args, sessionCommand },
+            };
+          } catch (error) {
+            // Throwing preserves Pi's isError flag, including parent Escape.
+            // Error details are discarded by Pi; keep recovery in model-visible text.
+            throw new Error(`${resumeHint}\n\n${modelInfo}\n${error instanceof Error ? error.message : String(error)}`);
+          }
         },
       });
     }
