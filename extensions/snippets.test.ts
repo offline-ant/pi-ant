@@ -6,12 +6,13 @@ import {
   SUPERVISE_SNIPPET, SNIPPETS,
 } from "./snippets.ts";
 
-test("review, progress, and supervision snippets prefer do without a context selector", () => {
+test("review uses delegate while progress and supervision use do without a context selector", () => {
   for (const text of [DELEGATE_REVIEW_SUFFIX, DELEGATE_PROGRESS_SNIPPET, ENRICH_SNIPPET, SUPERVISE_SNIPPET]) {
-    assert.match(text, /\bdo\b/);
     assert.doesNotMatch(text, /context\s*[:=]|fresh_look|retrospective/i);
   }
-  assert.match(DELEGATE_REVIEW_SUFFIX, /^Use do \(alt=true if available\)/);
+  assert.match(DELEGATE_REVIEW_SUFFIX, /^Use delegate \(alt=true if available\)/);
+  assert.doesNotMatch(DELEGATE_REVIEW_SUFFIX, /\bdo\b/);
+  assert.match(ENRICH_SNIPPET, /\bdo\b/);
   assert.match(DELEGATE_PROGRESS_SNIPPET, /^Use do/);
   assert.match(SUPERVISE_SNIPPET, /^Use do/);
   assert.match(SUPERVISE_SNIPPET, /delegate with a complete brief/);

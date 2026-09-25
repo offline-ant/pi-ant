@@ -5,9 +5,11 @@ import * as path from "node:path";
 import * as http from "node:http";
 import test, { type TestContext } from "node:test";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools, InMemoryCredentialStore, type JsonObject, type Tool } from "@earendil-works/pi-ai";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type AgentToolResult } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import type { EphemeralWorkerTool } from "../delegate-policy.ts";
 import type { WorkerRequestFile } from "../worker-frame.ts";
+import { workerResumeCommand } from "../worker-resume.ts";
 import delegateExtension, { type DelegateParams } from "./delegate.ts";
 
 const toolNames = ["do", "delegate", "fresh_look"] as const;
@@ -42,6 +44,8 @@ async function fixture(t: TestContext) {
   const requests: WorkerRequestFile[] = [];
   const closed: string[] = [];
   const serverErrors: unknown[] = [];
+  let failureResult: string | undefined;
+  let startupError: string | undefined;
   let hold: Promise<void> | undefined;
   let release: (() => void) | undefined;
   let requestArrived: (() => void) | undefined;
@@ -53,6 +57,11 @@ async function fixture(t: TestContext) {
       let result: object = {};
       if (request.method === "POST" && request.url === "/api/live-sessions") {
         launches.push(JSON.parse(raw) as Launch);
+        if (startupError) {
+          response.writeHead(500, { "Content-Type": "application/json" });
+          response.end(JSON.stringify({ error: startupError }));
+          return;
+        }
         result = { session: { id: `worker-${launches.length}` } };
       } else if (request.method === "POST" && request.url === "/api/rpc") {
         const input = JSON.parse(raw) as { message: string };
@@ -62,7 +71,8 @@ async function fixture(t: TestContext) {
         requestArrived?.();
         await hold;
         fs.writeFileSync(work.resultPath, JSON.stringify({
-          id: work.id, result: "fixture result", retrospective: "fixture retrospective", timestamp: new Date().toISOString(),
+          id: work.id, result: failureResult ?? "fixture result", isError: failureResult !== undefined,
+          retrospective: "fixture retrospective", timestamp: new Date().toISOString(),
         }));
         result = { success: true };
       } else if (request.method === "DELETE") {
@@ -107,16 +117,22 @@ async function fixture(t: TestContext) {
     extensionFactories: [(pi) => {
       pi.registerProvider(first.provider);
       pi.registerProvider(second.provider);
+      pi.registerTool({
+        name: "self_compact", label: "Self Compact", description: "Fixture tool; never executed.",
+        parameters: Type.Object({}),
+        async execute() { throw new Error("Fixture self_compact must not execute"); },
+      });
       delegateExtension(pi);
     }],
   });
   await loader.reload();
   const created = await createAgentSession({
     cwd: directory, agentDir, modelRuntime, settingsManager, resourceLoader: loader,
-    model: first.getModel(), thinkingLevel: "high", tools: ["read", ...toolNames],
+    model: first.getModel(), thinkingLevel: "high", tools: ["read", ...toolNames, "self_compact"],
     sessionManager: SessionManager.create(directory, path.join(directory, "sessions")),
   });
   session = created.session;
+  session.setActiveToolsByName(["read", ...toolNames]);
   assert.deepEqual(created.extensionsResult.errors, []);
   const errors: string[] = [];
   await session.bindExtensions({ mode: "print", onError: (error) => errors.push(error.error) });
@@ -126,6 +142,12 @@ async function fixture(t: TestContext) {
   assert.ok(modelRuntime.getProvider(first.provider.id));
   assert.ok(modelRuntime.hasConfiguredAuth(first.provider.id));
   const current = session;
+  const updates: Array<{ result: AgentToolResult<unknown>; launches: number }> = [];
+  current.subscribe((event) => {
+    if (event.type === "tool_execution_update") {
+      updates.push({ result: event.partialResult, launches: launches.length });
+    }
+  });
   let percent = 10;
   t.mock.method(current, "getContextUsage", () => ({ tokens: percent * 1_000, contextWindow: 100_000, percent }));
   t.after(() => assert.deepEqual(errors, []));
@@ -163,11 +185,16 @@ async function fixture(t: TestContext) {
     assert.match(JSON.stringify(result.content), new RegExp(`Worker model: ${expectedProvider}/same-id`));
     assert.match(JSON.stringify(result.content), /fixture result/);
     assert.match(JSON.stringify(result.content), /fixture retrospective/);
+    const command = workerResumeCommand(launches.at(-1)!.sessionFile);
+    assert.ok(JSON.stringify(result.content).includes(command));
+    assert.equal((result.details as { sessionCommand: string }).sessionCommand, command);
     assert.equal(closed.length, requests.length);
     return result;
   }
   return {
-    directory, config, current, first, second, requests, launches, definition, enable, call, run,
+    directory, config, current, first, second, requests, launches, definition, enable, call, run, updates, closed,
+    failResult: (message: string) => { failureResult = message; },
+    failStartup: (message: string) => { startupError = message; },
     setPercent: (value: number) => { percent = value; },
     holdNext: () => {
       hold = new Promise<void>((resolve) => { release = resolve; });
@@ -264,6 +291,23 @@ test("do inherits the pre-call conversation, delegate and fresh_look start blank
   }
 });
 
+test("worker compaction guidance follows the enabled tool selection for all three worker tools", { timeout: 30_000 }, async (t) => {
+  const f = await fixture(t);
+  const guidance = "Use self_compact only when substantial work remains; never to wrap up.";
+  for (const enabled of [false, true, false]) {
+    const tools = ["read", ...toolNames, ...(enabled ? ["self_compact"] : [])];
+    f.current.setActiveToolsByName(tools);
+    for (const name of toolNames) {
+      await f.run(name, { task: "Check worker guidance" });
+      const request = f.requests.at(-1)!;
+      assert.equal(request.task.includes(guidance), enabled);
+      assert.equal(request.tools.includes("self_compact"), enabled);
+      if (!enabled) assert.doesNotMatch(request.task, /self_compact/);
+      assert.deepEqual(f.current.getActiveToolNames(), tools);
+    }
+  }
+});
+
 test("stale context arguments, do folder, and disabled alternate flags fail without starting workers", { timeout: 30_000 }, async (t) => {
   const f = await fixture(t);
   f.current.setActiveToolsByName(["read", ...toolNames]);
@@ -317,4 +361,50 @@ test("do warns only above 90 percent, permits retry, and restores the warning pe
   f.setPercent(99);
   await f.run("delegate", { task: "Standalone work at high context" });
   await f.run("fresh_look", { task: "Fresh work at high context" });
+});
+
+for (const name of toolNames) {
+  test(`${name} publishes recovery before startup and preserves it through parent abort`, { timeout: 30_000 }, async (t) => {
+    const f = await fixture(t);
+    f.current.setActiveToolsByName(["read", ...toolNames]);
+    const arrived = f.holdNext();
+    const pending = f.call(name, { task: "Keep work recoverable" });
+    await arrived;
+    const file = f.launches.at(-1)!.sessionFile;
+    const command = workerResumeCommand(file);
+    assert.equal(f.updates[0].launches, 0, "receipt must precede host startup, not wait for native capture");
+    const first = f.updates[0].result;
+    assert.equal((first.details as { sessionCommand: string }).sessionCommand, command);
+    assert.ok(JSON.stringify(first.content).includes(command));
+    const saved = fs.readFileSync(file, "utf8");
+    // Same SDK abort used by the parent's Escape key.
+    await f.current.abort();
+    const result = await pending;
+    f.release();
+    assert.equal(result.isError, true);
+    assert.ok(JSON.stringify(result.content).includes(command));
+    assert.equal(fs.readFileSync(file, "utf8"), saved, "closing a worker must not delete or rewrite its session");
+    assert.equal(f.closed.length, 1);
+    const parent = SessionManager.open(f.current.sessionManager.getSessionFile()!);
+    assert.ok(parent.getBranch().some((entry) => entry.type === "message"
+      && entry.message.role === "toolResult" && JSON.stringify(entry.message.content).includes(command)),
+    "recovery must survive reloading the parent, not just the live progress row");
+  });
+}
+
+test("provider/budget/token failures and failed startup retain model-visible recovery", { timeout: 30_000 }, async (t) => {
+  const f = await fixture(t);
+  for (const message of ["Insufficient credits", "Context window exceeded", "Maximum output tokens reached", "Provider unavailable"]) {
+    f.failResult(message);
+    const result = await f.call("delegate", { task: "Recover failed work" });
+    const command = workerResumeCommand(f.launches.at(-1)!.sessionFile);
+    assert.equal(result.isError, true);
+    assert.ok(JSON.stringify(result.content).includes(command));
+    assert.ok(JSON.stringify(result.content).includes(message));
+  }
+  f.failStartup("startup rejected");
+  const result = await f.call("delegate", { task: "Recover failed startup" });
+  assert.equal(result.isError, true);
+  assert.ok(JSON.stringify(result.content).includes(workerResumeCommand(f.launches.at(-1)!.sessionFile)));
+  assert.match(JSON.stringify(result.content), /startup rejected/);
 });

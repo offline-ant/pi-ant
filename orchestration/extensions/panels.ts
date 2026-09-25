@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { resolveCwd } from "../context.ts";
 import { getHost, hostForTarget } from "../host.ts";
 import type { Host, HostTarget } from "../host-types.ts";
+import { renderToolCall } from "../tool-call.ts";
 import { claimName, listTargets, readTarget, removeTarget, saveTarget, validateName } from "../workers.ts";
 
 const MAX_LINES = 2000;
@@ -57,6 +58,7 @@ export default function panelsExtension(pi: ExtensionAPI): void {
       command: Type.String({ minLength: 1 }),
       folder: Type.Optional(Type.String()),
     }),
+    renderCall: (args) => renderToolCall("panel-start", args),
     async execute(_id, params, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
       const name = validateName(params.name);
@@ -90,6 +92,7 @@ export default function panelsExtension(pi: ExtensionAPI): void {
     label: "Read Panel",
     description: "Read the most recent output of a panel, including one whose process has exited. Defaults to 500 lines, bounded to 2000 lines or 50KB. Reads are repeatable snapshots, not an incremental log.",
     parameters: Type.Object({ name: nameSchema, lines: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_LINES })) }),
+    renderCall: (args) => renderToolCall("panel-read", args),
     async execute(_id, params, signal) {
       signal?.throwIfAborted();
       const target = requirePanel(params.name);
@@ -108,6 +111,7 @@ export default function panelsExtension(pi: ExtensionAPI): void {
       text: Type.Optional(Type.String()),
       keys: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })),
     }),
+    renderCall: (args) => renderToolCall("panel-send", args),
     async execute(_id, params, signal) {
       signal?.throwIfAborted();
       if ((params.text === undefined) === (params.keys === undefined)) throw new Error("Supply exactly one of text or keys.");
@@ -127,6 +131,7 @@ export default function panelsExtension(pi: ExtensionAPI): void {
     label: "Close Panel",
     description: "Close a panel and release its name. A worker with an active parent request cannot be closed through this tool; cancel that request instead.",
     parameters: Type.Object({ name: nameSchema }),
+    renderCall: (args) => renderToolCall("panel-close", args),
     async execute(_id, params, signal) {
       signal?.throwIfAborted();
       const release = claimName(params.name);

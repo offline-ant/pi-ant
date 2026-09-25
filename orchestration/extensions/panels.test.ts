@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test, { after, before, type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Component } from "@earendil-works/pi-tui";
 import type { HostTarget } from "../host-types.ts";
 import { claimName, readTarget, removeTarget, saveTarget } from "../workers.ts";
 import panelsExtension from "./panels.ts";
@@ -15,6 +16,11 @@ interface Params {
 }
 interface Result { content: Array<{ type: string; text: string }>; details: { target: HostTarget } }
 type Execute = (id: string, params: Params, signal: AbortSignal | undefined, update: undefined, ctx: ExtensionContext) => Promise<Result>;
+interface RegisteredTool {
+  name: string;
+  renderCall(args: Partial<Params>): Component;
+  execute: Execute;
+}
 const endpoint = `/tmp/panels-fake-${process.pid}`;
 const envKeys = ["PI_ORCHESTRATION_HOST", "PI_ORCHESTRATION_ENDPOINT", "TMUX_PANE"];
 const previous = envKeys.map((key) => process.env[key]);
@@ -30,7 +36,7 @@ let next = 0;
 
 function fixture(t: TestContext) {
   const name = `panel-test-${process.pid}-${next++}`;
-  const tools = new Map<string, Execute>();
+  const tools = new Map<string, RegisteredTool>();
   const commands = new Map<string, (args: string, ctx: ExtensionContext) => Promise<void>>();
   const calls: string[][] = [];
   const notifications: string[] = [];
@@ -46,7 +52,7 @@ function fixture(t: TestContext) {
     onClose: () => {},
   };
   const pi = {
-    registerTool: (tool: { name: string; execute: Execute }) => tools.set(tool.name, tool.execute),
+    registerTool: (tool: RegisteredTool) => tools.set(tool.name, tool),
     registerCommand: (command: string, spec: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => commands.set(command, spec.handler),
     exec: async (command: string, args: string[]) => {
       assert.equal(command, "tmux");
@@ -75,10 +81,44 @@ function fixture(t: TestContext) {
   t.after(() => removeTarget(name));
   return {
     name, tools, commands, config, calls, notifications,
-    run: (tool: string, params: Partial<Params> = {}, signal?: AbortSignal) => tools.get(tool)!("call", { name, ...params }, signal, undefined, ctx),
+    run: (tool: string, params: Partial<Params> = {}, signal?: AbortSignal) => tools.get(tool)!.execute("call", { name, ...params }, signal, undefined, ctx),
     list: () => commands.get("panels")!("", ctx),
   };
 }
+
+test("collapsed panel tool calls show streaming and completed arguments", (t) => {
+  const f = fixture(t);
+  const render = (tool: string, args: Partial<Params>): string[] =>
+    f.tools.get(tool)!.renderCall(args).render(100).map((line) => line.trimEnd());
+
+  assert.deepEqual(render("panel-start", {}), ["panel-start(", ")"]);
+  assert.deepEqual(render("panel-start", { name: f.name }), [
+    "panel-start(", `  name: ${f.name}`, ")",
+  ]);
+  assert.deepEqual(render("panel-start", {
+    name: f.name, command: "printf ready\nprintf done", folder: "/tmp/work folder",
+  }), [
+    "panel-start(",
+    `  name: ${f.name}`,
+    "  command:",
+    "    printf ready",
+    "    printf done",
+    "  folder: /tmp/work folder",
+    ")",
+  ]);
+  assert.deepEqual(render("panel-read", { name: f.name, lines: 75 }), [
+    "panel-read(", `  name: ${f.name}`, "  lines: 75", ")",
+  ]);
+  assert.deepEqual(render("panel-send", { name: f.name, text: "status" }), [
+    "panel-send(", `  name: ${f.name}`, "  text: status", ")",
+  ]);
+  assert.deepEqual(render("panel-send", { name: f.name, keys: ["ctrl+c", "Escape"] }), [
+    "panel-send(", `  name: ${f.name}`, '  keys: ["ctrl+c","Escape"]', ")",
+  ]);
+  assert.deepEqual(render("panel-close", { name: f.name }), [
+    "panel-close(", `  name: ${f.name}`, ")",
+  ]);
+});
 
 test("neutral tools start shell panels with explicit parent and retain exited names until close", async (t) => {
   const f = fixture(t);

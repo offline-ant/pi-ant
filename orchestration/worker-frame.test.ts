@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import test from "node:test";
+import { createEventBus, type EventBus } from "@earendil-works/pi-coding-agent";
+import { SELF_COMPACT_HANDOFF_EVENT, type SelfCompactHandoff } from "./self-compact-handoff.ts";
 import workerFrameExtension, {
   createWorkerArtifacts,
   parseWorkerResult,
@@ -20,6 +22,7 @@ type CommandHandler = (args: string, ctx: unknown) => unknown;
 
 interface WorkerFrameHarness {
   activeTools: string[];
+  events: EventBus;
   selectedModel?: unknown;
   modelFailure?: Error;
   modelReady?: Promise<void>;
@@ -46,6 +49,7 @@ function createHarness(): WorkerFrameHarness {
 
   const harness: WorkerFrameHarness = {
     activeTools: ["read", "bash"],
+    events: createEventBus(),
     commands,
     context: undefined,
     handlers,
@@ -59,6 +63,7 @@ function createHarness(): WorkerFrameHarness {
   };
 
   const pi = {
+    events: harness.events,
     getActiveTools: () => [...harness.activeTools],
     getAllTools: () => ["read", "bash", "do", "delegate", "fresh_look"].map((name) => ({ name })),
     on: (name: string, handler: EventHandler) => {
@@ -802,6 +807,71 @@ test("exhausted overflow recovery fails only at settlement", async () => {
     const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "overflow-exhausted");
     assert.equal(result.isError, true);
     assert.match(result.result, /context window/);
+  } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
+});
+
+for (const outcome of ["resumed", "failed", "human", "unmatched", "errored-result", "aborted"] as const) {
+  test(`compaction handoffs preserve only matching intentional termination: ${outcome}`, async () => {
+    const harness = createHarness();
+    const paths = createWorkerArtifacts();
+    const handoff = (event: SelfCompactHandoff) => harness.events.emit(SELF_COMPACT_HANDOFF_EVENT, event);
+    try {
+      writeWorkerRequest(paths, { id: "handoff", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
+      await runCommand(harness, "worker-run", paths.requestPath);
+      handoff({ state: "pending", toolCallId: "compact" });
+      const id = outcome === "unmatched" ? "another-tool" : "compact";
+      await emit(harness, "agent_end", outcome === "aborted" ? assistantAbortEvent() : {
+        messages: [
+          { role: "assistant", content: [{ type: "toolCall", id, name: "self_compact", arguments: {} }], stopReason: "toolUse" },
+          { role: "toolResult", toolCallId: id, isError: outcome === "errored-result", content: [] },
+        ],
+      });
+      await emit(harness, "agent_settled", {});
+      if (["unmatched", "errored-result", "aborted"].includes(outcome)) {
+        assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
+        handoff({ state: "resumed", toolCallId: "compact" });
+        assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
+        return;
+      }
+      assert.equal(readWorkerStatus(paths.statusPath)?.state, "running");
+      // Unrelated callbacks cannot resolve or fail this request's handoff.
+      handoff({ state: "failed", toolCallId: "stale", reason: "Stale failure" });
+      assert.equal(readWorkerStatus(paths.statusPath)?.state, "running");
+      if (outcome === "failed") {
+        handoff({ state: "failed", toolCallId: "compact", reason: "Compaction cancelled" });
+        assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
+        assert.match(readWorkerStatus(paths.statusPath)?.supervisionReason ?? "", /Compaction cancelled/);
+        handoff({ state: "resumed", toolCallId: "compact" });
+        assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
+        return;
+      }
+      if (outcome === "human") await emit(harness, "input", { source: "interactive", text: "Wait for me" });
+      handoff({ state: "resumed", toolCallId: "compact" });
+      await emit(harness, "agent_end", assistantEvent("Final result"));
+      if (outcome === "human") {
+        assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
+        assert.equal(fs.existsSync(paths.resultPath), false);
+        await runCommand(harness, "worker-submit");
+      }
+      await emit(harness, "agent_end", assistantEvent("everything was ok"));
+      const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "handoff");
+      assert.equal(result.result, "Final result");
+      assert.equal(harness.shutdowns, 1);
+    } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
+  });
+}
+
+test("worker shutdown detaches handoff listeners and ignores late callbacks", async () => {
+  const harness = createHarness();
+  const paths = createWorkerArtifacts();
+  try {
+    writeWorkerRequest(paths, { id: "shutdown", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
+    await runCommand(harness, "worker-run", paths.requestPath);
+    harness.events.emit(SELF_COMPACT_HANDOFF_EVENT, { state: "pending", toolCallId: "compact" } satisfies SelfCompactHandoff);
+    await emit(harness, "session_shutdown", {});
+    harness.events.emit(SELF_COMPACT_HANDOFF_EVENT, { state: "failed", toolCallId: "compact", reason: "Late failure" } satisfies SelfCompactHandoff);
+    assert.equal(readWorkerStatus(paths.statusPath)?.state, "running");
+    assert.equal(harness.notifications.length, 0);
   } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
 });
 

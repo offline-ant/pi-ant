@@ -1,7 +1,9 @@
 /**
  * agents-d — auto-load AGENTS.d/ context files into model prompt.
  *
- * On every agent start, checks for ./AGENTS.d/ in ctx.cwd. If present:
+ * On every agent start, checks for AGENTS.d/ in ctx.cwd and every ancestor,
+ * through the filesystem root. Loads outermost directories first, like Pi's
+ * AGENTS.md ancestor traversal, without stopping at repository boundaries:
  *   1. Sets the `agents_d` system prompt section to the top-level file
  *      contents and the full tree structure. Pi persists the section only
  *      when it changes.
@@ -37,7 +39,7 @@ import {
   statSync,
   realpathSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 const AGENTS_D_SECTION = "agents_d";
 
@@ -204,55 +206,61 @@ interface AgentsDContext {
   promptSection: string;
   loadedFiles: string[];
   visibleDirs: string[];
-  treeBlock: string;
 }
 
 /**
  * Build the full AGENTS.d context block for system prompt injection.
- * Returns null if no AGENTS.d/ exists.
+ * Returns null if no ancestor (including cwd) has an AGENTS.d/ directory.
  *
  * Output order:
  *   1. Intro block explaining AGENTS.d
  *   2. <file> blocks with content of each top-level loadable entry
  *   3. Tree listing of the full AGENTS.d/ structure
  */
-function buildAgentsDContext(cwd: string): AgentsDContext | null {
-  const agentsDir = join(cwd, "AGENTS.d");
-
-  try {
-    const stats = statSync(agentsDir);
-    if (!stats.isDirectory()) return null;
-  } catch {
-    return null; // does not exist
+export function buildAgentsDContext(cwd: string): AgentsDContext | null {
+  const resolvedCwd = resolve(cwd);
+  const agentsDirs: string[] = [];
+  let currentDir = resolvedCwd;
+  while (true) {
+    const agentsDir = join(currentDir, "AGENTS.d");
+    try {
+      if (statSync(agentsDir).isDirectory()) agentsDirs.unshift(agentsDir);
+    } catch {
+      // Missing directories do not stop ancestor discovery.
+    }
+    const parentDir = dirname(currentDir);
+    if (parentDir === currentDir) break;
+    currentDir = parentDir;
   }
+  if (agentsDirs.length === 0) return null;
 
-  const entries = scanAgentsD(agentsDir);
-  const contents = loadTopLevelContents(agentsDir, "AGENTS.d");
-  const tree = renderTree(entries);
-  const treeBlock = `AGENTS.d/\n${tree}`;
-
-  // Collect loaded file names and visible directory names from the entries
-  const loadedFiles = entries
-    .filter((e) => e.type === "file")
-    .map((e) => e.name)
-    .sort();
-  const visibleDirs = entries
-    .filter((e) => e.type === "dir")
-    .map((e) => `./${e.name}/`)
-    .sort();
+  const contents: string[] = [];
+  const trees: string[] = [];
+  const loadedFiles: string[] = [];
+  const visibleDirs: string[] = [];
+  for (const agentsDir of agentsDirs) {
+    const relBase = relative(resolvedCwd, agentsDir);
+    const entries = scanAgentsD(agentsDir);
+    contents.push(loadTopLevelContents(agentsDir, relBase));
+    trees.push(`${relBase}/\n${renderTree(entries)}`);
+    for (const entry of entries) {
+      if (entry.type === "file") loadedFiles.push(join(relBase, entry.name));
+      if (entry.type === "dir") visibleDirs.push(`${join(relBase, entry.name)}/`);
+    }
+  }
 
   const promptSection = [
     "# AGENTS.d context",
-    "Top-level files are loaded below; directories appear only in the tree. Symlink targets show their real paths.",
+    "Ancestor directories are loaded outermost first, ending with the current directory. Paths are relative to the current directory. Top-level files are loaded below; subdirectories appear only in the trees. Symlink targets show their real paths.",
     "",
-    contents,
+    contents.join("\n\n"),
     "",
     "```",
-    treeBlock,
+    trees.join("\n\n"),
     "```",
   ].join("\n");
 
-  return { promptSection, loadedFiles, visibleDirs, treeBlock };
+  return { promptSection, loadedFiles, visibleDirs };
 }
 
 export default function (pi: ExtensionAPI) {

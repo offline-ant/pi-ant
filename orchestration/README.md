@@ -101,6 +101,8 @@ another Pi child. Shell panels do not consume worker nesting depth.
 - `panel-close({name})`: stop the owned target and release its name. Cancel an
   active worker request rather than closing it through this tool.
 
+All four panel tools show every supplied argument in their normal collapsed TUI
+call row, including partial arguments while the model is still streaming them.
 Ordinary foreground `bash` remains Pi's built-in tool. Hosts close their own
 half-created targets, so a failed or cancelled start leaves nothing registered.
 All logical names share one registry and must match `^[a-z][a-z0-9_-]{0,31}$`.
@@ -208,6 +210,15 @@ retries and overflow compaction. A retry-exhausted or aborted main run enters
 human supervision. A failed retrospective returns the successful main result
 with an unavailable-retrospective note.
 
+When `self_compact` is enabled, its private `pi-ant:self-compact-handoff` events
+identify the terminating tool call and its resumed or failed handoff. Only a
+matching successful tool result preserves automatic capture while native compaction
+runs and the note restarts work. The eventual final answer follows the normal
+result/retrospective path. Failed, cancelled, or skipped handoffs use the existing
+failure handling even when they happen after `agent_settled`. No timers, polling,
+or Pi-core changes are needed; human supervision is never overridden. Worker
+prompts discourage compaction near completion only when the tool is enabled.
+
 Ordinary submitted human input takes supervision before it is queued. Merely
 editing a draft does not. Pilish submits ordinary input through RPC `prompt` with
 `streamingBehavior`; every RPC submission runs extension `input` handlers, so
@@ -237,6 +248,28 @@ explicitly retrying `do` proceeds. `delegate` and `fresh_look` never warn.
 
 ## Files and recovery
 
+Every `do`, `delegate`, and `fresh_look` publishes a copyable resume command as
+soon as its session is prepared, before host startup or output capture. The hint
+leads every progress update and final result/error, so the normal collapsed TUI
+preview shows it even after parent Escape or a provider/budget/token failure.
+Progress and successful results also include `details.sessionCommand`; thrown
+errors keep the command in model-visible text because Pi discards error details.
+Finished tool results persist in the parent transcript, including cancellation.
+Live progress alone is not durable if the parent process is forcibly killed.
+
+Run the offered command **after the original worker has stopped**. If cleanup
+failed, resolve that failure first to avoid two processes writing one session.
+It uses shell-quoted `pi --session <file>`, clears inherited nesting/private input
+socket/target identity, and retains an explicit agent-directory override as an
+absolute path. Pi restores the saved working directory and model/thinking state;
+no `cd`, original worker flags, temporary request files, or `/worker-run` are needed.
+The worker request is process-local, so reopening does not resurrect automatic
+completion, retrospective, or auto-close. Normal resources load, including for a
+former `fresh_look`. Enter a new prompt to continue; `/login`, `/model`, or
+`/compact` may be needed to resolve the original failure. This is an independent
+ordinary session, not a resumed parent tool call. No session files are deleted
+or rewritten by orchestration cleanup; only already-persisted progress is recoverable.
+
 - `/tmp/pi-orchestration-worker-*`: request, status, main result, retrospective,
   final matching result, and prompt diagnostics.
 - `/tmp/pi-orchestration-targets`: target records and exclusive request claims.
@@ -255,8 +288,8 @@ From `pi-ant/`:
 
 ```sh
 npm run check
-node scripts/test.mjs orchestration/worker-frame.test.ts orchestration/workers.test.ts
-node scripts/test.mjs orchestration/delegate-alt.test.ts orchestration/extensions/delegate.test.ts orchestration/context.test.ts orchestration/worker-call.test.ts
+node scripts/test.mjs extensions/self-compact.test.ts orchestration/worker-frame.test.ts orchestration/workers.test.ts
+node scripts/test.mjs orchestration/delegate-alt.test.ts orchestration/extensions/delegate.test.ts orchestration/context.test.ts orchestration/worker-call.test.ts orchestration/worker-resume.test.ts
 PI_NATIVE_HOST_SMOKE=1 node scripts/test.mjs orchestration/hosts/native-smoke.test.ts
 PI_LIFECYCLE_SMOKE=1 node scripts/test.mjs orchestration/hosts/lifecycle-smoke.test.ts
 PI_FORK_SMOKE=1 node scripts/test.mjs orchestration/hosts/fork-smoke.test.ts
