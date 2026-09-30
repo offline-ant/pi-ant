@@ -53,26 +53,52 @@ test("RPC tool dialog cancellation leaves the selection unchanged", async () => 
   });
 });
 
-async function startSession(branch: unknown[], savedDefault?: unknown): Promise<string[] | undefined> {
+interface FakeSession {
+  active: string[] | undefined;
+  registered: string[];
+  branch: unknown[];
+  emit(event: "session_start" | "session_tree" | "input"): Promise<void>;
+  saveDefault(value: unknown): void;
+  dispose(): void;
+}
+
+function fakeSession(branch: unknown[], savedDefault?: unknown): FakeSession {
   const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-tools-test-"));
   const previous = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentDir;
+  const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+  const session: FakeSession = {
+    active: undefined,
+    registered: ["read", "ask", "do", "delegate", "fresh_look", "codemode", "tool_search"],
+    branch,
+    emit: async (event) => {
+      await handlers.get(event)?.({}, { cwd: "/tmp", sessionManager: { getBranch: () => session.branch } });
+    },
+    saveDefault: (value) => fs.writeFileSync(path.join(agentDir, "tool-selection.json"), JSON.stringify(value)),
+    dispose: () => {
+      if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = previous;
+      fs.rmSync(agentDir, { recursive: true, force: true });
+    },
+  };
+  if (savedDefault !== undefined) session.saveDefault(savedDefault);
+  toolsExtension({
+    on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, handler),
+    registerCommand: () => undefined,
+    getAllTools: () => session.registered.map((name) => ({ name })),
+    getActiveTools: () => session.active ?? [],
+    setActiveTools: (tools: string[]) => { session.active = tools; },
+  } as unknown as Parameters<typeof toolsExtension>[0]);
+  return session;
+}
+
+async function startSession(branch: unknown[], savedDefault?: unknown): Promise<string[] | undefined> {
+  const session = fakeSession(branch, savedDefault);
   try {
-    if (savedDefault !== undefined) fs.writeFileSync(path.join(agentDir, "tool-selection.json"), JSON.stringify(savedDefault));
-    const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
-    let active: string[] | undefined;
-    toolsExtension({
-      on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, handler),
-      registerCommand: () => undefined,
-      getAllTools: () => ["read", "ask", "do", "delegate", "fresh_look"].map((name) => ({ name })),
-      setActiveTools: (tools: string[]) => { active = tools; },
-    } as unknown as Parameters<typeof toolsExtension>[0]);
-    await handlers.get("session_start")?.({}, { cwd: "/tmp", sessionManager: { getBranch: () => branch } });
-    return active;
+    await session.emit("session_start");
+    return session.active;
   } finally {
-    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
-    else process.env.PI_CODING_AGENT_DIR = previous;
-    fs.rmSync(agentDir, { recursive: true, force: true });
+    session.dispose();
   }
 }
 
@@ -96,4 +122,61 @@ test("structured workers keep the tools their request selected", async () => {
   assert.equal(await startSession([
     { type: "custom", customType: "pi-orchestration:delegate-runtime", data: {} },
   ], { enabledTools: ["do"] }), undefined);
+});
+
+test("activations Pi makes after the selection was applied survive later prompts", async () => {
+  const session = fakeSession([], { enabledTools: ["read", "do"] });
+  try {
+    await session.emit("session_start");
+    // An MCP server connects: its codemode-exposed tool registers inactive and Pi enables codemode.
+    session.registered.push("mcp_search");
+    session.active = [...session.active!, "codemode", "tool_search"];
+    await session.emit("input");
+    // tool_search declares a match for the following calls.
+    session.active = [...session.active, "mcp_search"];
+    await session.emit("input");
+    assert.deepEqual(session.active, ["read", "do", "codemode", "tool_search", "mcp_search"]);
+  } finally {
+    session.dispose();
+  }
+});
+
+test("a changed saved default, ended Ugo control, or branch change reapplies the selection", async () => {
+  const session = fakeSession([], { enabledTools: ["read"] });
+  try {
+    await session.emit("session_start");
+    session.active = [...session.active!, "codemode"];
+    session.saveDefault({ enabledTools: ["read", "ask"] });
+    await session.emit("input");
+    assert.deepEqual(session.active, ["read", "ask"]);
+
+    session.branch = [{ type: "custom", customType: "pi-ant:ugo-state", data: { active: true } }];
+    session.active = ["present_guidance"];
+    await session.emit("input");
+    assert.deepEqual(session.active, ["present_guidance"]);
+    session.branch = [...session.branch, { type: "custom", customType: "pi-ant:ugo-state", data: { active: false } }];
+    await session.emit("input");
+    assert.deepEqual(session.active, ["read", "ask"]);
+
+    session.active = [...session.active, "codemode"];
+    session.branch = [{ type: "custom", customType: TOOL_SELECTION_ENTRY, data: { enabledTools: ["read", "ask"] } }];
+    await session.emit("session_tree");
+    assert.deepEqual(session.active, ["read", "ask"]);
+  } finally {
+    session.dispose();
+  }
+});
+
+test("selected tools registered after the selection was applied become active", async () => {
+  const session = fakeSession([], { enabledTools: ["read", "mcp_direct"] });
+  try {
+    await session.emit("session_start");
+    assert.deepEqual(session.active, ["read"]);
+    session.registered.push("mcp_direct", "mcp_other");
+    session.active = [...session.active!, "codemode"];
+    await session.emit("input");
+    assert.deepEqual(session.active, ["read", "codemode", "mcp_direct"]);
+  } finally {
+    session.dispose();
+  }
 });

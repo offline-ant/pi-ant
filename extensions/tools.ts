@@ -258,14 +258,42 @@ export async function showToolDialog(ctx: ExtensionContext, options: ToolDialogO
 }
 
 export default function toolsExtension(pi: ExtensionAPI): void {
+  /**
+   * The selection last applied and the tools registered at that time. Between
+   * applications, activations Pi makes itself (MCP enabling codemode or
+   * tool_search, tool_search loading matches, direct tools registered on
+   * connect) stand until the selection changes.
+   */
+  let applied: { selection: string[]; registered: Set<string> } | undefined;
+
   function apply(selection: readonly string[]): void {
-    pi.setActiveTools(activeTools(selection, pi.getAllTools().map((tool) => tool.name), requiredTools(pi)));
+    const registered = pi.getAllTools().map((tool) => tool.name);
+    pi.setActiveTools(activeTools(selection, registered, requiredTools(pi)));
+    applied = { selection: [...selection], registered: new Set(registered) };
   }
 
-  function refresh(ctx: ExtensionContext): void {
-    if (specializedOwner(ctx)) return;
-    const selection = branchSelection(ctx) ?? loadSavedDefault();
-    if (selection) apply(selection);
+  /** Applies the branch selection or saved default when it differs from the applied one. */
+  function sync(ctx: ExtensionContext): void {
+    const selection = specializedOwner(ctx) ? undefined : branchSelection(ctx) ?? loadSavedDefault();
+    if (!selection) {
+      applied = undefined;
+      return;
+    }
+    if (!applied || !sameToolSelection(selection, applied.selection)) {
+      apply(selection);
+      return;
+    }
+    // Selected tools registered since then, such as MCP tools of a server that connected later.
+    const known = applied.registered;
+    const registered = pi.getAllTools().map((tool) => tool.name).filter((name) => !known.has(name));
+    for (const name of registered) known.add(name);
+    const selected = registered.filter((name) => selection.includes(name));
+    if (selected.length > 0) pi.setActiveTools([...new Set([...pi.getActiveTools(), ...selected])]);
+  }
+
+  function reset(ctx: ExtensionContext): void {
+    applied = undefined;
+    sync(ctx);
   }
 
   pi.registerCommand("tools", {
@@ -283,12 +311,14 @@ export default function toolsExtension(pi: ExtensionAPI): void {
       }
 
       const savedDefault = loadSavedDefault();
+      const required = requiredTools(pi);
       const options: ToolDialogOptions = {
-        selection: branchSelection(ctx) ?? savedDefault ?? pi.getActiveTools(),
+        // The actual active tools, including those Pi activated since the selection was applied.
+        selection: pi.getActiveTools().filter((name) => !required.has(name)),
         savedDefault,
         // Hidden tools are withdrawn registrations; Pi never activates them.
         tools: pi.getAllTools().filter((tool) => tool.exposure !== "hidden").sort((left, right) => left.name.localeCompare(right.name)),
-        required: requiredTools(pi),
+        required,
         onChange: (selection) => {
           pi.appendEntry(TOOL_SELECTION_ENTRY, { enabledTools: selection });
           apply(selection);
@@ -318,7 +348,8 @@ export default function toolsExtension(pi: ExtensionAPI): void {
     },
   });
 
-  pi.on("session_start", async (_event, ctx) => refresh(ctx));
-  pi.on("session_tree", async (_event, ctx) => refresh(ctx));
-  pi.on("input", async (_event, ctx) => refresh(ctx));
+  pi.on("session_start", async (_event, ctx) => reset(ctx));
+  pi.on("session_tree", async (_event, ctx) => reset(ctx));
+  // Picks up saved-default changes from other sessions and the end of Ugo control.
+  pi.on("input", async (_event, ctx) => sync(ctx));
 }
