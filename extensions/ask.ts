@@ -709,6 +709,8 @@ export default function askExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "ask",
 		label: "Ask",
+		// Questions belong to the model's own tool call: its transcript position anchors discussion forks.
+		exposure: "model-only",
 		description:
 			"Ask the user interactive multiple-choice or free-form questions when a required preference, approval, or decision is missing. Returns answers keyed by question id; cancellation and non-interactive use are reported explicitly.",
 		parameters: AskParamsSchema,

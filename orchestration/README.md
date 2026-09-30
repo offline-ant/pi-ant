@@ -86,7 +86,7 @@ another Pi child. Shell panels do not consume worker nesting depth.
   All three share one implementation and return the worker's result plus an
   automatic retrospective. Optional `alt` appears on all three only when enabled
   with `/delegate-alt`; omitted/false retains the caller's model, true uses the
-  other configured model.
+  other configured model, or the first if the caller is outside the pair.
 - `panel-start({name, command, folder?})`: start a server, watcher, or
   interactive program. There is no readiness wait: probe the service from `bash`
   or read the panel. Panels need a terminal host; the web host refuses them.
@@ -136,9 +136,10 @@ descriptions without a reload. The active-tool selection is preserved, including
 disabled tools. This does not affect forks.
 
 When enabled, `alt: true` selects the other member relative to the current
-caller's provider/model; nested workers follow the same rule. Missing auth,
-an unavailable model, a caller outside the pair, or a stale alternate request
-after disabling produces an error, never a same-model fallback. Model IDs starting
+caller's provider/model, or the first configured model if the caller is outside
+the pair; nested workers follow the same rule. Missing auth, an unavailable selected
+model, or a stale alternate request after disabling produces an error, never a
+substitute-model fallback. Model IDs starting
 with their own provider prefix are refused because Pi's child CLI interprets them
 ambiguously. Parent model/thinking remain unchanged. The worker inherits thinking
 clamped to the selected model's capabilities; startup flags and the structured

@@ -33,13 +33,10 @@ export function resolveDelegateModel(
   if (!ctx.model) throw new Error("Current session has no selected model.");
   if (!alt) return ctx.model;
   if (!pair) throw new Error("Alternate delegation is disabled. Configure a model pair with /delegate-alt.");
-  const current = delegateModelLabel(ctx.model);
-  const index = pair.findIndex((model) => delegateModelLabel(model) === current);
-  if (index < 0) throw new Error(`Current model ${current} is outside the /delegate-alt pair. Select a member or configure a different pair.`);
-  const other = pair[index === 0 ? 1 : 0];
-  const model = ctx.modelRegistry.getAvailable().find((candidate) => candidate.provider === other.provider && candidate.id === other.id);
+  const selected = delegateModelLabel(ctx.model) === delegateModelLabel(pair[0]) ? pair[1] : pair[0];
+  const model = ctx.modelRegistry.getAvailable().find((candidate) => candidate.provider === selected.provider && candidate.id === selected.id);
   if (!model) {
-    throw new Error(`Alternate delegate model unavailable: ${delegateModelLabel(other)}. Check authentication or disable it with /delegate-alt off.`);
+    throw new Error(`Alternate delegate model unavailable: ${delegateModelLabel(selected)}. Check authentication or disable it with /delegate-alt off.`);
   }
   return model;
 }
@@ -80,7 +77,7 @@ export function createDelegateAltController(
 
   function report(ctx: ExtensionContext): void {
     const text = lastError ?? (pair
-      ? `Alternate delegation enabled: ${pair.map(delegateModelLabel).join(" ↔ ")}. do, delegate, and fresh_look default to the caller's model; alt: true selects the other. Saved globally in ${file}.`
+      ? `Alternate delegation enabled: ${pair.map(delegateModelLabel).join(" ↔ ")}. do, delegate, and fresh_look default to the caller's model; alt: true selects the other member, or the first model if the caller is outside the pair. Saved globally in ${file}.`
       : "Alternate delegation disabled. do, delegate, and fresh_look have no alt parameter.");
     if (ctx.hasUI) ctx.ui.notify(text, "info");
     else pi.sendMessage({ customType: "pi-orchestration:delegate-alt-status", content: text, display: true });

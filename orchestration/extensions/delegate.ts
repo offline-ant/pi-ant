@@ -15,7 +15,7 @@ const delegateParams = Type.Object({
   folder: Type.Optional(Type.String({ description: "Working directory; defaults to the current one." })),
   alt: Type.Optional(Type.Boolean({
     default: false,
-    description: "Use the other configured model for a second opinion. Defaults to false.",
+    description: "Use the other configured model, or the first if the caller is outside the pair. Defaults to false (inherit the caller's model).",
   })),
 }, { additionalProperties: false });
 const doParams = Type.Object({
@@ -82,8 +82,10 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       pi.registerTool({
         name: tool,
         label: guidance.label,
+        // Workers fork at, report progress to, and resume from the model's own tool call.
+        exposure: "model-only",
         description: guidance.description
-          + (pair ? ` Models: ${pair.map(delegateModelLabel).join(" and ")}. Set alt=true to use the other model.` : ""),
+          + (pair ? ` Models: ${pair.map(delegateModelLabel).join(" and ")}. Set alt=true to use the other model, or the first if the caller is outside the pair.` : ""),
         promptSnippet: guidance.snippet,
         promptGuidelines: [
           ...(tool === "do" ? ["Prefer do for non-trivial investigation, verification, review, and implementation within the current task. Give a brief goal; use delegate only occasionally for large, fully specified standalone assignments. Handle trivial work directly."] : []),

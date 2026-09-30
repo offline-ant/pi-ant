@@ -40,6 +40,7 @@ async function fixture(t: TestContext) {
   process.env.PI_ORCHESTRATION_HOST = "web";
   const first = fauxProvider({ provider: "delegate-first", models: [{ id: "same-id", reasoning: true }], tokensPerSecond: 100_000 });
   const second = fauxProvider({ provider: "delegate-second", models: [{ id: "same-id", reasoning: false }], tokensPerSecond: 100_000 });
+  const third = fauxProvider({ provider: "delegate-third", models: [{ id: "same-id", reasoning: true }], tokensPerSecond: 100_000 });
   const launches: Launch[] = [];
   const requests: WorkerRequestFile[] = [];
   const closed: string[] = [];
@@ -117,6 +118,7 @@ async function fixture(t: TestContext) {
     extensionFactories: [(pi) => {
       pi.registerProvider(first.provider);
       pi.registerProvider(second.provider);
+      pi.registerProvider(third.provider);
       pi.registerTool({
         name: "self_compact", label: "Self Compact", description: "Fixture tool; never executed.",
         parameters: Type.Object({}),
@@ -138,6 +140,7 @@ async function fixture(t: TestContext) {
   await session.bindExtensions({ mode: "print", onError: (error) => errors.push(error.error) });
   await modelRuntime.setRuntimeApiKey(first.provider.id, "fixture-key");
   await modelRuntime.setRuntimeApiKey(second.provider.id, "fixture-key");
+  await modelRuntime.setRuntimeApiKey(third.provider.id, "fixture-key");
   await modelRuntime.getAvailable();
   assert.ok(modelRuntime.getProvider(first.provider.id));
   assert.ok(modelRuntime.hasConfiguredAuth(first.provider.id));
@@ -158,7 +161,8 @@ async function fixture(t: TestContext) {
   };
   const enable = () => current.prompt("/delegate-alt delegate-first/same-id delegate-second/same-id");
   async function call(name: EphemeralWorkerTool, params: JsonObject) {
-    const provider = current.model?.provider === "delegate-first" ? first : second;
+    const provider = [first, second, third].find((candidate) => candidate.provider.id === current.model?.provider);
+    assert.ok(provider);
     provider.setResponses([
       fauxAssistantMessage(fauxToolCall(name, params), { stopReason: "toolUse" }),
       fauxAssistantMessage("parent done"),
@@ -192,7 +196,7 @@ async function fixture(t: TestContext) {
     return result;
   }
   return {
-    directory, config, current, first, second, requests, launches, definition, enable, call, run, updates, closed,
+    directory, config, current, first, second, third, requests, launches, definition, enable, call, run, updates, closed,
     failResult: (message: string) => { failureResult = message; },
     failStartup: (message: string) => { startupError = message; },
     setPercent: (value: number) => { percent = value; },
@@ -209,7 +213,7 @@ test("split schemas have no context flag, fresh_look is opt-in, and alternate re
   const assertSchemas = (enabled: boolean) => {
     for (const name of toolNames) {
       const tool = f.definition(name);
-      const schema = tool.parameters as { properties: Record<string, { default?: unknown }>; required?: string[] };
+      const schema = tool.parameters as { properties: Record<string, { default?: unknown; description?: string }>; required?: string[] };
       assert.equal(Object.hasOwn(schema.properties, "alt"), enabled);
       assert.equal(Object.hasOwn(schema.properties, "context"), false);
       assert.equal(Object.hasOwn(schema.properties, "folder"), name !== "do");
@@ -218,6 +222,8 @@ test("split schemas have no context flag, fresh_look is opt-in, and alternate re
       if (enabled) {
         assert.equal(schema.properties.alt.default, false);
         assert.match(tool.description, /alt=true/);
+        assert.match(tool.description, /first if the caller is outside the pair/);
+        assert.match(schema.properties.alt.description!, /first if the caller is outside the pair/);
         assert.match(tool.description, /delegate-first\/same-id/);
         assert.match(tool.description, /delegate-second\/same-id/);
       } else assert.doesNotMatch(JSON.stringify(tool.parameters), /alternate|\balt\b/i);
@@ -265,6 +271,20 @@ test("split schemas have no context flag, fresh_look is opt-in, and alternate re
   }]);
   await f.current.prompt("Check disabled global selection.");
   assertSchemas(false);
+});
+
+test("all worker tools select the first configured model for an outside caller only with alt true", { timeout: 30_000 }, async (t) => {
+  const f = await fixture(t);
+  await f.enable();
+  await f.current.setModel(f.third.getModel());
+  f.current.setActiveToolsByName(["read", ...toolNames]);
+  for (const name of toolNames) {
+    await f.run(name, { task: "Outside caller default" }, "delegate-third");
+    await f.run(name, { task: "Outside caller explicit false", alt: false }, "delegate-third");
+    await f.run(name, { task: "Outside caller alternate", alt: true }, "delegate-first");
+  }
+  await f.current.prompt("/delegate-alt delegate-second/same-id delegate-first/same-id");
+  await f.run("do", { task: "Reordered pair", alt: true }, "delegate-second", "off");
 });
 
 test("do inherits the pre-call conversation, delegate and fresh_look start blank in the selected directory", { timeout: 30_000 }, async (t) => {

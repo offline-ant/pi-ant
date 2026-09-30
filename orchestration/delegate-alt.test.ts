@@ -126,6 +126,11 @@ test("exact CLI pair persists privately, updates immediately, reports status, an
   assert.equal(c.changes.length, 1, "unchanged configuration must not re-register the tool");
   await c.run("status");
   assert.match(f.notifications.at(-1)!.text, /enabled.*first-provider\/same-model.*second-provider\/same-model.*Saved globally/);
+  assert.match(f.notifications.at(-1)!.text, /first model if the caller is outside the pair/);
+  f.setModel(f.third);
+  assert.equal(c.controller.resolve(f.ctx, true), f.first);
+  assert.equal(c.controller.resolve(f.ctx, false), f.third);
+  f.setModel(f.first);
   await c.run("off");
   assert.deepEqual(c.changes, [f.pair, null]);
   assert.equal(fs.existsSync(f.file), false);
@@ -290,7 +295,7 @@ test("non-UI status uses a session message and explicit commands do not require 
   assert.equal(fs.existsSync(f.file), false);
 });
 
-test("model resolution is relative in both directions, defaults to the caller, and rejects invalid alternatives", (t) => {
+test("model resolution alternates pair members, selects the first for outsiders, and otherwise inherits the caller", (t) => {
   const f = fixture(t);
   assert.equal(resolveDelegateModel(f.ctx, f.pair, true), f.second);
   assert.equal(resolveDelegateModel(f.ctx, f.pair, false), f.first);
@@ -301,7 +306,9 @@ test("model resolution is relative in both directions, defaults to the caller, a
   assert.equal(f.ctx.model, f.second);
   f.setModel(f.third);
   assert.equal(resolveDelegateModel(f.ctx, f.pair, false), f.third);
-  assert.throws(() => resolveDelegateModel(f.ctx, f.pair, true), /outside.*pair/);
+  assert.equal(resolveDelegateModel(f.ctx, f.pair, true), f.first);
+  assert.equal(resolveDelegateModel(f.ctx, [f.second, f.first], true), f.second, "fallback follows configured order");
+  assert.equal(f.ctx.model, f.third);
   f.setModel(f.first);
   assert.throws(() => resolveDelegateModel(f.ctx, null, true), /disabled/);
   f.unauthenticated.add(delegateModelLabel(f.second));
@@ -310,6 +317,16 @@ test("model resolution is relative in both directions, defaults to the caller, a
   f.unauthenticated.clear();
   f.models.splice(f.models.indexOf(f.second), 1);
   assert.throws(() => resolveDelegateModel(f.ctx, f.pair, true), /model unavailable/);
+  f.setModel(f.third);
+  assert.equal(resolveDelegateModel(f.ctx, f.pair, true), f.first, "unselected model availability must not affect fallback");
+  assert.throws(() => resolveDelegateModel(f.ctx, null, true), /disabled/);
+  f.models.push(f.second);
+  f.unauthenticated.add(delegateModelLabel(f.first));
+  assert.throws(() => resolveDelegateModel(f.ctx, f.pair, true), /model unavailable.*first-provider\/same-model/);
+  assert.equal(resolveDelegateModel(f.ctx, f.pair, false), f.third);
+  f.unauthenticated.clear();
+  f.models.splice(f.models.indexOf(f.first), 1);
+  assert.throws(() => resolveDelegateModel(f.ctx, f.pair, true), /model unavailable.*first-provider\/same-model/);
   f.setModel(undefined);
   assert.throws(() => resolveDelegateModel(f.ctx, f.pair, false), /no selected model/);
   assert.throws(() => resolveDelegateModel(f.ctx, f.pair, true), /no selected model/);
