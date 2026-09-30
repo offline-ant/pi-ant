@@ -35,6 +35,8 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "present_guidance",
     label: "Present Guidance",
+    // The terminating final answer of a model turn.
+    exposure: "model-only",
     description: "Submit the final workboard guidance decision. Valid input returns the exact <pi-guidance-result> block to use as the final answer; invalid input throws.",
     parameters: PRESENT_GUIDANCE_PARAMS,
     async execute(_toolCallId, params) {

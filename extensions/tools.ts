@@ -286,7 +286,8 @@ export default function toolsExtension(pi: ExtensionAPI): void {
       const options: ToolDialogOptions = {
         selection: branchSelection(ctx) ?? savedDefault ?? pi.getActiveTools(),
         savedDefault,
-        tools: pi.getAllTools().sort((left, right) => left.name.localeCompare(right.name)),
+        // Hidden tools are withdrawn registrations; Pi never activates them.
+        tools: pi.getAllTools().filter((tool) => tool.exposure !== "hidden").sort((left, right) => left.name.localeCompare(right.name)),
         required: requiredTools(pi),
         onChange: (selection) => {
           pi.appendEntry(TOOL_SELECTION_ENTRY, { enabledTools: selection });

@@ -55,6 +55,8 @@ export default function selfCompact(pi: ExtensionAPI) {
   pi.registerTool({
     name: SELF_COMPACT_TOOL,
     label: "Self Compact",
+    // The handoff is keyed to a model-issued tool call alone in its batch.
+    exposure: "model-only",
     description:
       "Compact your own context at a clean checkpoint. Call it as the only tool call in its batch. " +
       "The run ends, Pi's normal compaction summarizes older history while keeping recent messages, " +
