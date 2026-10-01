@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import test, { after, before, type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import type { HostTarget } from "../host-types.ts";
 import { claimName, readTarget, removeTarget, saveTarget } from "../workers.ts";
-import panelsExtension from "./panels.ts";
+import panelsExtension, { panelArgv } from "./panels.ts";
 
 interface Params {
   name: string;
@@ -22,16 +26,21 @@ interface RegisteredTool {
   execute: Execute;
 }
 const endpoint = `/tmp/panels-fake-${process.pid}`;
-const envKeys = ["PI_ORCHESTRATION_HOST", "PI_ORCHESTRATION_ENDPOINT", "TMUX_PANE"];
+const envKeys = ["PI_ORCHESTRATION_HOST", "PI_ORCHESTRATION_ENDPOINT", "TMUX_PANE", "PI_CODING_AGENT_DIR"];
+const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "panels-agent-"));
 const previous = envKeys.map((key) => process.env[key]);
 before(() => {
   process.env.PI_ORCHESTRATION_HOST = "tmux";
   process.env.PI_ORCHESTRATION_ENDPOINT = endpoint;
   process.env.TMUX_PANE = "%1";
+  process.env.PI_CODING_AGENT_DIR = agentDir;
 });
-after(() => envKeys.forEach((key, index) => {
-  if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index];
-}));
+after(() => {
+  envKeys.forEach((key, index) => {
+    if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index];
+  });
+  fs.rmSync(agentDir, { recursive: true, force: true });
+});
 let next = 0;
 
 function fixture(t: TestContext) {
@@ -76,7 +85,7 @@ function fixture(t: TestContext) {
       return { stdout, code, stderr: code ? "fake native failure" : "", killed: false };
     },
   } as unknown as ExtensionAPI;
-  const ctx = { cwd: "/tmp", ui: { notify: (text: string) => notifications.push(text) } } as unknown as ExtensionContext;
+  const ctx = { cwd: "/tmp", isProjectTrusted: () => false, ui: { notify: (text: string) => notifications.push(text) } } as unknown as ExtensionContext;
   panelsExtension(pi);
   t.after(() => removeTarget(name));
   return {
@@ -130,6 +139,7 @@ test("neutral tools start shell panels with explicit parent and retain exited na
   assert.equal(readTarget(f.name)?.id, "%9");
   assert.ok(f.calls[0].includes("%1"));
   assert.ok(f.calls[1].includes("$1"));
+  assert.match(f.calls[1].at(-1)!, /&& exec '[^']*\/bash' '-l' '-c' 'printf ready'$/);
   f.config.dead = true;
   f.config.output = "finished output";
   assert.match((await f.run("panel-read")).content[0].text, /finished output/);
@@ -263,4 +273,15 @@ test("live read failures keep their native cause and cancelled reads never close
   await assert.rejects(f.run("panel-read", {}, abort.signal), /abort/i);
   assert.equal(f.calls.length, count);
   assert.ok(readTarget(f.name));
+});
+
+test("panel commands run in the bash tool's shell, so bash-only syntax works", () => {
+  const ctx = { cwd: agentDir, isProjectTrusted: () => false };
+  const argv = panelArgv('false | true; printf "%s" "${PIPESTATUS[0]}"', ctx);
+  assert.deepEqual(argv.slice(1, 3), ["-l", "-c"]);
+  assert.equal(execFileSync(argv[0], argv.slice(1), { encoding: "utf8" }), "1");
+  fs.writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ shellPath: "/bin/sh" }));
+  try {
+    assert.deepEqual(panelArgv("true", ctx), ["/bin/sh", "-c", "true"], "a configured shellPath wins and non-bash shells get no login flag");
+  } finally { fs.rmSync(path.join(agentDir, "settings.json")); }
 });

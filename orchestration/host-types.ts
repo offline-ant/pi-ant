@@ -27,7 +27,8 @@ interface StartBase {
 }
 export type StartSpec = StartBase & (
   | { kind: "pi"; sessionFile: string; args: string[]; prompt?: string }
-  | { kind: "shell"; command: string }
+  /** Complete command argv, executed verbatim. */
+  | { kind: "shell"; argv: string[] }
 );
 export type HostInput =
   | { kind: "prompt"; text: string }

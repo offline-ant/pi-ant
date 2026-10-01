@@ -98,7 +98,7 @@ export function createHerdrHost(pi: ExtensionAPI, endpoint: string): Host {
           fs.writeFileSync(launchFile, [
             `printf '%s' "$$" > ${quote(pidFile)}`,
             `rm -- ${quote(launchFile)}`,
-            `/bin/sh -lc ${quote(spec.command)}`,
+            spec.argv.map(quote).join(" "),
             `printf '%s' "$?" > ${quote(controlPath)}`,
           ].join("\n") + "\n", { mode: 0o600 });
           await checked(["pane", "run", paneId, `/bin/sh ${quote(launchFile)}`], signal);

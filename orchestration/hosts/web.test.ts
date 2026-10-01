@@ -148,7 +148,7 @@ test("the web host refuses work that needs a terminal, and reports unreachable s
   const server = await fakeTau();
   const host = createWebHost(server.endpoint);
   await assert.rejects(
-    () => host.start({ kind: "shell", name: "build", cwd: process.cwd(), command: "npm run build", placement: "worker" }),
+    () => host.start({ kind: "shell", name: "build", cwd: process.cwd(), argv: ["npm", "run", "build"], placement: "worker" }),
     /no terminal for shell panels/,
   );
   const target = await host.start(workerSpec({ prompt: undefined }));

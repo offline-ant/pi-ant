@@ -65,7 +65,7 @@ for (const kind of ["tmux", "herdr"] as const) {
       } finally { await host.close(target); }
 
       const shell = await host.start({ kind: "shell", name: `shell-${randomUUID().slice(0, 8)}`, cwd: dir,
-        command: 'printf "NATIVE_READY\\n"; /bin/cat', placement: "worker", parent });
+        argv: ["/bin/sh", "-c", 'printf "NATIVE_READY\\n"; /bin/cat'], placement: "worker", parent });
       try {
         for (let attempt = 0; attempt < 30; attempt++) {
           if ((await host.read(shell, 30)).includes("NATIVE_READY")) break;
@@ -78,10 +78,10 @@ for (const kind of ["tmux", "herdr"] as const) {
       } finally { await host.close(shell); }
 
       const instant = await host.start({ kind: "shell", name: `instant-${randomUUID().slice(0, 8)}`, cwd: dir,
-        command: 'printf "INSTANT_OUTPUT\\n"', placement: "worker", parent });
+        argv: ["/bin/bash", "-c", 'false | true; printf "INSTANT_OUTPUT %s\\n" "${PIPESTATUS[0]}"'], placement: "worker", parent });
       try {
         await delay(200);
-        assert.ok((await host.read(instant, 80)).includes("INSTANT_OUTPUT"));
+        assert.ok((await host.read(instant, 80)).includes("INSTANT_OUTPUT 1"), "argv runs verbatim in bash");
         assert.notEqual(await host.state(instant), "running");
       } finally { await host.close(instant); }
     } finally {

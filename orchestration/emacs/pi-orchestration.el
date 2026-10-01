@@ -120,9 +120,9 @@ Remote sessions cannot use the shared local filesystem or Emacs server."
                 (eat-query-before-killing-running-terminal nil))
             (dolist (entry (reverse environment))
               (setenv (car entry) (cdr entry)))
-            (let ((buffer (eat-make (concat "pi-panel:" name ":" id)
-                                    "/bin/sh" nil "-lc"
-                                    (plist-get spec :command))))
+            (let* ((argv (append (plist-get spec :argv) nil))
+                   (buffer (apply #'eat-make (concat "pi-panel:" name ":" id)
+                                  (car argv) nil (cdr argv))))
               (setf (plist-get target :buffer) buffer
                     (plist-get target :process) (get-buffer-process buffer)
                     (plist-get target :ready) t))))
