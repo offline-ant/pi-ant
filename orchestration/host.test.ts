@@ -216,7 +216,7 @@ test("depth-limit Pi starts reject before any host operation; shell panels still
       const host = hostForTarget(pi, parent);
       await assert.rejects(host.start({ kind: "pi", name: "too-deep", cwd: "/tmp", sessionFile: "/tmp/not-started", args: [], placement: "worker", parent }), /nested too deep/);
       assert.equal(calls, 0, kind);
-      await assert.rejects(host.start({ kind: "shell", name: "shell", cwd: "/tmp", command: "true", placement: "worker", parent }), /shell reached native host/);
+      await assert.rejects(host.start({ kind: "shell", name: "shell", cwd: "/tmp", argv: ["true"], placement: "worker", parent }), /shell reached native host/);
       assert.ok(calls > 0);
     }
   } finally {

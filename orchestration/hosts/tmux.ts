@@ -39,7 +39,7 @@ export function createTmuxHost(pi: ExtensionAPI, endpoint: string): Host {
       const env = { ...spec.env, ...(controlPath ? { PI_ORCHESTRATION_CONTROL: controlPath } : {}) };
       const launch = spec.kind === "pi"
         ? ["exec", "pi", "--session", spec.sessionFile, ...spec.args, "-e", TERMINAL_INPUT_EXTENSION].map((arg, index) => index === 0 ? arg : quote(arg)).join(" ")
-        : `exec /bin/sh -lc ${quote(spec.command)}`;
+        : `exec ${spec.argv.map(quote).join(" ")}`;
       const args = spec.placement === "interactive-fork"
         ? ["split-window", "-d", "-t", parent.id, "-P", "-F", "#{pane_id}", "-c", spec.cwd]
         : ["new-window", "-d", "-t", session!, "-n", spec.name, "-P", "-F", "#{pane_id}", "-c", spec.cwd];

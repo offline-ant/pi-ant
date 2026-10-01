@@ -88,7 +88,9 @@ another Pi child. Shell panels do not consume worker nesting depth.
   with `/delegate-alt`; omitted/false retains the caller's model, true uses the
   other configured model, or the first if the caller is outside the pair.
 - `panel-start({name, command, folder?})`: start a server, watcher, or
-  interactive program. There is no readiness wait: probe the service from `bash`
+  interactive program. The command runs in the shell Pi's `bash` tool resolves
+  (`shellPath` setting, else bash), as a login shell (`-l`) when that is bash;
+  hosts execute the resolved argv verbatim. There is no readiness wait: probe the service from `bash`
   or read the panel. Panels need a terminal host; the web host refuses them.
 - `panel-read({name, lines?})`: bounded snapshot, default 500 lines, maximum
   2,000 lines/50KB. Reads may overlap; no incremental/lossless-log promise.

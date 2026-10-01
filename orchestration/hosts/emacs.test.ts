@@ -61,7 +61,7 @@ test("Emacs failed startup closes only its preassigned identity", async () => {
     closedId = data.id;
     return { success: true };
   });
-  await assert.rejects(createEmacsHost(pi, "/test/socket").start({ kind: "shell", name: "logs", cwd: "/tmp", command: "false", placement: "worker" }), /Startup failed/);
+  await assert.rejects(createEmacsHost(pi, "/test/socket").start({ kind: "shell", name: "logs", cwd: "/tmp", argv: ["false"], placement: "worker" }), /Startup failed/);
   assert.ok(startedId);
   assert.equal(startedId, closedId);
 });

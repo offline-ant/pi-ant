@@ -16,6 +16,7 @@ function reply(payload: unknown = "", code = 0): ExecResult {
 }
 const controls = new Map<string, net.Server>();
 const shellDirectories = new Set<string>();
+const launchScripts: string[] = [];
 after(async () => {
   for (const directory of shellDirectories) fs.rmSync(directory, { recursive: true, force: true });
   for (const [socketPath, server] of controls) {
@@ -34,6 +35,7 @@ function fake(responses: ExecResult[]): { pi: ExtensionAPI; calls: string[][]; p
       const launch = /^\/bin\/sh '([^']+\/start\.sh)'$/.exec(args.at(-1) ?? "");
       if (launch) {
         shellDirectories.add(path.dirname(launch[1]));
+        launchScripts.push(fs.readFileSync(launch[1], "utf8"));
         fs.rmSync(launch[1]);
       }
     }
@@ -57,13 +59,13 @@ const herdrParent: HostTarget = { host: "herdr", endpoint: "/tmp/test-herdr", id
 test("tmux shell launch pins endpoint, parent, environment and uses exec", async () => {
   const { pi, calls } = fake([reply("$1\n"), reply("%8\n"), reply("zero\none\ntwo\n\n\n"), reply(), reply(), reply(), reply("1"), reply("1"), reply()]);
   const host = createTmuxHost(pi, tmuxParent.endpoint);
-  const target = await host.start({ kind: "shell", name: "server", cwd: "/tmp/a b", placement: "worker", parent: tmuxParent, command: "printf '%s' \"literal\"", env: { CUSTOM: "a b" } });
+  const target = await host.start({ kind: "shell", name: "server", cwd: "/tmp/a b", placement: "worker", parent: tmuxParent, argv: ["/bin/bash", "-lc", "printf '%s' \"literal\""], env: { CUSTOM: "a b" } });
   assert.equal(target.id, "%8");
   assert.equal(calls[0][0], "tmux");
   assert.deepEqual(calls[0].slice(3), ["display-message", "-p", "-t", "%4", "#{session_id}"]);
   assert.deepEqual(calls[1].slice(1, 9), ["-S", "/tmp/test-tmux", "new-window", "-d", "-t", "$1", "-n", "server"]);
   assert.ok(calls[1].includes("CUSTOM=a b"));
-  assert.match(calls[1].at(-1)!, /remain-on-exit on && exec \/bin\/sh -lc /);
+  assert.match(calls[1].at(-1)!, /remain-on-exit on && exec '\/bin\/bash' '-lc' 'printf '"'"'%s'"'"' "literal"'$/);
   assert.equal(await host.read(target, 2), "one\ntwo");
   await host.send(target, { kind: "text", text: "Enter ctrl+c", enter: true });
   await host.send(target, { kind: "keys", keys: ["ctrl+c", "Escape"] });
@@ -76,9 +78,9 @@ test("tmux shell launch pins endpoint, parent, environment and uses exec", async
 
 test("tmux fork placement never uses the focused pane", async () => {
   const { pi, calls } = fake([reply("%8\n")]);
-  await createTmuxHost(pi, tmuxParent.endpoint).start({ kind: "shell", name: "fork", cwd: "/tmp", placement: "interactive-fork", parent: tmuxParent, command: "sleep 1" });
+  await createTmuxHost(pi, tmuxParent.endpoint).start({ kind: "shell", name: "fork", cwd: "/tmp", placement: "interactive-fork", parent: tmuxParent, argv: ["sleep", "1"] });
   assert.deepEqual(calls[0].slice(3, 8), ["split-window", "-d", "-t", "%4", "-P"]);
-  await assert.rejects(createTmuxHost(pi, tmuxParent.endpoint).start({ kind: "shell", name: "bad", cwd: "/tmp", placement: "worker", command: "true" }), /explicit parent/);
+  await assert.rejects(createTmuxHost(pi, tmuxParent.endpoint).start({ kind: "shell", name: "bad", cwd: "/tmp", placement: "worker", argv: ["true"] }), /explicit parent/);
 });
 
 test("tmux missing process is not completion and prompt text is not terminal keys", async () => {
@@ -124,7 +126,8 @@ test("Herdr fork uses explicit parent rectangle even if another pane is focused"
     ] } } }),
     reply({ result: { pane: { pane_id: "w1:p8" } } }), reply(),
   ]);
-  await createHerdrHost(pi, herdrParent.endpoint).start({ kind: "shell", name: "fork", cwd: "/tmp", command: "sleep 1", placement: "interactive-fork", parent: herdrParent });
+  await createHerdrHost(pi, herdrParent.endpoint).start({ kind: "shell", name: "fork", cwd: "/tmp", argv: ["/bin/bash", "-lc", "sleep 1"], placement: "interactive-fork", parent: herdrParent });
+  assert.equal(launchScripts.at(-1)?.split("\n")[2], "'/bin/bash' '-lc' 'sleep 1'", "the launch file runs the argv verbatim");
   assert.deepEqual(calls[0].slice(3), ["pane", "layout", "--pane", "w1:p4"]);
   assert.deepEqual(calls[1].slice(3, 8), ["pane", "split", "w1:p4", "--direction", "right"]);
 });

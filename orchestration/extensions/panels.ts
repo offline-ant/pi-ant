@@ -1,5 +1,6 @@
+import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { truncateTail, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getShellConfig, SettingsManager, truncateTail, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { resolveCwd } from "../context.ts";
 import { getHost, hostForTarget } from "../host.ts";
@@ -23,6 +24,14 @@ function snapshot(text: string, lines = MAX_LINES): string {
   return (result.content || "(no output)") + (result.truncated
     ? "\n[Snapshot truncated to the last requested lines or 50KB; inspect the native panel for earlier output.]"
     : "");
+}
+
+/** Run a panel command in the shell Pi's bash tool resolves, as a login shell when that is bash. */
+export function panelArgv(command: string, ctx: Pick<ExtensionContext, "cwd" | "isProjectTrusted">): string[] {
+  const shellPath = SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted() }).getShellPath();
+  const config = getShellConfig(shellPath);
+  if (config.commandTransport === "stdin") throw new Error(`Panels cannot run commands through ${config.shell}, which reads commands from stdin`);
+  return [config.shell, ...(path.basename(config.shell) === "bash" ? ["-l"] : []), ...config.args, command];
 }
 
 function requirePanel(name: string): HostTarget {
@@ -52,7 +61,7 @@ export default function panelsExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "panel-start",
     label: "Start Panel",
-    description: "Start a long-running command in a named terminal panel: a server, watcher, or interactive program. The name and output stay reserved until panel-close, including after the process exits. Use built-in bash for ordinary foreground commands.",
+    description: "Start a long-running command in a named terminal panel: a server, watcher, or interactive program. The command runs in a bash login shell, the same shell as the bash tool. The name and output stay reserved until panel-close, including after the process exits. Use built-in bash for ordinary foreground commands.",
     parameters: Type.Object({
       name: nameSchema,
       command: Type.String({ minLength: 1 }),
@@ -75,7 +84,7 @@ export default function panelsExtension(pi: ExtensionAPI): void {
         }
         // Hosts close their own half-created targets, so a failed start leaves nothing to clean up here.
         const host = getHost(pi);
-        const target = await host.start({ kind: "shell", name, cwd, command: params.command, placement: "worker", parent: host.parent() }, signal);
+        const target = await host.start({ kind: "shell", name, cwd, argv: panelArgv(params.command, ctx), placement: "worker", parent: host.parent() }, signal);
         saveTarget(target);
         return {
           content: [{ type: "text", text: `Started: ${identity(target)} in ${cwd}` }],

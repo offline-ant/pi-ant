@@ -10,14 +10,14 @@
          (response (pi-orchestration--start
                     (list :id id :endpoint "test"
                           :spec '(:kind "shell" :name "eat-test" :cwd "/tmp/"
-                                        :command "stty -echo; printf 'READY\\n'; read line; printf 'RECEIVED:%s\\n' \"$line\"")))))
+                                        :argv ["/bin/bash" "-c" "stty -echo; false | true; printf 'READY:%s\\n' \"${PIPESTATUS[0]}\"; read line; printf 'RECEIVED:%s\\n' \"$line\""])))))
     (unwind-protect
         (progn
           (should (equal (plist-get (plist-get response :target) :id) id))
           (should (eq (selected-window) window))
           (should (eq (window-buffer) before))
           (should (pilish-test-wait-until
-                   (lambda () (string-match-p "READY" (plist-get (pi-orchestration--read (list :id id)) :output))) 5))
+                   (lambda () (string-match-p "READY:1" (plist-get (pi-orchestration--read (list :id id)) :output))) 5))
           (pi-orchestration--send (list :id id :input '(:kind "text" :text "literal ctrl+c 'quoted'" :enter :false)))
           (pi-orchestration--send (list :id id :input '(:kind "keys" :keys ["Enter"])))
           (should (pilish-test-wait-until
@@ -96,7 +96,7 @@
           (pi-orchestration--start
            (list :id id :endpoint "test"
                  :spec '(:kind "shell" :name "fullscreen" :cwd "/tmp/"
-                               :command "printf '\\033[?1049hCURSES READY\\r\\n'; read line")))
+                               :argv ["/bin/sh" "-c" "printf '\\033[?1049hCURSES READY\\r\\n'; read line"])))
           (setq process (pi-orchestration--process (pi-orchestration--target id)))
           (should (pilish-test-wait-until
                    (lambda () (string-match-p "CURSES READY"
