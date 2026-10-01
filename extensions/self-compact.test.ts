@@ -29,6 +29,11 @@ function text(context: TranscriptContext): string {
   return JSON.stringify(context.messages);
 }
 
+/** Native compaction (history and split-turn prefix) summarizes without tools; working requests always declare some. */
+function isSummaryRequest(context: TranscriptContext): boolean {
+  return !context.messages.some((message) => message.role === "system" && (message.toolsAdded?.length ?? 0) > 0);
+}
+
 /** Real Pi SDK session with a registry-registered faux provider; summary and working requests are recorded separately. */
 async function fixture(t: TestContext, keepRecentTokens = 300, before: ExtensionFactory[] = [], after: ExtensionFactory[] = []) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-self-compact-"));
@@ -40,7 +45,7 @@ async function fixture(t: TestContext, keepRecentTokens = 300, before: Extension
   const summaryRequests: TranscriptContext[] = [];
   let summary: (signal: AbortSignal | undefined) => Promise<string> = async () => `SUMMARY-${summaryRequests.length}`;
   const dispatch: FauxResponseStep = async (context: TranscriptContext, options: SimpleStreamOptions | undefined) => {
-    if (text(context).includes("<conversation>")) {
+    if (isSummaryRequest(context)) {
       summaryRequests.push(context);
       return fauxAssistantMessage(await summary(options?.signal));
     }
