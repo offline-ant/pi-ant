@@ -474,6 +474,7 @@ async function editSelectedAnswer(
 
 async function askSingleChoice(
 	question: AskQuestion,
+	title: string,
 	ctx: ExtensionContext,
 	previous: QuestionResult | undefined,
 	canGoBack: boolean,
@@ -516,7 +517,7 @@ async function askSingleChoice(
 		addChoice(choices, FORK_OPTION, { kind: "fork" });
 		if (canGoBack) addChoice(choices, BACK_OPTION, { kind: "back" });
 
-		const choice = await selectAskChoice(question.question, choices, ctx);
+		const choice = await selectAskChoice(title, choices, ctx);
 		if (choice.action === "cancel")
 			return ctx.signal?.aborted || !canGoBack
 				? { action: "cancel" }
@@ -585,6 +586,7 @@ async function askSingleChoice(
 
 async function askMultiChoice(
 	question: AskQuestion,
+	title: string,
 	ctx: ExtensionContext,
 	previous: QuestionResult | undefined,
 	canGoBack: boolean,
@@ -620,7 +622,7 @@ async function askMultiChoice(
 		addChoice(choices, FORK_OPTION, { kind: "fork" });
 		if (canGoBack) addChoice(choices, BACK_OPTION, { kind: "back" });
 
-		const choice = await selectAskChoice(question.question, choices, ctx);
+		const choice = await selectAskChoice(title, choices, ctx);
 		if (choice.action === "cancel")
 			return ctx.signal?.aborted || !canGoBack
 				? { action: "cancel" }
@@ -757,9 +759,10 @@ export default function askExtension(pi: ExtensionAPI) {
 				const question = params.questions[index];
 				const id = question.id ?? `question_${index + 1}`;
 				const normalizedQuestion: AskQuestion = { ...question, id };
+				const title = `(${index + 1}/${params.questions.length}) ${question.question}`;
 				const action = normalizedQuestion.multi
-					? await askMultiChoice(normalizedQuestion, ctx, results[index], index > 0, launchFork)
-					: await askSingleChoice(normalizedQuestion, ctx, results[index], index > 0, launchFork);
+					? await askMultiChoice(normalizedQuestion, title, ctx, results[index], index > 0, launchFork)
+					: await askSingleChoice(normalizedQuestion, title, ctx, results[index], index > 0, launchFork);
 
 				if (action.action === "back") {
 					index = Math.max(0, index - 1);
