@@ -39,7 +39,8 @@ for (const mode of ["rpc", "tui"] as const) test(`${mode} ask discussion forks b
     cwd: fixture.directory, hasUI: true, mode, sessionManager: fixture.session,
     model: { provider: "fixture", id: "fake" }, isIdle: () => false,
     ui: {
-      select: async (_title: string, choices: string[]) => {
+      select: async (title: string, choices: string[]) => {
+        assert.equal(title, "(1/1) Which option?");
         selection++;
         if (selection === 1) return choices.find((choice) => choice.includes("[ ] A"));
         if (selection === 2) return choices.find((choice) => choice.includes("Fork (discuss separately)"));
@@ -62,6 +63,7 @@ for (const mode of ["rpc", "tui"] as const) test(`${mode} ask discussion forks b
             assert.equal(finished, false);
             assert.equal(fixture.prompts.length, 1);
             assert.ok(component.render(100).some((line) => line.includes("[x] A")));
+            assert.ok(component.render(100).some((line) => line.includes("(1/1) Which option?")));
           }
           const moves = selection === 1 ? 0 : selection === 2 ? 4 : 2;
           for (let move = 0; move < moves; move++) component.handleInput("\u001b[B");
