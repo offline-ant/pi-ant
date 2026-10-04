@@ -151,7 +151,7 @@ test("the default tool display shows the full handoff note during streaming and 
   context.isPartial = false;
   for (const expanded of [false, true]) {
     context.expanded = expanded;
-    const component = tool.renderCall(context.args, theme, context);
+    const component: Component = tool.renderCall(context.args, theme, context);
     for (const width of [20, 80]) {
       const lines = component.render(width);
       assert.ok(lines.every((line) => visibleWidth(line) <= width));
