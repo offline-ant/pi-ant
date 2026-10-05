@@ -2,6 +2,7 @@ import { clampThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { renderWorkerCall } from "../worker-call.ts";
+import { renderWorkerResult } from "../worker-result.ts";
 import { EPHEMERAL_WORKER_CONTEXTS, inheritContextWarningPercent, type EphemeralWorkerTool } from "../delegate-policy.ts";
 import { prepareDelegateSession } from "../context.ts";
 import { createDelegateAltController, delegateModelLabel, type DelegateModelPair } from "../delegate-alt.ts";
@@ -109,6 +110,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
         },
         executionMode: "parallel",
         renderCall: (args) => renderWorkerCall(tool, args),
+        renderResult: renderWorkerResult,
         async execute(toolCallId, params: DelegateParams, signal, onUpdate, ctx) {
           const model = alternate.resolve(ctx, params.alt === true);
           const thinkingLevel = clampThinkingLevel(model, pi.getThinkingLevel());
@@ -130,7 +132,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           const resumeHint = workerResumeHint(sessionCommand);
           // Publish before native startup or its first output capture can block.
           onUpdate?.({
-            content: [{ type: "text", text: `${resumeHint}\n\n${modelInfo}\nStarting worker.` }],
+            content: [{ type: "text", text: `${modelInfo}\nStarting worker.` }],
             details: { sessionFile: prepared.sessionFile, sessionCommand, cwd: prepared.cwd, status: "starting" },
           });
           try {
@@ -153,12 +155,12 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             const output = await runEphemeralWorker(pi, {
               ...prepared, id, name: `${tool}-${id}`, paths, task: params.task, signal,
               onUpdate: onUpdate ? (update) => onUpdate({
-                ...update, content: [{ type: "text", text: `${resumeHint}\n\n${modelInfo}` }, ...update.content],
+                ...update, content: [{ type: "text", text: modelInfo }, ...update.content],
                 details: { ...update.details, sessionCommand },
               }) : undefined,
             });
             return {
-              content: [{ type: "text", text: `${resumeHint}\n\n${modelInfo}\n\n${formatWorkerResult(output.result)}` }],
+              content: [{ type: "text", text: `${modelInfo}\n\n${formatWorkerResult(output.result)}` }],
               details: { ...output.details, context, cwd: prepared.cwd, result: output.result,
                 model: { provider: model.provider, id: model.id }, thinkingLevel, alt: params.alt === true,
                 args: prepared.args, sessionCommand },

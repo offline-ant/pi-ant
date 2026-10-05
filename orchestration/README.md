@@ -252,12 +252,15 @@ explicitly retrying `do` proceeds. `delegate` and `fresh_look` never warn.
 ## Files and recovery
 
 Every `do`, `delegate`, and `fresh_look` publishes a copyable resume command as
-soon as its session is prepared, before host startup or output capture. The hint
-leads every progress update and final result/error, so the normal collapsed TUI
-preview shows it even after parent Escape or a provider/budget/token failure.
-Progress and successful results also include `details.sessionCommand`; thrown
-errors keep the command in model-visible text because Pi discards error details.
-Finished tool results persist in the parent transcript, including cancellation.
+soon as its session is prepared, before host startup or output capture. Progress
+and successful results retain it in `details.sessionCommand`, not model-facing
+`content`. The shared TUI result renderer displays the hint as **User-only recovery
+command (not sent to model)** in both collapsed and expanded views. Rendering does
+not add it to the prompt. Non-TUI clients may display that metadata themselves.
+Thrown errors, including parent Escape and provider/budget/token failures, keep
+the hint in model-visible content because Pi discards error details; these are not
+labeled user-only. Finished tool results persist in the parent transcript,
+including successful recovery metadata and cancellation content.
 Live progress alone is not durable if the parent process is forcibly killed.
 
 Run the offered command **after the original worker has stopped**. If cleanup
@@ -292,7 +295,7 @@ From `pi-ant/`:
 ```sh
 npm run check
 node scripts/test.mjs extensions/self-compact.test.ts orchestration/worker-frame.test.ts orchestration/workers.test.ts
-node scripts/test.mjs orchestration/delegate-alt.test.ts orchestration/extensions/delegate.test.ts orchestration/context.test.ts orchestration/worker-call.test.ts orchestration/worker-resume.test.ts
+node scripts/test.mjs orchestration/delegate-alt.test.ts orchestration/extensions/delegate.test.ts orchestration/context.test.ts orchestration/worker-call.test.ts orchestration/worker-result.test.ts orchestration/worker-resume.test.ts
 PI_NATIVE_HOST_SMOKE=1 node scripts/test.mjs orchestration/hosts/native-smoke.test.ts
 PI_LIFECYCLE_SMOKE=1 node scripts/test.mjs orchestration/hosts/lifecycle-smoke.test.ts
 PI_FORK_SMOKE=1 node scripts/test.mjs orchestration/hosts/fork-smoke.test.ts
