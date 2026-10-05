@@ -165,7 +165,16 @@ async function fixture(t: TestContext) {
     assert.ok(provider);
     provider.setResponses([
       fauxAssistantMessage(fauxToolCall(name, params), { stopReason: "toolUse" }),
-      fauxAssistantMessage("parent done"),
+      (context) => {
+        const result = context.messages.findLast((message) => message.role === "toolResult");
+        assert.ok(result?.role === "toolResult");
+        const command = launches.at(-1) && workerResumeCommand(launches.at(-1)!.sessionFile);
+        if (command && !result.isError) {
+          assert.ok(!JSON.stringify(result.content).includes(command), "successful recovery metadata must not reach the model's tool content");
+          assert.doesNotMatch(JSON.stringify(result.content), /To resume\/continue|enter a prompt to continue/);
+        }
+        return fauxAssistantMessage("parent done");
+      },
     ]);
     await current.prompt(`Run the fixture ${name}.`);
     const result = current.messages.findLast((message) => message.role === "toolResult");
@@ -190,8 +199,18 @@ async function fixture(t: TestContext) {
     assert.match(JSON.stringify(result.content), /fixture result/);
     assert.match(JSON.stringify(result.content), /fixture retrospective/);
     const command = workerResumeCommand(launches.at(-1)!.sessionFile);
-    assert.ok(JSON.stringify(result.content).includes(command));
+    assert.ok(!JSON.stringify(result.content).includes(command));
+    assert.doesNotMatch(JSON.stringify(result.content), /To resume\/continue|enter a prompt to continue/);
     assert.equal((result.details as { sessionCommand: string }).sessionCommand, command);
+    const persisted = SessionManager.open(current.sessionManager.getSessionFile()!).getBranch()
+      .findLast((entry) => entry.type === "message" && entry.message.role === "toolResult");
+    assert.ok(persisted?.type === "message" && persisted.message.role === "toolResult");
+    assert.equal((persisted.message.details as { sessionCommand: string }).sessionCommand, command);
+    assert.ok(!JSON.stringify(persisted.message.content).includes(command));
+    for (const update of updates) {
+      assert.doesNotMatch(JSON.stringify(update.result.content), /To resume\/continue|enter a prompt to continue|pi --session/);
+      assert.ok((update.result.details as { sessionCommand?: string }).sessionCommand);
+    }
     assert.equal(closed.length, requests.length);
     return result;
   }
@@ -395,7 +414,8 @@ for (const name of toolNames) {
     assert.equal(f.updates[0].launches, 0, "receipt must precede host startup, not wait for native capture");
     const first = f.updates[0].result;
     assert.equal((first.details as { sessionCommand: string }).sessionCommand, command);
-    assert.ok(JSON.stringify(first.content).includes(command));
+    assert.ok(!JSON.stringify(first.content).includes(command));
+    assert.doesNotMatch(JSON.stringify(first.content), /To resume\/continue|enter a prompt to continue/);
     const saved = fs.readFileSync(file, "utf8");
     // Same SDK abort used by the parent's Escape key.
     await f.current.abort();
