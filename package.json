@@ -40,7 +40,8 @@
       "./extensions/vim.ts",
       "./extensions/agents-d.ts",
       "./extensions/self-compact.ts",
-      "./extensions/tools.ts"
+      "./extensions/tools.ts",
+      "./extensions/parent-machine.ts"
     ]
   }
 }
