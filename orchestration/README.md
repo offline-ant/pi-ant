@@ -90,18 +90,56 @@ another Pi child. Shell panels do not consume worker nesting depth.
 - `panel-start({name, command, folder?})`: start a server, watcher, or
   interactive program. The command runs in the shell Pi's `bash` tool resolves
   (`shellPath` setting, else bash), as a login shell (`-l`) when that is bash;
-  hosts execute the resolved argv verbatim. There is no readiness wait: probe the service from `bash`
-  or read the panel. Panels need a terminal host; the web host refuses them.
+  hosts execute that argv under `script`, a PTY relay that also appends raw
+  terminal output to a private capture log for `wait`. Panel-start itself has no
+  readiness wait; use `wait`. Panels need a terminal host; the web host refuses them.
 - `panel-read({name, lines?})`: bounded snapshot, default 500 lines, maximum
   2,000 lines/50KB. Reads may overlap; no incremental/lossless-log promise.
 - `panel-send({name, text?, keys?})`: exactly one of a literal line of text or
   terminal keys such as `ctrl+c` and `Escape`; text always presses Enter. The
   result is the panel's output shortly after the input. This is terminal input,
-  not draft-safe Pi prompt delivery. Pilish Pi targets are RPC conversations,
+  not draft-safe Pi prompt delivery. When typed text goes where no shell reports
+  its prompt (see `wait` below), the result ends with a warning naming the
+  receiving program (for example `ssh -tt mac-wire`) and how to fix it; the user
+  also gets a one-time TUI notification per panel and program. Keys never warn.
+  Pilish Pi targets are RPC conversations,
   not terminals; supervise them in their input buffers. Web targets are RPC
   sessions with no terminal at all; supervise them in the browser tab.
-- `panel-close({name})`: stop the owned target and release its name. Cancel an
-  active worker request rather than closing it through this tool.
+- `panel-close({name})`: stop the owned target and release its name and capture
+  log. Cancel an active worker request rather than closing it through this tool.
+- `wait({panel?|file?|pid?, match?, timeoutSeconds})`: the replacement for
+  `sleep`. Exactly one source. It returns at the first of: a new output line
+  matching the JavaScript regex `match`; the panel's shell back at its prompt; the
+  panel or pid process exiting (with its status when known); or the timeout.
+  Results state the outcome, elapsed time, matched line or exit status, and the
+  panel screen or the file's new lines. Progress updates show the latest line.
+
+  Panel output comes from the capture log, not screen snapshots, so nothing
+  scrolls away between polls. "New" output starts after the last `panel-send`
+  or the previous wait on that panel, so output printed between `panel-start`
+  and `wait` is still seen and successive waits continue where the previous one
+  matched. The cursor is per panel, shared by every session.
+
+  Shell completion uses OSC 133 marks (prompt start `A`, input end `B`, command
+  start `C`, command end `D;<status>`) in the captured bytes, so it works for
+  every host and through ssh. fish 4+ emits them by itself. Bash needs
+  `source <pi-ant>/orchestration/shell/osc133.bash` at the end of `~/.bashrc`;
+  fish 3 needs `source <pi-ant>/orchestration/shell/osc133.fish` in
+  `config.fish` (both locally and, copied, on remote hosts; verified on macOS
+  fish 3.7.1 and Windows Git Bash 5.3). Detection of unmarked input needs no
+  ssh wrapper: when the last mark is a command start `C` (fish includes its
+  command line) and nothing follows, input after it reaches that command, for
+  example an ssh session, REPL, or nested shell without integration. A wait on a panel whose shell is already idle
+  at its prompt answers immediately; after `panel-send` it waits for that
+  command's end. Without marks, a command typed into an interactive shell cannot
+  be detected as finished: such waits end only on match, exit, or timeout, and
+  a timeout says so explicitly. Herdr 0.9.x and tmux expose no prompt state
+  themselves; the capture relay is the host-independent source.
+
+  `file` waits need `match` and examine only text appended after the call; a
+  truncated file restarts from its beginning. `pid` waits poll process existence
+  and do not accept `match`. Escape cancels any wait. Panels started before
+  output capture existed must be restarted to be waited on.
 
 All four panel tools show every supplied argument in their normal collapsed TUI
 call row, including partial arguments while the model is still streaming them.
@@ -209,9 +247,17 @@ tool set is unchanged, so no transcript system message is added), saves `retrosp
 and atomically publishes a matching `result.json`. Only that matching final
 artifact means completion—not an input acknowledgement, idle screen, spinner,
 or process exit. Failure resolution waits for Pi's `agent_settled`, including
-retries and overflow compaction. A retry-exhausted or aborted main run enters
-human supervision. A failed retrospective returns the successful main result
-with an unavailable-retrospective note.
+retries and overflow compaction. Any unresolved main-task assistant error or
+abort enters `worker:supervised`, including provider quota, authentication, and
+context errors. Provider failover and Pi recovery run first; successful recovery
+continues automatically. The worker stays open with its history and actual error
+reason, and the parent tool remains pending until completion or cancellation.
+There is no automatic resume or timed retry in supervision. Resolve the blocker
+and use `/worker-continue <prompt>` to restore automatic completion; ordinary
+messages stay local until `/worker-submit`. `/finish-worker-now <text>` returns
+without another model request. Parent cancellation still stops the worker.
+Startup, process, and protocol failures remain terminal. A failed retrospective
+returns the successful main result with an unavailable-retrospective note.
 
 When `self_compact` is enabled, its private `pi-ant:self-compact-handoff` events
 identify the terminating tool call and its resumed or failed handoff. Only a
@@ -257,7 +303,7 @@ and successful results retain it in `details.sessionCommand`, not model-facing
 `content`. The shared TUI result renderer displays the hint as **User-only recovery
 command (not sent to model)** in both collapsed and expanded views. Rendering does
 not add it to the prompt. Non-TUI clients may display that metadata themselves.
-Thrown errors, including parent Escape and provider/budget/token failures, keep
+Thrown errors, including parent Escape and startup/process/protocol failures, keep
 the hint in model-visible content because Pi discards error details; these are not
 labeled user-only. Finished tool results persist in the parent transcript,
 including successful recovery metadata and cancellation content.
@@ -281,6 +327,8 @@ or rewritten by orchestration cleanup; only already-persisted progress is recove
 - `/tmp/pi-orchestration-targets`: target records and exclusive request claims.
 - `/tmp/pi-terminal-*`: private terminal-input sockets, removed with owned targets.
 - `/tmp/pi-panel-*`: Herdr shell command liveness files, removed on close.
+- `/tmp/pi-panel-output-*`: raw panel capture logs (`output.log`, unbounded
+  while the panel lives) and `wait.json` cursors, removed on `panel-close`.
 
 Abruptly killed parent processes can leave claim files. Their contents identify
 the owning PID; verify that process is gone before manually removing its exact
@@ -296,6 +344,8 @@ From `pi-ant/`:
 npm run check
 node scripts/test.mjs extensions/self-compact.test.ts orchestration/worker-frame.test.ts orchestration/workers.test.ts
 node scripts/test.mjs orchestration/delegate-alt.test.ts orchestration/extensions/delegate.test.ts orchestration/context.test.ts orchestration/worker-call.test.ts orchestration/worker-result.test.ts orchestration/worker-resume.test.ts
+node scripts/test.mjs orchestration/panel-output.test.ts orchestration/extensions/panels.test.ts orchestration/extensions/wait.test.ts extensions/exec-lints.test.ts
+PI_NATIVE_HOST_SMOKE=1 node scripts/test.mjs orchestration/extensions/wait.test.ts  # inside Herdr: same wait tests on Herdr panels
 PI_NATIVE_HOST_SMOKE=1 node scripts/test.mjs orchestration/hosts/native-smoke.test.ts
 PI_LIFECYCLE_SMOKE=1 node scripts/test.mjs orchestration/hosts/lifecycle-smoke.test.ts
 PI_FORK_SMOKE=1 node scripts/test.mjs orchestration/hosts/fork-smoke.test.ts

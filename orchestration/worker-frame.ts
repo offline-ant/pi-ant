@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isContextOverflow, isRetryableAssistantError } from "@earendil-works/pi-ai";
 import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { initializeNesting } from "./nesting.ts";
 import { SELF_COMPACT_HANDOFF_EVENT, type SelfCompactHandoff } from "./self-compact-handoff.ts";
@@ -70,11 +69,6 @@ export interface WorkerArtifactPaths {
 type WorkerPhase = "result" | "retrospective";
 type WorkerCapture = "automatic" | "supervised";
 
-interface PendingWorkerFailure {
-  message: string;
-  resolution: "error" | "supervise";
-}
-
 interface ActiveWorkerRequest {
   request: WorkerRequestFile;
   context: ExtensionContext;
@@ -85,7 +79,7 @@ interface ActiveWorkerRequest {
   candidate?: string;
   mainResult?: string;
   pendingContinuePrompt?: string;
-  pendingFailure?: PendingWorkerFailure;
+  pendingFailure?: string;
   supervisionReason?: string;
   submitting: boolean;
 }
@@ -138,7 +132,7 @@ function assistantTextContent(message: Extract<AgentEndEvent["messages"][number]
 }
 
 function assistantMessageText(message: Extract<AgentEndEvent["messages"][number], { role: "assistant" }>): string {
-  return assistantTextContent(message) ?? message.errorMessage ?? `Assistant stopped with reason '${message.stopReason}' before returning a final worker result.`;
+  return message.errorMessage?.trim() || assistantTextContent(message) || `Assistant stopped with reason '${message.stopReason}' before returning a final worker result.`;
 }
 
 function getContextPercent(ctx: ExtensionContext): number | null | undefined {
@@ -628,26 +622,14 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     // Terminating tool batches can end a run without final assistant text.
     // Wait for Pi settlement before treating that as a recoverable failure.
     if (!message || message.stopReason === "toolUse") {
-      activeRequest.pendingFailure = {
-        message: message ? "Worker stopped after a tool batch without final result text." : "Worker stopped without an assistant message.",
-        resolution: "supervise",
-      };
+      activeRequest.pendingFailure = message
+        ? "Worker stopped after a tool batch without final result text."
+        : "Worker stopped without an assistant message.";
       return;
     }
 
-    if (message.stopReason === "error") {
-      const retryable = !isContextOverflow(message, ctx.model?.contextWindow) && isRetryableAssistantError(message);
-      activeRequest.pendingFailure = {
-        message: assistantMessageText(message),
-        resolution: retryable ? "supervise" : "error",
-      };
-      return;
-    }
-    if (message.stopReason === "aborted") {
-      activeRequest.pendingFailure = {
-        message: assistantMessageText(message),
-        resolution: "supervise",
-      };
+    if (message.stopReason === "error" || message.stopReason === "aborted") {
+      activeRequest.pendingFailure = assistantMessageText(message);
       return;
     }
     activeRequest.pendingFailure = undefined;
@@ -704,13 +686,13 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
   });
 
   function settleWorkerFailure(ctx: ExtensionContext, request: ActiveWorkerRequest): void {
-    if (!request.pendingFailure || fs.existsSync(request.request.resultPath)) return;
+    if (request.pendingFailure === undefined || fs.existsSync(request.request.resultPath)) return;
     if (request.pendingContinuePrompt !== undefined) return;
 
     const failure = request.pendingFailure;
     request.pendingFailure = undefined;
     if (request.capture === "supervised") {
-      request.supervisionReason = `Automatic worker run ended without a result: ${failure.message}`;
+      request.supervisionReason = `Automatic worker run ended without a result: ${failure}`;
       writeActiveWorkerStatus(ctx, request);
       refreshWorkerUi(ctx);
       return;
@@ -723,7 +705,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
           request,
           request.mainResult ?? "",
           false,
-          `retrospective unavailable: automatic worker run ended without a result. ${failure.message}`,
+          `retrospective unavailable: automatic worker run ended without a result. ${failure}`,
         );
       } catch (error) {
         ctx.ui.notify(`Failed to report unavailable worker retrospective: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -731,16 +713,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
       return;
     }
 
-    if (failure.resolution === "error") {
-      try {
-        completeWorkerRequest(ctx, request, failure.message, true);
-      } catch (error) {
-        ctx.ui.notify(`Failed to report worker failure: ${error instanceof Error ? error.message : String(error)}`, "error");
-      }
-      return;
-    }
-
-    superviseWorker(ctx, request, `Automatic worker run ended without a result: ${failure.message}`);
+    superviseWorker(ctx, request, `Automatic worker run ended without a result: ${failure}`);
   }
 
   const unsubscribeHandoff = pi.events.on(SELF_COMPACT_HANDOFF_EVENT, (data) => {
@@ -752,7 +725,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     } else if (request.pendingCompaction === handoff.toolCallId) {
       request.pendingCompaction = undefined;
       if (handoff.state === "failed") {
-        request.pendingFailure = { message: handoff.reason, resolution: "supervise" };
+        request.pendingFailure = handoff.reason;
         // Compaction callbacks run after agent_settled; there may be no later lifecycle event.
         settleWorkerFailure(request.context, request);
       }

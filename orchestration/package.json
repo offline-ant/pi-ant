@@ -16,6 +16,7 @@
       "./worker-frame.ts",
       "./extensions/orchestration-host.ts",
       "./extensions/panels.ts",
+      "./extensions/wait.ts",
       "./extensions/fork-here.ts",
       "./extensions/delegate.ts"
     ]

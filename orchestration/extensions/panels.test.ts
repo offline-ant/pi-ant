@@ -7,6 +7,7 @@ import test, { after, before, type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import type { HostTarget } from "../host-types.ts";
+import { removePanelOutput } from "../panel-output.ts";
 import { claimName, readTarget, removeTarget, saveTarget } from "../workers.ts";
 import panelsExtension, { panelArgv } from "./panels.ts";
 
@@ -87,7 +88,10 @@ function fixture(t: TestContext) {
   } as unknown as ExtensionAPI;
   const ctx = { cwd: "/tmp", isProjectTrusted: () => false, ui: { notify: (text: string) => notifications.push(text) } } as unknown as ExtensionContext;
   panelsExtension(pi);
-  t.after(() => removeTarget(name));
+  t.after(() => {
+    removePanelOutput(readTarget(name)?.outputPath);
+    removeTarget(name);
+  });
   return {
     name, tools, commands, config, calls, notifications,
     run: (tool: string, params: Partial<Params> = {}, signal?: AbortSignal) => tools.get(tool)!.execute("call", { name, ...params }, signal, undefined, ctx),
@@ -139,7 +143,9 @@ test("neutral tools start shell panels with explicit parent and retain exited na
   assert.equal(readTarget(f.name)?.id, "%9");
   assert.ok(f.calls[0].includes("%1"));
   assert.ok(f.calls[1].includes("$1"));
-  assert.match(f.calls[1].at(-1)!, /&& exec '[^']*\/bash' '-l' '-c' 'printf ready'$/);
+  const outputPath = readTarget(f.name)?.outputPath;
+  assert.ok(outputPath && fs.existsSync(outputPath), "panels capture their raw output");
+  if (process.platform === "linux") assert.match(f.calls[1].at(-1)!, /exec script -qfec .*'pi-panel' '[^']*output\.log' .*exec '"'"'[^']*\/bash'"'"' '"'"'-l'"'"' '"'"'-c'"'"' '"'"'printf ready'"'"''$/);
   f.config.dead = true;
   f.config.output = "finished output";
   assert.match((await f.run("panel-read")).content[0].text, /finished output/);
@@ -148,6 +154,7 @@ test("neutral tools start shell panels with explicit parent and retain exited na
   assert.ok(f.notifications[0].includes(`${f.name} [tmux] shell (%9)`));
   await f.run("panel-close");
   assert.equal(readTarget(f.name), undefined);
+  assert.equal(fs.existsSync(path.dirname(outputPath)), false, "close removes the captured output");
   claimName(f.name)();
   assert.ok(f.calls.at(-1)?.includes("kill-pane"));
 });

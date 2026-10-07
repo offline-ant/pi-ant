@@ -23,6 +23,13 @@
  *   without the `| tail -<n>`.
  * - Only triggers when a preceding pipe segment contains 'build' or 'check'.
  *
+ * Sleep lint:
+ * - a local `sleep` of 2 seconds or more, or any `sleep` inside a shell loop
+ *   (polling), in bash or panel-send: always blocked. Agents should react when
+ *   something is ready with the `wait` tool instead of guessing a duration.
+ * - `sleep` inside remote/nested quoted commands and in panel-start commands
+ *   (servers and watchers may legitimately pace themselves) is ignored.
+ *
  * Covers bash, panel-start, and panel-send tool calls.
  */
 
@@ -39,6 +46,14 @@ const SHELL_COMMAND_START_KEYWORDS = new Set(["if", "then", "do", "else", "elif"
 const GREP_NOTE =
   "Use the built-in `grep` tool instead of the bash `grep` command. " +
   "It's faster, respects .gitignore, and returns structured results.";
+
+const SLEEP_NOTE =
+  "Do not sleep to wait for builds, servers, panels, or processes. Use the `wait` tool, which returns as soon as " +
+  "something is ready: wait({panel, match?, timeoutSeconds}) for panel output, its shell prompt, or exit; " +
+  "wait({file, match, timeoutSeconds}) for a log line; wait({pid, timeoutSeconds}) for a process. " +
+  "Start long-running commands with panel-start, or run them in bash with output to a log file.";
+const SLEEP_LIMIT_SECONDS = 2;
+const SLEEP_UNITS: Record<string, number> = { "": 1, s: 1, m: 60, h: 3600, d: 86400 };
 
 const RESTORE_NOTE =
   "Other agents or the user may have uncommitted work. `git restore` is always blocked.";
@@ -64,6 +79,8 @@ type ShellInvocation = {
   args: string[];
   hasEarlierInPipeline: boolean;
   hasSshEarlierInPipeline: boolean;
+  /** Inside the body or condition of a while, until, or for loop. */
+  inLoop: boolean;
   rawStart: number;
 };
 
@@ -171,6 +188,7 @@ function getLocalShellInvocations(command: string): ShellInvocation[] {
   let currentInvocation: ShellInvocation | undefined;
   let pipelineHasEarlierCommand = false;
   let pipelineHasSsh = false;
+  let loopDepth = 0;
 
   for (const token of tokenizeShell(command)) {
     if (token.type === "operator") {
@@ -191,6 +209,7 @@ function getLocalShellInvocations(command: string): ShellInvocation[] {
 
     const word = token.text;
     if (SHELL_COMMAND_START_KEYWORDS.has(word)) {
+      if (expectingCommand && (word === "while" || word === "until")) loopDepth++;
       expectingCommand = true;
       currentInvocation = undefined;
       continue;
@@ -198,11 +217,24 @@ function getLocalShellInvocations(command: string): ShellInvocation[] {
 
     if (expectingCommand) {
       if (isAssignmentWord(word)) continue;
+      if (word === "done") {
+        loopDepth = Math.max(0, loopDepth - 1);
+        expectingCommand = false;
+        continue;
+      }
+      if (word === "for") {
+        // `for name in words` lists no commands; its body follows `do`.
+        loopDepth++;
+        currentInvocation = undefined;
+        expectingCommand = false;
+        continue;
+      }
       currentInvocation = {
         name: word,
         args: [],
         hasEarlierInPipeline: pipelineHasEarlierCommand,
         hasSshEarlierInPipeline: pipelineHasSsh,
+        inLoop: loopDepth > 0,
         rawStart: token.start,
       };
       invocations.push(currentInvocation);
@@ -229,6 +261,26 @@ function hasBlockedLocalGrep(command: string): boolean {
       !invocation.hasEarlierInPipeline &&
       !invocation.hasSshEarlierInPipeline,
   );
+}
+
+/** Total duration of `sleep` arguments, or undefined when it cannot be determined statically. */
+function sleepSeconds(args: string[]): number | undefined {
+  let total = 0;
+  for (const arg of args) {
+    const match = /^(\d+(?:\.\d*)?|\.\d+)([smhd]?)$/.exec(arg);
+    if (!match) return undefined;
+    total += Number(match[1]) * SLEEP_UNITS[match[2]];
+  }
+  return total;
+}
+
+function hasBlockedSleep(command: string): boolean {
+  return getLocalShellInvocations(command).some((invocation) => {
+    if (commandBasename(invocation.name) !== "sleep" || invocation.hasSshEarlierInPipeline) return false;
+    if (invocation.inLoop) return true;
+    const seconds = sleepSeconds(invocation.args);
+    return seconds === undefined || seconds >= SLEEP_LIMIT_SECONDS;
+  });
 }
 
 function getBlockedLocalPipeTail(command: string): ShellInvocation | undefined {
@@ -287,7 +339,7 @@ export default function (pi: ExtensionAPI) {
 
   // ── Toggle command ──────────────────────────────────────────────────
   pi.registerCommand("exec-lints", {
-    description: "Toggle exec-lints on/off (git restore/checkout/stash guards, pipe-tail lint)",
+    description: "Toggle exec-lints on/off (git restore/checkout/stash guards, pipe-tail and sleep lints)",
     handler: async (_args, ctx) => {
       enabled = !enabled;
       if (ctx.hasUI) {
@@ -314,6 +366,14 @@ export default function (pi: ExtensionAPI) {
         block: true,
         reason:
           `Blocked: \`grep\` in bash command: ${command}. ${GREP_NOTE}`,
+      };
+    }
+
+    // sleep — always block in commands the agent waits on; panel-start commands run on their own.
+    if (event.toolName !== "panel-start" && hasBlockedSleep(command)) {
+      return {
+        block: true,
+        reason: `Blocked: \`sleep\` in ${event.toolName} command: ${command}. ${SLEEP_NOTE}`,
       };
     }
 

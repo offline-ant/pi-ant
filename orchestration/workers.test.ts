@@ -5,7 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { HostTarget } from "./host-types.ts";
-import { createWorkerArtifacts, writeWorkerRequest, type WorkerRequestFile } from "./worker-frame.ts";
+import { createWorkerArtifacts, writeWorkerRequest, writeWorkerStatus, type WorkerRequestFile } from "./worker-frame.ts";
 import { claimName, listTargets, readTarget, removeTarget, runEphemeralWorker, saveTarget, validateName, waitForWorkerResult } from "./workers.ts";
 
 const target = (name: string): HostTarget => ({ host: "tmux", endpoint: "/tmp/fake-orchestration", id: "%2", kind: "pi", name });
@@ -162,6 +162,80 @@ test("cancellation closes ephemeral work instead of abandoning its wait", async 
     claimName(name)();
   } finally { await fake.cleanup(); restore(); fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
 });
+
+for (const outcome of ["completion", "cancellation"] as const) {
+  test(`supervised work remains pending and owned until ${outcome}`, { timeout: 10_000 }, async () => {
+    const restore = selectFakeTmux();
+    const abort = new AbortController();
+    const paths = createWorkerArtifacts();
+    const name = `supervised-${process.pid}-${outcome}`;
+    let request: WorkerRequestFile | undefined;
+    let stateChecks = 0;
+    let supervisionObserved = false;
+    let settled = false;
+    const fake = fakeTmux((received) => {
+      request = received;
+      writeWorkerStatus(received.statusPath, {
+        id: received.id,
+        state: "supervised",
+        supervisionReason: "Automatic worker run ended without a result: 429 quota exceeded",
+      });
+    });
+    const exec = fake.pi.exec;
+    fake.pi.exec = async (command, args, options) => {
+      if (request && args[2] === "display-message" && args.at(-1) === "#{pane_dead}" && ++stateChecks === 2) {
+        assert.equal(settled, false);
+        assert.equal(supervisionObserved, true);
+        assert.equal(fake.closes.length, 0);
+        assert.ok(readTarget(name));
+        assert.throws(() => claimName(name), /already being used/);
+        assert.equal(fs.existsSync(paths.resultPath), false);
+        if (outcome === "completion") complete(request);
+        else abort.abort();
+      }
+      return exec(command, args, options);
+    };
+    writeWorkerRequest(paths, { id: name, task: "Recover manually", tools: ["read"], model: { provider: "fake", id: "fake" }, thinkingLevel: "high", resultPath: paths.resultPath, statusPath: paths.statusPath });
+    const running = runEphemeralWorker(fake.pi, {
+      id: name, name, cwd: "/tmp", sessionFile: "/tmp/fake-session.jsonl", args: [], paths, task: "Recover manually", signal: abort.signal,
+      onUpdate: (update) => {
+        const text = update.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
+        assert.match(text, /is supervised/);
+        assert.match(text, /429 quota exceeded/);
+        assert.match(text, /worker-continue/);
+        supervisionObserved = true;
+      },
+    });
+    const settlement = running.then(
+      (value) => { settled = true; return { value }; },
+      (error: unknown) => { settled = true; return { error }; },
+    );
+    try {
+      const result = await settlement;
+      if (outcome === "completion") {
+        assert.ok("value" in result);
+        assert.equal(result.value.result.result, "Recover manually");
+        assert.equal(result.value.details.status, "finished");
+      } else {
+        assert.ok("error" in result);
+        assert.ok(result.error instanceof Error);
+        assert.match(result.error.message, /abort/i);
+        assert.equal(fs.existsSync(paths.resultPath), false);
+      }
+      assert.equal(supervisionObserved, true);
+      assert.ok(stateChecks >= 2, "the parent must keep polling the live supervised worker");
+      assert.equal(fake.closes.length, 1);
+      assert.equal(readTarget(name), undefined);
+      claimName(name)();
+      assert.ok(fs.existsSync(paths.statusPath), "recovery artifacts remain available");
+    } finally {
+      abort.abort();
+      await settlement;
+      await fake.cleanup(); restore();
+      fs.rmSync(paths.artifactDir, { recursive: true, force: true });
+    }
+  });
+}
 
 test("cleanup failure retains the original protocol error, target, and recovery artifacts", async () => {
   const restore = selectFakeTmux();
