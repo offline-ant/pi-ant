@@ -148,11 +148,11 @@ function userMessageStart(text: string): unknown {
   };
 }
 
-function assistantErrorEvent(errorMessage: string): unknown {
+function assistantErrorEvent(errorMessage: string, partialText = ""): unknown {
   return {
     messages: [{
       role: "assistant",
-      content: [],
+      content: partialText ? [{ type: "text", text: partialText }] : [],
       stopReason: "error",
       errorMessage,
     }],
@@ -349,7 +349,7 @@ test("worker-continue preserves the main result while resuming an automatic retr
   }
 });
 
-test("worker-continue clears supervised failure state before retrying automatically", async () => {
+test("worker-continue clears quota failures, supervises repeated rejection and permits recovery", async () => {
   const harness = createHarness();
   const paths = createWorkerArtifacts();
   try {
@@ -362,21 +362,34 @@ test("worker-continue clears supervised failure state before retrying automatica
     });
 
     await runCommand(harness, "worker-run", paths.requestPath);
-    await emit(harness, "agent_end", assistantErrorEvent("Connection error."));
+    await emit(harness, "agent_end", assistantErrorEvent("429 quota exceeded"));
     await emit(harness, "agent_settled", {});
     assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
-    assert.match(readWorkerStatus(paths.statusPath)?.supervisionReason ?? "", /Connection error/);
+    assert.match(readWorkerStatus(paths.statusPath)?.supervisionReason ?? "", /quota exceeded/);
 
     await runCommand(harness, "worker-continue", "Retry using the existing evidence");
     const continuedStatus = readWorkerStatus(paths.statusPath);
     assert.equal(continuedStatus?.state, "running");
     assert.equal(continuedStatus?.supervisionReason, undefined);
-    await emit(harness, "agent_end", assistantErrorEvent("Pre-guidance connection error."));
+    await emit(harness, "agent_end", assistantErrorEvent("Pre-guidance quota exceeded"));
     await emit(harness, "agent_settled", {});
     assert.equal(readWorkerStatus(paths.statusPath)?.state, "running");
     assert.equal(fs.existsSync(paths.resultPath), false);
     await emit(harness, "message_start", userMessageStart("Retry using the existing evidence"));
+    await emit(harness, "agent_end", assistantErrorEvent("Both Claude accounts exhausted: quota exceeded"));
+    assert.equal(readWorkerStatus(paths.statusPath)?.state, "running");
+    await emit(harness, "agent_settled", {});
+    assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
+    assert.match(readWorkerStatus(paths.statusPath)?.supervisionReason ?? "", /Both Claude accounts exhausted/);
+    assert.equal(fs.existsSync(paths.resultPath), false);
+    assert.equal(harness.shutdowns, 0);
+
+    await runCommand(harness, "worker-continue", "Continue with the available model");
+    assert.equal(readWorkerStatus(paths.statusPath)?.supervisionReason, undefined);
+    await emit(harness, "message_start", userMessageStart("Continue with the available model"));
     await emit(harness, "agent_end", assistantEvent("Recovered automatically"));
+    await emit(harness, "agent_settled", {});
+    assert.equal(readWorkerStatus(paths.statusPath)?.state, "retrospective");
     await emit(harness, "agent_end", assistantEvent("everything was ok"));
     const result = parseWorkerResult(
       fs.readFileSync(paths.resultPath, "utf8"),
@@ -523,37 +536,39 @@ test("retryable result failure enters supervision only after retries settle", as
   }
 });
 
-test("retryable retrospective failure preserves the main result after retries settle", async () => {
-  const harness = createHarness();
-  const paths = createWorkerArtifacts();
-  try {
-    writeWorkerRequest(paths, {
-      id: "retrospective-retry-worker",
-      task: "Complete before retrospective failure",
-      tools: ["read", "bash"],
-      resultPath: paths.resultPath,
-      statusPath: paths.statusPath,
-    });
+for (const errorMessage of ["Connection error.", "429 quota exceeded"]) {
+  test(`retrospective failure preserves the main result after settlement: ${errorMessage}`, async () => {
+    const harness = createHarness();
+    const paths = createWorkerArtifacts();
+    try {
+      writeWorkerRequest(paths, {
+        id: "retrospective-retry-worker",
+        task: "Complete before retrospective failure",
+        tools: ["read", "bash"],
+        resultPath: paths.resultPath,
+        statusPath: paths.statusPath,
+      });
 
-    await runCommand(harness, "worker-run", paths.requestPath);
-    await emit(harness, "agent_end", assistantEvent("Main result"));
-    await emit(harness, "agent_end", assistantErrorEvent("Connection error."));
-    assert.equal(fs.existsSync(paths.resultPath), false);
-    await emit(harness, "agent_settled", {});
+      await runCommand(harness, "worker-run", paths.requestPath);
+      await emit(harness, "agent_end", assistantEvent("Main result"));
+      await emit(harness, "agent_end", assistantErrorEvent(errorMessage, "Partial retrospective prose"));
+      assert.equal(fs.existsSync(paths.resultPath), false);
+      await emit(harness, "agent_settled", {});
 
-    const result = parseWorkerResult(
-      fs.readFileSync(paths.resultPath, "utf8"),
-      paths.resultPath,
-      "retrospective-retry-worker",
-    );
-    assert.equal(result.result, "Main result");
-    assert.equal(result.isError, false);
-    assert.equal(result.retrospective, "retrospective unavailable: automatic worker run ended without a result. Connection error.");
-    assert.equal(harness.shutdowns, 1);
-  } finally {
-    fs.rmSync(paths.artifactDir, { recursive: true, force: true });
-  }
-});
+      const result = parseWorkerResult(
+        fs.readFileSync(paths.resultPath, "utf8"),
+        paths.resultPath,
+        "retrospective-retry-worker",
+      );
+      assert.equal(result.result, "Main result");
+      assert.equal(result.isError, false);
+      assert.equal(result.retrospective, `retrospective unavailable: automatic worker run ended without a result. ${errorMessage}`);
+      assert.equal(harness.shutdowns, 1);
+    } finally {
+      fs.rmSync(paths.artifactDir, { recursive: true, force: true });
+    }
+  });
+}
 
 test("cancelled result enters supervision after the worker run settles", async () => {
   const harness = createHarness();
@@ -614,60 +629,96 @@ test("cancelled retrospective preserves the main result", async () => {
   }
 });
 
-test("non-retryable result failure completes after automatic recovery settles", async () => {
-  const harness = createHarness();
-  const paths = createWorkerArtifacts();
-  try {
-    writeWorkerRequest(paths, {
-      id: "quota-worker",
-      task: "Fail without retry supervision",
-      tools: ["read", "bash"],
-      resultPath: paths.resultPath,
-      statusPath: paths.statusPath,
-    });
+for (const errorMessage of [
+  "429 quota exceeded",
+  "Claude five-hour subscription limit reached",
+  "401 authentication failed",
+  "Unrecognized provider failure",
+]) {
+  test(`unresolved assistant error supervises only after settlement: ${errorMessage}`, async () => {
+    const harness = createHarness();
+    const paths = createWorkerArtifacts();
+    try {
+      writeWorkerRequest(paths, {
+        id: "failed-inference-worker",
+        task: "Preserve the worker for manual recovery",
+        tools: ["read", "bash"],
+        resultPath: paths.resultPath,
+        statusPath: paths.statusPath,
+      });
 
-    await runCommand(harness, "worker-run", paths.requestPath);
-    await emit(harness, "agent_end", assistantErrorEvent("429 quota exceeded"));
-    assert.equal(fs.existsSync(paths.resultPath), false);
-    await emit(harness, "agent_settled", {});
+      await runCommand(harness, "worker-run", paths.requestPath);
+      await emit(harness, "agent_end", assistantErrorEvent(errorMessage, "Partial assistant prose"));
+      assert.equal(readWorkerStatus(paths.statusPath)?.state, "running");
+      assert.equal(harness.widgets.get("worker-frame"), undefined);
+      assert.equal(fs.existsSync(paths.resultPath), false);
+      await emit(harness, "agent_settled", {});
+      await emit(harness, "agent_settled", {});
 
-    const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "quota-worker");
-    assert.equal(result.result, "429 quota exceeded");
-    assert.equal(result.isError, true);
-    assert.equal(harness.shutdowns, 1);
-  } finally {
-    fs.rmSync(paths.artifactDir, { recursive: true, force: true });
-  }
-});
+      const status = readWorkerStatus(paths.statusPath);
+      assert.equal(status?.state, "supervised");
+      assert.equal(status?.supervisionReason, `Automatic worker run ended without a result: ${errorMessage}`);
+      assert.equal(harness.statuses.get("worker-frame"), "worker:supervised");
+      assert.match(harness.widgets.get("worker-frame")?.join("\n") ?? "", /worker-continue/);
+      assert.doesNotMatch(harness.widgets.get("worker-frame")?.join("\n") ?? "", /Partial assistant prose/);
+      assert.match(harness.notifications.at(-1) ?? "", /The worker is now supervised/);
+      assert.equal(fs.existsSync(paths.resultPath), false);
+      assert.equal(fs.existsSync(paths.resultMarkdownPath), false);
+      assert.equal(harness.shutdowns, 0);
+      assert.equal(harness.sentMessages.length, 1);
 
-test("context overflow remains pending while Pi runs automatic compaction recovery", async () => {
-  const harness = createHarness();
-  const paths = createWorkerArtifacts();
-  try {
-    writeWorkerRequest(paths, {
-      id: "overflow-worker",
-      task: "Recover after context overflow",
-      tools: ["read", "bash"],
-      resultPath: paths.resultPath,
-      statusPath: paths.statusPath,
-    });
+      await runCommand(harness, "finish-worker-now", "Stopped by the human while the provider was unavailable");
+      const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "failed-inference-worker");
+      assert.equal(result.result, "Stopped by the human while the provider was unavailable");
+      assert.equal(result.isError, false);
+      assert.equal(harness.sentMessages.length, 1);
+      assert.equal(harness.shutdowns, 1);
+    } finally {
+      fs.rmSync(paths.artifactDir, { recursive: true, force: true });
+    }
+  });
+}
 
-    await runCommand(harness, "worker-run", paths.requestPath);
-    await emit(harness, "agent_end", assistantErrorEvent("500 server error: input exceeds the context window"));
-    assert.equal(fs.existsSync(paths.resultPath), false);
+for (const errorMessage of [
+  "Connection error.",
+  "429 quota exceeded",
+  "500 server error: input exceeds the context window",
+]) {
+  test(`successful recovery before settlement preserves automatic completion: ${errorMessage}`, async () => {
+    const harness = createHarness();
+    const paths = createWorkerArtifacts();
+    try {
+      writeWorkerRequest(paths, {
+        id: "recovered-worker",
+        task: "Recover through provider failover, retry or compaction",
+        tools: ["read", "bash"],
+        resultPath: paths.resultPath,
+        statusPath: paths.statusPath,
+      });
 
-    await emit(harness, "agent_end", assistantEvent("Recovered after compaction"));
-    await emit(harness, "agent_end", assistantEvent("everything was ok"));
+      await runCommand(harness, "worker-run", paths.requestPath);
+      await emit(harness, "agent_end", assistantErrorEvent(errorMessage));
+      assert.equal(readWorkerStatus(paths.statusPath)?.state, "running");
+      assert.equal(fs.existsSync(paths.resultPath), false);
 
-    const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "overflow-worker");
-    assert.equal(result.result, "Recovered after compaction");
-    assert.equal(result.isError, false);
-    assert.equal(result.retrospective, "everything was ok");
-    assert.equal(harness.shutdowns, 1);
-  } finally {
-    fs.rmSync(paths.artifactDir, { recursive: true, force: true });
-  }
-});
+      await emit(harness, "agent_end", assistantEvent("Recovered automatically"));
+      await emit(harness, "agent_settled", {});
+      assert.equal(readWorkerStatus(paths.statusPath)?.state, "retrospective");
+      assert.equal(readWorkerStatus(paths.statusPath)?.supervisionReason, undefined);
+      assert.equal(harness.notifications.length, 0);
+      await emit(harness, "agent_end", assistantEvent("everything was ok"));
+      await emit(harness, "agent_settled", {});
+
+      const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "recovered-worker");
+      assert.equal(result.result, "Recovered automatically");
+      assert.equal(result.isError, false);
+      assert.equal(result.retrospective, "everything was ok");
+      assert.equal(harness.shutdowns, 1);
+    } finally {
+      fs.rmSync(paths.artifactDir, { recursive: true, force: true });
+    }
+  });
+}
 
 test("RPC busy prompts supervise immediately, before an assistant reply can complete the worker", async () => {
   const harness = createHarness();
@@ -795,7 +846,7 @@ test("an unfinished retrospective preserves the result when the run settles", as
   } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
 });
 
-test("exhausted overflow recovery fails only at settlement", async () => {
+test("exhausted overflow recovery enters supervision only at settlement", async () => {
   const harness = createHarness();
   const paths = createWorkerArtifacts();
   try {
@@ -804,9 +855,10 @@ test("exhausted overflow recovery fails only at settlement", async () => {
     await emit(harness, "agent_end", assistantErrorEvent("input exceeds the context window"));
     assert.equal(fs.existsSync(paths.resultPath), false);
     await emit(harness, "agent_settled", {});
-    const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "overflow-exhausted");
-    assert.equal(result.isError, true);
-    assert.match(result.result, /context window/);
+    assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
+    assert.match(readWorkerStatus(paths.statusPath)?.supervisionReason ?? "", /context window/);
+    assert.equal(fs.existsSync(paths.resultPath), false);
+    assert.equal(harness.shutdowns, 0);
   } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
 });
 

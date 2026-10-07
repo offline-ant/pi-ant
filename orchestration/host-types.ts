@@ -17,6 +17,8 @@ export interface HostTarget {
   paneId?: string;
   sessionFile?: string;
   controlPath?: string;
+  /** Raw terminal output of a shell panel, captured independently of its host. */
+  outputPath?: string;
 }
 interface StartBase {
   name: string;

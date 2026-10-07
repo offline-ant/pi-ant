@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { getAgentDir, getShellConfig, SettingsManager, truncateTail, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -5,6 +6,7 @@ import { Type } from "typebox";
 import { resolveCwd } from "../context.ts";
 import { getHost, hostForTarget } from "../host.ts";
 import type { Host, HostTarget } from "../host-types.ts";
+import { capturedArgv, createPanelOutput, promptReporting, promptWarning, recordInput, removePanelOutput } from "../panel-output.ts";
 import { renderToolCall } from "../tool-call.ts";
 import { claimName, listTargets, readTarget, removeTarget, saveTarget, validateName } from "../workers.ts";
 
@@ -58,10 +60,12 @@ async function readPanel(host: Host, target: HostTarget, lines: number, signal?:
 }
 
 export default function panelsExtension(pi: ExtensionAPI): void {
+  /** Prompt-mark warnings already shown to the user, once per panel and running program. */
+  const notified = new Set<string>();
   pi.registerTool({
     name: "panel-start",
     label: "Start Panel",
-    description: "Start a long-running command in a named terminal panel: a server, watcher, or interactive program. The command runs in a bash login shell, the same shell as the bash tool. The name and output stay reserved until panel-close, including after the process exits. Use built-in bash for ordinary foreground commands.",
+    description: "Start a long-running command in a named terminal panel: a server, watcher, or interactive program. The command runs in a bash login shell, the same shell as the bash tool. The name and output stay reserved until panel-close, including after the process exits. Use built-in bash for ordinary foreground commands. Use wait, never sleep, to react when its output, shell prompt, or exit is ready.",
     parameters: Type.Object({
       name: nameSchema,
       command: Type.String({ minLength: 1 }),
@@ -81,10 +85,18 @@ export default function panelsExtension(pi: ExtensionAPI): void {
             throw new Error(`'${name}' already exists. Close it explicitly before reusing its name.`);
           }
           removeTarget(name);
+          removePanelOutput(existing.outputPath);
         }
-        // Hosts close their own half-created targets, so a failed start leaves nothing to clean up here.
+        // Hosts close their own half-created targets; only the output capture is ours to remove.
         const host = getHost(pi);
-        const target = await host.start({ kind: "shell", name, cwd, argv: panelArgv(params.command, ctx), placement: "worker", parent: host.parent() }, signal);
+        const output = createPanelOutput();
+        let target: HostTarget;
+        try {
+          target = { ...await host.start({ kind: "shell", name, cwd, argv: capturedArgv(panelArgv(params.command, ctx), output.log), placement: "worker", parent: host.parent() }, signal), outputPath: output.log };
+        } catch (error) {
+          removePanelOutput(output.log);
+          throw error;
+        }
         saveTarget(target);
         return {
           content: [{ type: "text", text: `Started: ${identity(target)} in ${cwd}` }],
@@ -114,24 +126,37 @@ export default function panelsExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "panel-send",
     label: "Send to Panel",
-    description: "Type a line of text or press native keys such as ctrl+c and Escape in a panel, then return its output. Supply exactly one of text or keys. This is terminal input, not draft-safe Pi prompt submission.",
+    description: "Type a line of text or press native keys such as ctrl+c and Escape in a panel, then return its output. Supply exactly one of text or keys. This is terminal input, not draft-safe Pi prompt submission. Text sent where no shell reports its prompt (OSC 133), such as ssh to a host without shell integration, returns a warning: wait without match cannot see it finish.",
     parameters: Type.Object({
       name: nameSchema,
       text: Type.Optional(Type.String()),
       keys: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1 })),
     }),
     renderCall: (args) => renderToolCall("panel-send", args),
-    async execute(_id, params, signal) {
+    async execute(_id, params, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
       if ((params.text === undefined) === (params.keys === undefined)) throw new Error("Supply exactly one of text or keys.");
       const target = requirePanel(params.name);
       const host = hostForTarget(pi, target);
+      const input = target.outputPath ? recordInput(target.outputPath) : undefined;
       await host.send(target, params.text !== undefined
         ? { kind: "text", text: params.text, enter: true }
         : { kind: "keys", keys: params.keys! }, signal);
       await delay(SETTLE_MS, undefined, { signal });
       const output = await readPanel(host, target, DEFAULT_LINES, signal);
-      return { content: [{ type: "text", text: `${identity(target)}\n${output}` }], details: { target } };
+      // Keys usually interrupt or answer a running program; only typed lines are commands to wait for.
+      let warning: string | undefined;
+      if (params.text !== undefined && input !== undefined && target.outputPath) {
+        const log = target.outputPath;
+        const reporting = promptReporting(log, fs.statSync(log).size, input);
+        warning = promptWarning(reporting);
+        const key = `${log}:${reporting.kind}:${reporting.kind === "program" ? reporting.mark : ""}`;
+        if (warning && ctx.hasUI && !notified.has(key)) {
+          notified.add(key);
+          ctx.ui.notify(`Panel ${target.name}: ${warning}`, "warning");
+        }
+      }
+      return { content: [{ type: "text", text: `${identity(target)}\n${output}${warning ? `\n\n${warning}` : ""}` }], details: { target } };
     },
   });
 
@@ -148,6 +173,7 @@ export default function panelsExtension(pi: ExtensionAPI): void {
         const target = requirePanel(params.name);
         // Once close starts, finish cleanup even if the tool is cancelled.
         await hostForTarget(pi, target).close(target);
+        removePanelOutput(target.outputPath);
         removeTarget(params.name);
         return { content: [{ type: "text", text: `Closed ${identity(target)}.` }], details: { target } };
       } finally { release(); }

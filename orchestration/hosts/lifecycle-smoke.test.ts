@@ -157,7 +157,7 @@ for (const kind of ["tmux", "herdr", "emacs"] as const) {
       const supervised = request("[hold] supervised");
       const supervisedWorker = await run(supervised);
       await until(() => traces(directory).some((entry) => entry.prompt?.endsWith("[hold] supervised")), "slow worker start");
-      if (kind === "emacs") await emacsInput(endpoint, supervisedWorker.id, "human takeover", true);
+      if (kind === "emacs") await host.send(supervisedWorker, { kind: "prompt", text: "human takeover" });
       else await host.send(supervisedWorker, { kind: "text", text: "human takeover", enter: true });
       await until(() => readWorkerStatus(supervised.paths.statusPath)?.state === "supervised", "human takeover before completion");
       assert.equal(fs.existsSync(supervised.paths.resultPath), false);
@@ -182,6 +182,33 @@ for (const kind of ["tmux", "herdr", "emacs"] as const) {
       const retry = request("[retry-once] retried");
       assert.equal((await wait(retry, await run(retry))).result.result, "fixture result: [retry-once] retried");
       assert.equal(traces(directory).filter((entry) => entry.event === "request" && entry.prompt?.endsWith("[retry-once] retried")).length, 2);
+
+      // Terminal quota rejection must preserve the live worker for explicit recovery.
+      for (const recovery of ["continue", "finish"] as const) {
+        const beforeQuota = traces(directory).length;
+        const quota = request(`[quota] ${recovery}`);
+        const quotaWorker = await run(quota);
+        await until(() => readWorkerStatus(quota.paths.statusPath)?.state === "supervised"
+          && traces(directory).slice(beforeQuota).some((entry) => entry.event === "settled"), "quota rejection settles into supervision");
+        assert.equal(await nativeHost.state(quotaWorker), "running", "quota rejection must not close the worker");
+        assert.equal(fs.existsSync(quota.paths.resultPath), false, "quota rejection must not publish a failed result");
+        assert.equal(fs.existsSync(quota.paths.resultMarkdownPath), false);
+        assert.match(readWorkerStatus(quota.paths.statusPath)?.supervisionReason ?? "", /429 quota exceeded: fixture subscription usage limit/);
+        assert.doesNotMatch(readWorkerStatus(quota.paths.statusPath)?.supervisionReason ?? "", /fixture partial response/);
+        assert.equal(traces(directory).slice(beforeQuota).filter((entry) => entry.event === "request").length, 1,
+          "quota exhaustion must not automatically retry or start a retrospective");
+
+        const guidance = `quota ${recovery} recovery`;
+        await host.send(quotaWorker, { kind: "prompt", text: recovery === "continue"
+          ? `/worker-continue ${guidance}` : `/finish-worker-now ${guidance}` });
+        const quotaResult = (await wait(quota, quotaWorker)).result;
+        assert.equal(quotaResult.isError, false);
+        assert.equal(quotaResult.result, recovery === "continue" ? `fixture result: ${guidance}` : guidance);
+        assert.equal(quotaResult.retrospective, recovery === "continue"
+          ? "fixture retrospective" : "retrospective bypassed by /finish-worker-now.");
+        assert.equal(traces(directory).slice(beforeQuota).filter((entry) => entry.event === "request").length,
+          recovery === "continue" ? 3 : 1, "finishing a quota-blocked worker must not require another model request");
+      }
 
       const beforeOverflow = traces(directory).length;
       const overflow = request("[overflow-once] recovered");
@@ -229,7 +256,7 @@ for (const kind of ["tmux", "herdr", "emacs"] as const) {
       target = undefined;
       assert.notEqual(await nativeHost.state(cancelledWorker), "running", "a closed native target must not remain running");
       assert.equal(fs.existsSync(cancelled.paths.resultPath), false);
-      t.diagnostic("Passed: matching result + separate retrospective, self-closing workers, per-request model/thinking/tool selection, draft-safe prompt submission, busy human takeover, submit/continue/finish recovery, real retry and default overflow-compaction settlement, retrospective failure, cancelled wait and owned close.");
+      t.diagnostic("Passed: matching result + separate retrospective, self-closing workers, per-request model/thinking/tool selection, draft-safe prompt submission, busy human takeover, submit/continue/finish recovery, quota rejection retains live supervision with explicit continue/finish recovery, real retry and default overflow-compaction settlement, retrospective failure, cancelled wait and owned close.");
     } catch (error) {
       t.diagnostic(`Fixture trace: ${JSON.stringify(traces(directory))}`);
       if (host && target) t.diagnostic(`Native output: ${await host.read(target, 80).catch(String)}`);

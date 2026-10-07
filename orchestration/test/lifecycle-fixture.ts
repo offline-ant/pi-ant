@@ -36,6 +36,11 @@ export default function lifecycleFixture(pi: ExtensionAPI): void {
       while (!fs.existsSync(path.join(directory, "release-compaction"))) await delay(25, undefined, { signal: options?.signal });
       return fauxAssistantMessage("## Goal\nContinue the active fixture task after overflow recovery.");
     }
+    if (prompt.split("\n").at(-1)?.startsWith("[quota]")) {
+      return fauxAssistantMessage("fixture partial response before quota rejection", {
+        stopReason: "error", errorMessage: "429 quota exceeded: fixture subscription usage limit",
+      });
+    }
     if (prompt.includes("[overflow-once]") && !overflowPrompts.has(prompt)) {
       overflowPrompts.add(prompt);
       return fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long: 200001 tokens > 200000 maximum" });
