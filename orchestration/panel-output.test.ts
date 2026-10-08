@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
-import { capturedArgv, lastPromptMark, plainLine, promptReporting, promptWarning, readOutput } from "./panel-output.ts";
+import { capturedArgv, commandOutput, lastPromptMark, plainLine, promptReporting, promptWarning, readOutput, scanOutput } from "./panel-output.ts";
 
 function logWith(content: string | Buffer): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "panel-output-test-"));
@@ -76,4 +76,31 @@ test("input is classified by whether a shell reporting its prompt receives it", 
   const bash = promptReporting(logWith(`${prompt}\x1b]133;C\x07`), Buffer.byteLength(`${prompt}\x1b]133;C\x07`));
   assert.equal(bash.kind === "program" && bash.command, undefined);
   assert.match(promptWarning(bash)!, /Input goes to a running command/);
+});
+
+test("a typed line ends at the first command end after it, and its output starts after the echoed line", () => {
+  const prompt = "\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07";
+  const typed = `${prompt}echo one; false\r\n\x1b[?2004l\r\x1b]133;C\x07one\r\n\x1b[31mtwo\x1b[m\r\n`;
+  const content = `${typed}\x1b]133;D;1\x07\x1b]133;A\x07$ \x1b]133;B\x07`;
+  const log = logWith(content);
+  const input = Buffer.byteLength(prompt);
+  const scan = scanOutput(log, input, undefined, input);
+  const end = Buffer.byteLength(`${typed}\x1b]133;D;1\x07`);
+  assert.deepEqual(scan.found, { outcome: { kind: "prompt", status: 1 }, end });
+  assert.equal(commandOutput(log, input, end), "one\ntwo");
+
+  const empty = `${prompt}\r\n\x1b]133;A\x07$ `;
+  const emptyEnd = Buffer.byteLength(empty) - 2;
+  assert.deepEqual(scanOutput(logWith(empty), input, undefined, input).found, { outcome: { kind: "prompt" }, end: emptyEnd });
+  assert.equal(commandOutput(logWith(empty), input, emptyEnd), "", "an empty line has no output");
+});
+
+test("command output keeps the last bytes of very long output, starting at a whole line", () => {
+  const start = "\x1b]133;C\x07";
+  const lines = Array.from({ length: 600_000 }, (_, index) => `line ${index}`).join("\r\n");
+  const content = `${start}${lines}\r\n\x1b]133;D;0\x07`;
+  const output = commandOutput(logWith(content), 0, Buffer.byteLength(content)).split("\n");
+  assert.match(output[0], /^line \d+$/);
+  assert.equal(output.at(-1), "line 599999");
+  assert.ok(output.length < 600_000, "only the bounded tail is read");
 });

@@ -147,7 +147,9 @@ implicit property of `read`.
 Panels do not wait for readiness. Matching startup text is guesswork that
 blocks the caller and reports a healthy panel as a failure; a real probe from
 `bash` answers the actual question. `panel-read` covers inspection, and
-`panel-send` answers with the output that followed its input.
+`panel-send` answers with the output that followed its input: for a line typed at
+an OSC 133-marked shell prompt, the command's exact captured output and exit
+status when it ends within a short grace, otherwise the screen.
 
 ## Shared worker protocol
 

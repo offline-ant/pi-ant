@@ -96,8 +96,17 @@ another Pi child. Shell panels do not consume worker nesting depth.
 - `panel-read({name, lines?})`: bounded snapshot, default 500 lines, maximum
   2,000 lines/50KB. Reads may overlap; no incremental/lossless-log promise.
 - `panel-send({name, text?, keys?})`: exactly one of a literal line of text or
-  terminal keys such as `ctrl+c` and `Escape`; text always presses Enter. The
-  result is the panel's output shortly after the input. This is terminal input,
+  terminal keys such as `ctrl+c` and `Escape`; text always presses Enter. Text
+  typed at a shell idle at its prompt with OSC 133 marks (see `wait` below; also
+  through ssh) is followed in the capture log for up to 5 seconds. If its command
+  ends (`D;<status>`, or a prompt start `A`, such as a nested shell's first
+  prompt), the result states the exit status and holds the command's whole plain
+  output from its command start `C` to its end, without the echoed line or next
+  prompt, bounded to its last 2,000 lines/50KB; the wait cursor moves past it. A
+  longer command returns "still running" with the panel screen, leaving the cursor
+  at the input so `wait` sees everything it printed. A panel whose command exits
+  meanwhile says so. Keys, and text sent to a running program or a panel without
+  marks, return the screen after a 250 ms settle. This is terminal input,
   not draft-safe Pi prompt delivery. When typed text goes where no shell reports
   its prompt (see `wait` below), the result ends with a warning naming the
   receiving program (for example `ssh -tt mac-wire`) and how to fix it; the user

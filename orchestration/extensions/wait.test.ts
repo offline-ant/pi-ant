@@ -20,6 +20,8 @@ function has(command: string): boolean {
 const fishMajor = has("fish") ? Number(/(\d+)\./.exec(execFileSync("fish", ["--version"], { encoding: "utf8" }))?.[1] ?? 0) : 0;
 /** Herdr runs the same tests natively when explicitly requested from inside a Herdr pane. */
 const herdr = process.env.PI_NATIVE_HOST_SMOKE === "1" && process.env.HERDR_ENV === "1" && !!process.env.HERDR_SOCKET_PATH && !!process.env.HERDR_PANE_ID;
+/** A short panel-send grace keeps tests of running commands quick. */
+const GRACE_MS = 1500;
 const skip = process.platform !== "linux" || !has("script") || (!herdr && !has("tmux")) ? "requires Linux, tmux or Herdr, and util-linux script" : false;
 
 interface Result { content: Array<{ type: string; text: string }>; details: { outcome?: string; status?: number; line?: string } }
@@ -53,7 +55,7 @@ before(async () => {
   fs.mkdirSync(agentDir);
   if (herdr) {
     Object.assign(process.env, { PI_ORCHESTRATION_HOST: "herdr", PI_ORCHESTRATION_ENDPOINT: endpoint, PI_CODING_AGENT_DIR: agentDir });
-    panelsExtension(pi);
+    panelsExtension(pi, GRACE_MS);
     waitExtension(pi);
     return;
   }
@@ -62,7 +64,7 @@ before(async () => {
   Object.assign(process.env, { PI_ORCHESTRATION_HOST: "tmux", PI_ORCHESTRATION_ENDPOINT: endpoint, TMUX_PANE: pane, PI_CODING_AGENT_DIR: agentDir });
   delete process.env.TMUX;
   delete process.env.HERDR_ENV;
-  panelsExtension(pi);
+  panelsExtension(pi, GRACE_MS);
   waitExtension(pi);
 });
 after(async () => {
@@ -92,27 +94,31 @@ test("bash with the integration file reports finished commands, their status, an
   const idle = await call("wait", { panel: name, timeoutSeconds: 20 });
   assert.equal(idle.details.outcome, "prompt", "an idle shell answers immediately");
 
-  await call("panel-send", { name, text: "sleep 1; echo slept" });
+  const quick = await call("panel-send", { name, text: "echo one; echo two; (exit 4)" });
+  assert.deepEqual([quick.details.outcome, quick.details.status], ["finished", 4], quick.content[0].text);
+  assert.match(quick.content[0].text, /\nBack at the shell prompt after \d+\.\ds \(exit status 4\)\. Output:\none\ntwo$/, "only the command's own output, without its echoed line or the next prompt");
+  const after = await call("wait", { panel: name, timeoutSeconds: 20 });
+  assert.deepEqual([after.details.outcome, after.details.status], ["prompt", 4], "a later wait answers immediately");
+
+  const slow = await call("panel-send", { name, text: "sleep 2.5; echo slept" });
+  assert.equal(slow.details.outcome, "running");
+  assert.match(slow.content[0].text, /Still running after \d+\.\ds; use wait to follow it/);
   const startedAt = Date.now();
   const finished = await call("wait", { panel: name, timeoutSeconds: 20 });
-  assert.equal(finished.details.outcome, "prompt");
-  assert.equal(finished.details.status, 0);
+  assert.deepEqual([finished.details.outcome, finished.details.status], ["prompt", 0]);
   assert.ok(Date.now() - startedAt >= 500, "the wait lasted until the command finished");
   assert.match(finished.content[0].text, /slept/);
 
-  await call("panel-send", { name, text: "(exit 4)" });
-  assert.equal((await call("wait", { panel: name, timeoutSeconds: 20 })).details.status, 4);
-
-  await call("panel-send", { name, text: "for i in 1 2 3; do echo step-$i; sleep 0.4; done" });
+  await call("panel-send", { name, text: "for i in 1 2 3; do echo step-$i; sleep 0.8; done" });
   const first = await call("wait", { panel: name, match: "^step-2$", timeoutSeconds: 20 });
   assert.deepEqual([first.details.outcome, first.details.line], ["matched", "step-2"]);
   const second = await call("wait", { panel: name, match: "^step-", timeoutSeconds: 20 });
   assert.equal(second.details.line, "step-3", "a later wait continues after the previous match");
   assert.equal((await call("wait", { panel: name, timeoutSeconds: 20 })).details.outcome, "prompt");
 
-  await call("panel-send", { name, text: "sleep 30" });
-  await delay(300);
-  await call("panel-send", { name, keys: ["ctrl+c"] });
+  assert.equal((await call("panel-send", { name, text: "sleep 30" })).details.outcome, "running");
+  const keys = await call("panel-send", { name, keys: ["ctrl+c"] });
+  assert.equal(keys.details.outcome, undefined, "keys return the screen without following a command");
   const interrupted = await call("wait", { panel: name, timeoutSeconds: 20 });
   assert.equal(interrupted.details.outcome, "prompt");
   assert.equal(interrupted.details.status, 130);
@@ -121,17 +127,34 @@ test("bash with the integration file reports finished commands, their status, an
 test("fish reports its prompt without configuration", { skip: skip || (fishMajor < 4 && "requires fish 4+"), timeout: 60_000 }, async () => {
   const name = await panel("exec fish --no-config -i");
   await prompted(name);
-  await call("panel-send", { name, text: "sleep 0.5; false" });
+  const sent = await call("panel-send", { name, text: "sleep 0.5; false" });
+  assert.deepEqual([sent.details.outcome, sent.details.status], ["finished", 1], sent.content[0].text);
   const finished = await call("wait", { panel: name, timeoutSeconds: 20 });
   assert.deepEqual([finished.details.outcome, finished.details.status], ["prompt", 1]);
+  const empty = await call("panel-send", { name, text: "" });
+  assert.deepEqual([empty.details.outcome, empty.details.status], ["finished", undefined], "an empty line ends at the next prompt");
+  assert.match(empty.content[0].text, /Back at the shell prompt after \d+\.\ds\. Output:\n\(no output\)$/);
+});
+
+test("a nested marked shell, as over ssh, ends the line that starts it and reports its own commands", { skip: skip || (fishMajor < 4 && "requires fish 4+"), timeout: 60_000 }, async () => {
+  const name = await panel("exec fish --no-config -i");
+  await prompted(name);
+  const login = await call("panel-send", { name, text: `bash --rcfile ${SHELL_INTEGRATION.bash} -i` });
+  assert.equal(login.details.outcome, "finished", "the nested shell's first prompt ends the line");
+  const inner = await call("panel-send", { name, text: "printf 'α\\nβ\\n'" });
+  assert.deepEqual([inner.details.outcome, inner.details.status], ["finished", 0], inner.content[0].text);
+  assert.match(inner.content[0].text, /Output:\nα\nβ$/);
+  assert.doesNotMatch(inner.content[0].text, /Warning:/);
+  const logout = await call("panel-send", { name, text: "exit 3" });
+  assert.deepEqual([logout.details.outcome, logout.details.status], ["finished", 3], "the outer shell reports the nested shell's exit");
 });
 
 test("text sent into an unmarked program warns once to the user and in every result, until marks return", { skip: skip || (fishMajor < 4 && "requires fish 4+"), timeout: 60_000 }, async () => {
   const name = await panel("exec fish --no-config -i");
   await prompted(name);
   const inner = await call("panel-send", { name, text: "bash --norc --noprofile -i" });
+  assert.equal(inner.details.outcome, "running", "an unmarked program never reports its prompt");
   assert.doesNotMatch(inner.content[0].text, /Warning:/, "the marked shell received the command");
-  await delay(300);
   for (const text of ["echo one", "echo two"]) {
     const sent = await call("panel-send", { name, text });
     assert.match(sent.content[0].text, /Warning: Input goes to `bash --norc --noprofile -i`, which shows no OSC 133 prompt marks/);
@@ -141,7 +164,9 @@ test("text sent into an unmarked program warns once to the user and in every res
   assert.doesNotMatch(keys.content[0].text, /Warning:/, "keys are not commands to wait for");
   await call("panel-send", { name, text: "exit" });
   assert.equal((await call("wait", { panel: name, timeoutSeconds: 20 })).details.outcome, "prompt");
-  assert.doesNotMatch((await call("panel-send", { name, text: "true" })).content[0].text, /Warning:/);
+  const back = await call("panel-send", { name, text: "true" });
+  assert.equal(back.details.outcome, "finished");
+  assert.doesNotMatch(back.content[0].text, /Warning:/);
 });
 
 test("command panels end on exit with status and match output printed before the wait", { skip, timeout: 60_000 }, async () => {
