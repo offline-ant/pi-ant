@@ -6,20 +6,18 @@ import { truncateTail, type ExtensionAPI } from "@earendil-works/pi-coding-agent
 import { Type } from "typebox";
 import { hostForTarget } from "../host.ts";
 import type { HostTarget } from "../host-types.ts";
-import { lastPromptMark, promptReporting, promptWarning, readCursor, readOutput, SHELL_INTEGRATION_HINT, writeCursor, type OutputLine, type PromptMark } from "../panel-output.ts";
+import { lastPromptMark, promptReporting, promptWarning, readCursor, readOutput, scanOutput, SHELL_INTEGRATION_HINT, writeCursor, type PromptMark, type ScanOutcome } from "../panel-output.ts";
 import { renderToolCall } from "../tool-call.ts";
 import { readTarget, validateName } from "../workers.ts";
 
 const POLL_MS = 500;
 const STATE_POLL_MS = 2000;
 const PROGRESS_MS = 5000;
-const READ_LIMIT = 4 * 1024 * 1024;
 const TAIL_LINES = 40;
 const MAX_TIMEOUT_SECONDS = 24 * 60 * 60;
 
 type Outcome =
-  | { kind: "matched"; line: string }
-  | { kind: "prompt"; status?: number }
+  | ScanOutcome
   | { kind: "exited"; status?: number }
   | { kind: "timeout" };
 
@@ -62,38 +60,11 @@ class Tail {
   }
 }
 
-/**
- * Examine log output from `offset`, returning the first match or completed
- * shell command after `promptAfter`, and the next unexamined offset.
- */
+/** Scan output from `offset`, keeping the examined lines in `tail`. */
 function scan(log: string, offset: number, regex: RegExp | undefined, promptAfter: number | undefined, tail: Tail) {
-  const size = fileSize(log);
-  if (size < offset) offset = 0;
-  const end = Math.min(size, offset + READ_LIMIT);
-  const chunk = readOutput(log, offset, end);
-  // A single line longer than the read limit is examined in pieces.
-  if (chunk.next === offset && end < size && chunk.partial) {
-    chunk.lines.push(chunk.partial);
-    chunk.partial = undefined;
-    chunk.next = end;
-  }
-  const candidates: OutputLine[] = [...chunk.lines, ...(chunk.partial ? [chunk.partial] : [])];
-  let found: { outcome: Outcome; end: number } | undefined;
-  if (regex) {
-    const line = candidates.find((candidate) => regex.test(candidate.text));
-    if (line) found = { outcome: { kind: "matched", line: line.text }, end: line.end };
-  }
-  if (promptAfter !== undefined) {
-    const marks = chunk.marks.filter((mark) => mark.end > promptAfter);
-    const done = marks.find((mark) => mark.kind === "A" || mark.kind === "D");
-    if (done && (!found || done.end < found.end)) {
-      // Shells report D;status before the next prompt's A; an A alone (empty command line) has no status.
-      found = { outcome: { kind: "prompt", ...(done.status !== undefined ? { status: done.status } : {}) }, end: done.end };
-    }
-  }
-  for (const line of chunk.lines) if (!found || line.end <= found.end) tail.push(line.text);
-  if (found?.outcome.kind === "matched") tail.push(found.outcome.line);
-  return { found, next: found ? Math.max(found.end, chunk.next) : chunk.next, more: end < size, exitStatus: chunk.exitStatus };
+  const result = scanOutput(log, offset, regex, promptAfter);
+  for (const line of result.lines) tail.push(line);
+  return result;
 }
 
 function describe(outcome: Outcome, source: string): string {

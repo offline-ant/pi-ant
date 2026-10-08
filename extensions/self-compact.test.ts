@@ -133,7 +133,7 @@ test("the default tool display shows the full handoff note during streaming and 
   const context: Parameters<typeof tool.renderCall>[2] & { args: { note?: string } } = {
     args: {}, toolCallId: "display-test", invalidate() {}, lastComponent: undefined, state: {},
     cwd: process.cwd(), executionStarted: false, argsComplete: false, isPartial: true,
-    expanded: false, showImages: false, isError: false,
+    expanded: false, showImages: false, isError: false, durationMs: undefined, outputPad: 0,
   };
   const note = 'Goal: keep "quotes" and literal \\n.\n\n  Preserve indentation.\n' +
     Array.from({ length: 25 }, (_, i) => `Completed step ${i}.`).join("\n") +

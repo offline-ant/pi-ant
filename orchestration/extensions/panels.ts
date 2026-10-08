@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import { resolveCwd } from "../context.ts";
 import { getHost, hostForTarget } from "../host.ts";
 import type { Host, HostTarget } from "../host-types.ts";
-import { capturedArgv, createPanelOutput, promptReporting, promptWarning, recordInput, removePanelOutput } from "../panel-output.ts";
+import { capturedArgv, commandOutput, createPanelOutput, promptReporting, promptWarning, readCursor, recordInput, removePanelOutput, scanOutput, writeCursor } from "../panel-output.ts";
 import { renderToolCall } from "../tool-call.ts";
 import { claimName, listTargets, readTarget, removeTarget, saveTarget, validateName } from "../workers.ts";
 
@@ -15,6 +15,9 @@ const MAX_BYTES = 50 * 1024;
 const DEFAULT_LINES = 500;
 /** Terminals answer input asynchronously; settle briefly so the returned snapshot shows the effect. */
 const SETTLE_MS = 250;
+/** How long a line typed at a shell prompt may run before panel-send returns without its result. */
+const COMMAND_GRACE_MS = 5000;
+const POLL_MS = 100;
 const nameSchema = Type.String({ description: "Registered panel name, not a native pane or buffer ID." });
 
 function identity(target: HostTarget): string {
@@ -42,6 +45,31 @@ function requirePanel(name: string): HostTarget {
   return target;
 }
 
+type CommandProgress =
+  | { kind: "finished"; end: number; status?: number }
+  | { kind: "exited"; status?: number }
+  | { kind: "running" };
+
+/** Follow a line typed at a shell prompt until its command ends, the panel's command exits, or the grace runs out. */
+async function followCommand(log: string, input: number, graceMs: number, signal?: AbortSignal): Promise<CommandProgress> {
+  const deadline = Date.now() + graceMs;
+  let offset = input;
+  for (;;) {
+    const scan = scanOutput(log, offset, undefined, input);
+    offset = scan.next;
+    if (scan.found?.outcome.kind === "prompt") {
+      const { status } = scan.found.outcome;
+      return { kind: "finished", end: scan.found.end, ...(status !== undefined ? { status } : {}) };
+    }
+    if (scan.exitStatus !== undefined) return { kind: "exited", status: scan.exitStatus };
+    if (scan.more) continue;
+    if (Date.now() >= deadline) return { kind: "running" };
+    await delay(POLL_MS, undefined, { signal });
+  }
+}
+
+const seconds = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
+
 /** Native surfaces vanish when their server, window, or pane is destroyed elsewhere. */
 async function isMissing(host: Host, target: HostTarget, signal?: AbortSignal): Promise<boolean> {
   return await host.state(target, signal).catch(() => undefined) === "missing";
@@ -59,7 +87,7 @@ async function readPanel(host: Host, target: HostTarget, lines: number, signal?:
   }
 }
 
-export default function panelsExtension(pi: ExtensionAPI): void {
+export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMAND_GRACE_MS): void {
   /** Prompt-mark warnings already shown to the user, once per panel and running program. */
   const notified = new Set<string>();
   pi.registerTool({
@@ -126,7 +154,9 @@ export default function panelsExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "panel-send",
     label: "Send to Panel",
-    description: "Type a line of text or press native keys such as ctrl+c and Escape in a panel, then return its output. Supply exactly one of text or keys. This is terminal input, not draft-safe Pi prompt submission. Text sent where no shell reports its prompt (OSC 133), such as ssh to a host without shell integration, returns a warning: wait without match cannot see it finish.",
+    description: "Type a line of text or press native keys such as ctrl+c and Escape in a panel, then return its output. Supply exactly one of text or keys. "
+      + `Text typed at a shell prompt that emits OSC 133 prompt marks (also over ssh) returns that command's exit status and full output when it finishes within ${commandGraceMs / 1000} seconds; a longer command returns the panel screen, so follow it with wait. `
+      + "Keys and input to a running program return the screen shortly afterwards. This is terminal input, not draft-safe Pi prompt submission. Text sent where no shell reports its prompt, such as ssh to a host without shell integration, returns a warning: wait without match cannot see it finish.",
     parameters: Type.Object({
       name: nameSchema,
       text: Type.Optional(Type.String()),
@@ -138,16 +168,40 @@ export default function panelsExtension(pi: ExtensionAPI): void {
       if ((params.text === undefined) === (params.keys === undefined)) throw new Error("Supply exactly one of text or keys.");
       const target = requirePanel(params.name);
       const host = hostForTarget(pi, target);
-      const input = target.outputPath ? recordInput(target.outputPath) : undefined;
+      const log = target.outputPath;
+      // Only a shell idle at its prompt reports when a typed line is done.
+      const atPrompt = params.text !== undefined && log !== undefined && promptReporting(log, fs.statSync(log).size).kind === "prompt";
+      const input = log ? recordInput(log) : undefined;
+      const sentAt = Date.now();
       await host.send(target, params.text !== undefined
         ? { kind: "text", text: params.text, enter: true }
         : { kind: "keys", keys: params.keys! }, signal);
-      await delay(SETTLE_MS, undefined, { signal });
+      let note = "";
+      let outcome: CommandProgress["kind"] | undefined;
+      if (atPrompt && log !== undefined && input !== undefined) {
+        const progress = await followCommand(log, input, commandGraceMs, signal);
+        const elapsed = seconds(Date.now() - sentAt);
+        if (progress.kind === "finished") {
+          // The result already shows this output; later waits continue after it.
+          writeCursor(log, { ...readCursor(log), cursor: progress.end });
+          // A nested shell's first prompt (ssh) also ends the line that started it.
+          const summary = `Back at the shell prompt after ${elapsed}${progress.status !== undefined ? ` (exit status ${progress.status})` : ""}. Output:`;
+          return {
+            content: [{ type: "text", text: `${identity(target)}\n${summary}\n${snapshot(commandOutput(log, input, progress.end))}` }],
+            details: { target, outcome: progress.kind, ...(progress.status !== undefined ? { status: progress.status } : {}) },
+          };
+        }
+        outcome = progress.kind;
+        note = progress.kind === "exited"
+          ? `The panel's command exited${progress.status !== undefined ? ` with status ${progress.status}` : ""}.`
+          : `Still running after ${elapsed}; use wait to follow it. Panel screen:`;
+      } else {
+        await delay(SETTLE_MS, undefined, { signal });
+      }
       const output = await readPanel(host, target, DEFAULT_LINES, signal);
       // Keys usually interrupt or answer a running program; only typed lines are commands to wait for.
       let warning: string | undefined;
-      if (params.text !== undefined && input !== undefined && target.outputPath) {
-        const log = target.outputPath;
+      if (params.text !== undefined && input !== undefined && log !== undefined) {
         const reporting = promptReporting(log, fs.statSync(log).size, input);
         warning = promptWarning(reporting);
         const key = `${log}:${reporting.kind}:${reporting.kind === "program" ? reporting.mark : ""}`;
@@ -156,7 +210,10 @@ export default function panelsExtension(pi: ExtensionAPI): void {
           ctx.ui.notify(`Panel ${target.name}: ${warning}`, "warning");
         }
       }
-      return { content: [{ type: "text", text: `${identity(target)}\n${output}${warning ? `\n\n${warning}` : ""}` }], details: { target } };
+      return {
+        content: [{ type: "text", text: `${identity(target)}\n${note ? `${note}\n` : ""}${output}${warning ? `\n\n${warning}` : ""}` }],
+        details: { target, ...(outcome ? { outcome } : {}) },
+      };
     },
   });
 

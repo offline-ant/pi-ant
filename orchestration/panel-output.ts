@@ -29,6 +29,8 @@ const TRAILER_RE = /^Script done on .*\[COMMAND_EXIT_CODE="(\d+)"\]$/;
 const MARK_RE = /\x1b\]133;([ABCD])([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 const SCAN_CHUNK = 1024 * 1024;
 const MAX_BACKWARD_SCAN = 64 * 1024 * 1024;
+/** Bound on log bytes examined per forward scan, and on command output read for a result. */
+const READ_LIMIT = 4 * 1024 * 1024;
 
 export interface PanelOutput {
   dir: string;
@@ -196,6 +198,81 @@ export function readOutput(log: string, start: number, end: number): OutputChunk
     chunk.lines.push({ text, end: start + lineEnd });
   }
   return chunk;
+}
+
+export type ScanOutcome =
+  | { kind: "matched"; line: string }
+  | { kind: "prompt"; status?: number };
+
+export interface OutputScan {
+  /** The first match, or command end after `promptAfter`, and the offset just after it. */
+  found?: { outcome: ScanOutcome; end: number };
+  /** Plain lines examined, through the found line or mark. */
+  lines: string[];
+  /** Next unexamined offset. */
+  next: number;
+  /** Whether output remains beyond this bounded read. */
+  more: boolean;
+  /** Exit status recorded by `script` when the captured command ended. */
+  exitStatus?: number;
+}
+
+/**
+ * Examine log output from `offset` for the first line matching `match` or, after
+ * `promptAfter`, the first command end: `D;<status>`, or a prompt start `A` without
+ * one (fish's empty command line, or a nested shell's first prompt, such as over ssh).
+ */
+export function scanOutput(log: string, offset: number, match: RegExp | undefined, promptAfter: number | undefined): OutputScan {
+  const size = fs.statSync(log).size;
+  if (size < offset) offset = 0;
+  const end = Math.min(size, offset + READ_LIMIT);
+  const chunk = readOutput(log, offset, end);
+  // A single line longer than the read limit is examined in pieces.
+  if (chunk.next === offset && end < size && chunk.partial) {
+    chunk.lines.push(chunk.partial);
+    chunk.partial = undefined;
+    chunk.next = end;
+  }
+  const candidates: OutputLine[] = [...chunk.lines, ...(chunk.partial ? [chunk.partial] : [])];
+  let found: OutputScan["found"];
+  if (match) {
+    const line = candidates.find((candidate) => match.test(candidate.text));
+    if (line) found = { outcome: { kind: "matched", line: line.text }, end: line.end };
+  }
+  if (promptAfter !== undefined) {
+    const done = chunk.marks.find((mark) => mark.end > promptAfter && (mark.kind === "A" || mark.kind === "D"));
+    if (done && (!found || done.end < found.end)) {
+      found = { outcome: { kind: "prompt", ...(done.status !== undefined ? { status: done.status } : {}) }, end: done.end };
+    }
+  }
+  const stop = found?.end;
+  const lines = stop !== undefined ? candidates.filter((line) => line.end <= stop) : chunk.lines;
+  return {
+    ...(found ? { found } : {}),
+    lines: lines.map((line) => line.text),
+    next: found ? Math.max(found.end, chunk.next) : chunk.next,
+    more: end < size,
+    ...(chunk.exitStatus !== undefined ? { exitStatus: chunk.exitStatus } : {}),
+  };
+}
+
+/**
+ * Plain output of a command typed at offset `input` that ended at `end`: from its
+ * command start `C` (omitting the echoed command line), bounded to the last bytes.
+ */
+export function commandOutput(log: string, input: number, end: number): string {
+  const start = Math.max(input, end - READ_LIMIT);
+  const buffer = Buffer.alloc(end - start);
+  const fd = fs.openSync(log, "r");
+  try { fs.readSync(fd, buffer, 0, buffer.length, start); } finally { fs.closeSync(fd); }
+  const commandStart = marksIn(buffer, start).find((mark) => mark.kind === "C");
+  // Without a command start the line was empty, unless the read cut it off.
+  const body = commandStart ? buffer.subarray(commandStart.end - start)
+    : start > input ? buffer.subarray(buffer.indexOf(0x0a) + 1)
+    : Buffer.alloc(0);
+  const lines = body.toString("utf8").split("\n").map(plainLine);
+  while (lines.length && lines.at(-1)!.trim() === "") lines.pop();
+  return lines.join("\n");
 }
 
 /** Per-panel wait progress, shared by every session using the panel. */
