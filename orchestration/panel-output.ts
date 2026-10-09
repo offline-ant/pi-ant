@@ -117,7 +117,7 @@ export function lastPromptMark(log: string, end: number): PromptMark | undefined
  * - `prompt`: marks followed the input, or the last mark before it left a shell at its prompt.
  * - `program`: the input went to a command a marked shell started (`C` with no later mark),
  *   such as ssh to a host whose shell emits no marks, a REPL, or an unmarked nested shell.
- * - `none`: the panel has shown no marks at all.
+ * - `none`: the panel has shown no marks at all, so input goes to its unmarked command.
  * Without `input`, the panel's current state is classified.
  */
 export type PromptReporting =
@@ -136,10 +136,10 @@ export function promptReporting(log: string, end: number, input = end): PromptRe
 export function promptWarning(reporting: PromptReporting): string | undefined {
   if (reporting.kind === "prompt") return undefined;
   const consequence = "so wait without match cannot tell when input is done";
-  const where = reporting.kind === "program"
-    ? `Input goes to ${reporting.command ? `\`${reporting.command}\`` : "a running command"}, which shows no OSC 133 prompt marks (for example ssh to a host without shell integration), ${consequence}; it ends only when that command exits.`
-    : `No OSC 133 prompt marks have appeared in this panel yet, ${consequence}; it ends only when the panel's command exits.`;
-  return `Warning: ${where} Use wait with match, or install shell integration where that shell runs: ${SHELL_INTEGRATION_HINT}`;
+  if (reporting.kind === "program") {
+    return `Warning: Input goes to ${reporting.command ? `\`${reporting.command}\`` : "a running command"}, which shows no OSC 133 prompt marks (for example ssh to a host without shell integration), ${consequence}; it ends only when that command exits. Use wait with match, or install shell integration where that shell runs: ${SHELL_INTEGRATION_HINT}`;
+  }
+  return `Warning: Input goes to the panel's command, which has shown no OSC 133 prompt marks, ${consequence}; it ends only when that command exits. Use wait with match. If that command is a shell, it can report its prompt with shell integration: ${SHELL_INTEGRATION_HINT}`;
 }
 
 /** Terminal output as plain text: control sequences removed, carriage-return overwrites resolved. */
@@ -198,6 +198,12 @@ export function readOutput(log: string, start: number, end: number): OutputChunk
     chunk.lines.push({ text, end: start + lineEnd });
   }
   return chunk;
+}
+
+/** Exit status that `script` recorded when the panel's command ended, if it has. */
+export function capturedExitStatus(log: string): number | undefined {
+  const size = fs.statSync(log).size;
+  return readOutput(log, Math.max(0, size - 512), size).exitStatus;
 }
 
 export type ScanOutcome =

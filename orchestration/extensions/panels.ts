@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import { resolveCwd } from "../context.ts";
 import { getHost, hostForTarget } from "../host.ts";
 import type { Host, HostTarget } from "../host-types.ts";
-import { capturedArgv, commandOutput, createPanelOutput, promptReporting, promptWarning, readCursor, recordInput, removePanelOutput, scanOutput, writeCursor } from "../panel-output.ts";
+import { capturedArgv, capturedExitStatus, commandOutput, createPanelOutput, promptReporting, promptWarning, readCursor, recordInput, removePanelOutput, scanOutput, SHELL_INTEGRATION, writeCursor } from "../panel-output.ts";
 import { renderToolCall } from "../tool-call.ts";
 import { claimName, listTargets, readTarget, removeTarget, saveTarget, validateName } from "../workers.ts";
 
@@ -75,16 +75,31 @@ async function isMissing(host: Host, target: HostTarget, signal?: AbortSignal): 
   return await host.state(target, signal).catch(() => undefined) === "missing";
 }
 
+const missingError = (target: HostTarget): Error =>
+  new Error(`Panel '${target.name}' no longer exists on ${target.host}. Close it and start a new one.`);
+
 async function readPanel(host: Host, target: HostTarget, lines: number, signal?: AbortSignal): Promise<string> {
   try {
     return snapshot(await host.read(target, lines, signal), lines);
   } catch (error) {
     signal?.throwIfAborted();
-    if (await isMissing(host, target, signal)) {
-      throw new Error(`Panel '${target.name}' no longer exists on ${target.host}. Close it and start a new one.`);
-    }
+    if (await isMissing(host, target, signal)) throw missingError(target);
     throw error;
   }
+}
+
+/**
+ * Input to a shell panel needs its command running: once it exits, a tmux pane is
+ * dead and Herdr's pane holds its own uncaptured shell, so input reaches nothing useful.
+ */
+async function requireRunning(host: Host, target: HostTarget, signal?: AbortSignal): Promise<void> {
+  if (target.kind !== "shell") return;
+  const state = await host.state(target, signal);
+  if (state === "missing") throw missingError(target);
+  if (state === "running") return;
+  const status = target.outputPath ? capturedExitStatus(target.outputPath) : undefined;
+  throw new Error(`The command of panel '${target.name}' exited${status !== undefined ? ` with status ${status}` : ""}; its output is no longer captured and input would reach nothing useful. `
+    + "Read its final output with panel-read, then close it and start a new panel. To run several commands in sequence, start a panel whose command is an interactive shell and send each command to it.");
 }
 
 export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMAND_GRACE_MS): void {
@@ -93,7 +108,10 @@ export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMA
   pi.registerTool({
     name: "panel-start",
     label: "Start Panel",
-    description: "Start a long-running command in a named terminal panel: a server, watcher, or interactive program. The command runs in a bash login shell, the same shell as the bash tool. The name and output stay reserved until panel-close, including after the process exits. Use built-in bash for ordinary foreground commands. Use wait, never sleep, to react when its output, shell prompt, or exit is ready.",
+    description: "Start a long-running command in a named terminal panel: a server, watcher, or interactive program. The command runs in the bash tool's shell (a login shell when that is bash). "
+      + "After the command exits, its output stays readable and its name reserved until panel-close, but the panel accepts no more input. "
+      + `To run several commands in sequence, start an interactive shell that reports its prompt with OSC 133 marks (\`fish\` 4+, or \`bash --rcfile ${SHELL_INTEGRATION.bash} -i\`) and send each command with panel-send, which then returns its output and exit status; wait also works. `
+      + "Use built-in bash for ordinary foreground commands. Use wait, never sleep, to react when its output, shell prompt, or exit is ready.",
     parameters: Type.Object({
       name: nameSchema,
       command: Type.String({ minLength: 1 }),
@@ -146,15 +164,21 @@ export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMA
       signal?.throwIfAborted();
       const target = requirePanel(params.name);
       const lines = params.lines ?? DEFAULT_LINES;
-      const output = await readPanel(hostForTarget(pi, target), target, lines, signal);
-      return { content: [{ type: "text", text: `${identity(target)}\n${output}` }], details: { target } };
+      const host = hostForTarget(pi, target);
+      const output = await readPanel(host, target, lines, signal);
+      // A shell idle at its prompt is not running a command worth waiting for.
+      const running = target.kind === "shell" && target.outputPath !== undefined
+        && promptReporting(target.outputPath, fs.statSync(target.outputPath).size).kind !== "prompt"
+        && await host.state(target, signal) === "running";
+      const hint = running ? "\n\nThe command is still running; use wait to react to new output, its prompt, or exit instead of reading again." : "";
+      return { content: [{ type: "text", text: `${identity(target)}\n${output}${hint}` }], details: { target } };
     },
   });
 
   pi.registerTool({
     name: "panel-send",
     label: "Send to Panel",
-    description: "Type a line of text or press native keys such as ctrl+c and Escape in a panel, then return its output. Supply exactly one of text or keys. "
+    description: "Type a line of text or press native keys such as ctrl+c and Escape in a panel, then return its output. Supply exactly one of text or keys. A panel whose command has exited accepts no input. "
       + `Text typed at a shell prompt that emits OSC 133 prompt marks (also over ssh) returns that command's exit status and full output when it finishes within ${commandGraceMs / 1000} seconds; a longer command returns the panel screen, so follow it with wait. `
       + "Keys and input to a running program return the screen shortly afterwards. This is terminal input, not draft-safe Pi prompt submission. Text sent where no shell reports its prompt, such as ssh to a host without shell integration, returns a warning: wait without match cannot see it finish.",
     parameters: Type.Object({
@@ -168,6 +192,7 @@ export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMA
       if ((params.text === undefined) === (params.keys === undefined)) throw new Error("Supply exactly one of text or keys.");
       const target = requirePanel(params.name);
       const host = hostForTarget(pi, target);
+      await requireRunning(host, target, signal);
       const log = target.outputPath;
       // Only a shell idle at its prompt reports when a typed line is done.
       const atPrompt = params.text !== undefined && log !== undefined && promptReporting(log, fs.statSync(log).size).kind === "prompt";

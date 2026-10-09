@@ -6,7 +6,7 @@ import { truncateTail, type ExtensionAPI } from "@earendil-works/pi-coding-agent
 import { Type } from "typebox";
 import { hostForTarget } from "../host.ts";
 import type { HostTarget } from "../host-types.ts";
-import { lastPromptMark, promptReporting, promptWarning, readCursor, readOutput, scanOutput, SHELL_INTEGRATION_HINT, writeCursor, type PromptMark, type ScanOutcome } from "../panel-output.ts";
+import { capturedExitStatus, lastPromptMark, promptReporting, promptWarning, readCursor, scanOutput, SHELL_INTEGRATION_HINT, writeCursor, type PromptMark, type ScanOutcome } from "../panel-output.ts";
 import { renderToolCall } from "../tool-call.ts";
 import { readTarget, validateName } from "../workers.ts";
 
@@ -129,7 +129,7 @@ export default function waitExtension(pi: ExtensionAPI): void {
       } else if (params.file !== undefined) {
         if (!regex) throw new Error("A file wait needs match: a file has no prompt or exit to wait for.");
         log = path.resolve(ctx.cwd, params.file.replace(/^~(?=\/|$)/, os.homedir()));
-        if (!fs.existsSync(log)) throw new Error(`File does not exist: ${log}`);
+        if (!fs.existsSync(log)) throw new Error(`File does not exist: ${log}. If a panel or process creates it, wait on that panel (output, prompt, or exit) or pid instead.`);
         source = log;
         offset = fileSize(log);
       } else {
@@ -146,7 +146,7 @@ export default function waitExtension(pi: ExtensionAPI): void {
         const size = fileSize(log);
         offset = cursor.cursor <= size ? cursor.cursor : 0;
         const idle = idleAtPrompt(log, size, cursor.input);
-        if (state !== "running") outcome = { kind: "exited", status: readOutput(log, Math.max(0, size - 512), size).exitStatus };
+        if (state !== "running") outcome = { kind: "exited", status: capturedExitStatus(log) };
         else if (idle) outcome = { kind: "prompt", ...(idle.status !== undefined ? { status: idle.status } : {}) };
         else promptAfter = size;
       }

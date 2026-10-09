@@ -58,7 +58,7 @@ export function prepareFreshSession(cwd: string, purpose: string, data: unknown)
 export function prepareDelegateSession(
   request: { tool: EphemeralWorkerTool; folder?: string; task: string },
   ctx: ExtensionContext,
-  toolCallId: string,
+  call: { toolName: string; toolCallId: string },
   runtime: { model: { provider: string; id: string }; thinkingLevel: string },
 ): { cwd: string; sessionFile: string; args: string[] } {
   if (request.tool === "do" && request.folder !== undefined) {
@@ -73,7 +73,7 @@ export function prepareDelegateSession(
   }
   const parentSession = ctx.sessionManager.getSessionFile();
   if (!parentSession || !fs.existsSync(parentSession)) throw new Error("Current session is not persisted; cannot start do.");
-  const leafId = getPreToolCallLeafId(ctx.sessionManager, request.tool, toolCallId);
+  const leafId = getPreToolCallLeafId(ctx.sessionManager, call.toolName, call.toolCallId);
   const forked = SessionManager.forkFrom(parentSession, cwd);
   const sessionFile = forked.getSessionFile();
   if (!sessionFile) throw new Error("Could not create a persistent session for do.");

@@ -5,7 +5,7 @@ import * as path from "node:path";
 import * as http from "node:http";
 import test, { type TestContext } from "node:test";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools, InMemoryCredentialStore, type JsonObject, type Tool } from "@earendil-works/pi-ai";
-import { createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type AgentToolResult } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, createCodemodeExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, type AgentSession, type AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { EphemeralWorkerTool } from "../delegate-policy.ts";
 import type { WorkerRequestFile } from "../worker-frame.ts";
@@ -21,7 +21,7 @@ function hasAlt(tool: Tool): boolean {
 }
 
 /** Real Pi SDK, registrations and worker protocol; no browser process or paid inference. */
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, codemodeOnly = false) {
   // Each fixture represents a new Pi process; host selection is process-pinned.
   const hostStateKey = Symbol.for("pi-ant.orchestration.host");
   const globals = globalThis as typeof globalThis & { [hostStateKey]?: unknown };
@@ -44,6 +44,8 @@ async function fixture(t: TestContext) {
   const launches: Launch[] = [];
   const requests: WorkerRequestFile[] = [];
   const closed: string[] = [];
+  let resolveClosure: (() => void) | undefined;
+  const closure = new Promise<void>((resolve) => { resolveClosure = resolve; });
   const serverErrors: unknown[] = [];
   let failureResult: string | undefined;
   let startupError: string | undefined;
@@ -78,6 +80,7 @@ async function fixture(t: TestContext) {
         result = { success: true };
       } else if (request.method === "DELETE") {
         closed.push(request.url!);
+        resolveClosure?.();
       } else {
         result = { entries: [] };
       }
@@ -115,7 +118,7 @@ async function fixture(t: TestContext) {
   const loader = new DefaultResourceLoader({
     cwd: directory, agentDir, settingsManager, noExtensions: true, noSkills: true,
     noContextFiles: true, noPromptTemplates: true, noThemes: true,
-    extensionFactories: [(pi) => {
+    extensionFactories: [createCodemodeExtension({ mode: codemodeOnly ? "only" : "on", models: false }), (pi) => {
       pi.registerProvider(first.provider);
       pi.registerProvider(second.provider);
       pi.registerProvider(third.provider);
@@ -124,13 +127,21 @@ async function fixture(t: TestContext) {
         parameters: Type.Object({}),
         async execute() { throw new Error("Fixture self_compact must not execute"); },
       });
+      pi.registerTool({
+        name: "nested_worker", label: "Nested worker", description: "Fixture nested delegation.",
+        parameters: Type.Object({ task: Type.String() }),
+        async execute(_id, args, signal, _update, ctx) {
+          const outcome = await ctx.executeTool("do", args, { signal });
+          return { ...outcome.result, isError: outcome.isError };
+        },
+      });
       delegateExtension(pi);
     }],
   });
   await loader.reload();
   const created = await createAgentSession({
     cwd: directory, agentDir, modelRuntime, settingsManager, resourceLoader: loader,
-    model: first.getModel(), thinkingLevel: "high", tools: ["read", ...toolNames, "self_compact"],
+    model: first.getModel(), thinkingLevel: "high", tools: ["read", ...toolNames, "self_compact", "codemode", "nested_worker"],
     sessionManager: SessionManager.create(directory, path.join(directory, "sessions")),
   });
   session = created.session;
@@ -160,7 +171,7 @@ async function fixture(t: TestContext) {
     return tool;
   };
   const enable = () => current.prompt("/delegate-alt delegate-first/same-id delegate-second/same-id");
-  async function call(name: EphemeralWorkerTool, params: JsonObject) {
+  async function call(name: string, params: JsonObject) {
     const provider = [first, second, third].find((candidate) => candidate.provider.id === current.model?.provider);
     assert.ok(provider);
     provider.setResponses([
@@ -215,7 +226,9 @@ async function fixture(t: TestContext) {
     return result;
   }
   return {
-    directory, config, current, first, second, third, requests, launches, definition, enable, call, run, updates, closed,
+    directory, config, codemodeConfig: path.join(agentDir, "codemode-delegate.json"),
+    current, first, second, third, requests, launches, definition, enable, call, run, updates, closed,
+    whenClosed: closure,
     failResult: (message: string) => { failureResult = message; },
     failStartup: (message: string) => { startupError = message; },
     setPercent: (value: number) => { percent = value; },
@@ -226,6 +239,102 @@ async function fixture(t: TestContext) {
     release: () => { release?.(); hold = undefined; requestArrived = undefined; },
   };
 }
+
+for (const only of [false, true]) {
+  test(`codemode delegation opt-in executes with correct context (only=${only})`, { timeout: 30_000 }, async (t) => {
+    const f = await fixture(t, only);
+    const selected = ["read", "codemode", ...toolNames, "nested_worker"];
+    f.current.setActiveToolsByName(selected);
+    assert.equal(fs.existsSync(f.codemodeConfig), false);
+    for (const name of toolNames) assert.equal(f.definition(name).exposure, "model-only");
+    const script = (name: string) => ({ code: `return await tools.${name}({task: "Nested assignment"});` });
+    const blocked = await f.call("codemode", script("do"));
+    assert.match(JSON.stringify(blocked.content), /tools.do does not exist/);
+    assert.equal(f.launches.length, 0);
+    f.current.setActiveToolsByName(["codemode", "fresh_look"]);
+    await f.current.prompt("/codemode-delegate");
+    assert.deepEqual(f.current.getActiveToolNames(), ["codemode", "fresh_look"]);
+    assert.ok(!f.current.getCallableToolNames().includes("do"), "toggle must not activate disabled workers");
+    f.current.setActiveToolsByName(selected);
+    for (const name of toolNames) assert.equal(f.definition(name).exposure, undefined);
+    assert.deepEqual(JSON.parse(fs.readFileSync(f.codemodeConfig, "utf8")), { enabled: true });
+    assert.equal(fs.statSync(f.codemodeConfig).mode & 0o777, 0o600);
+    assert.deepEqual(f.current.getActiveToolNames(), selected);
+    await f.enable();
+    for (const name of toolNames) assert.ok(hasAlt(f.definition(name)), "alternate registration composes with exposure");
+    for (const name of [...toolNames, "nested_worker"]) {
+      const result = await f.call("codemode", script(name));
+      assert.match(JSON.stringify(result.content), /fixture result/);
+      assert.match(JSON.stringify(result.content), /fixture retrospective/);
+      const child = SessionManager.open(f.launches.at(-1)!.sessionFile);
+      const messages = child.getBranch().flatMap((entry) => entry.type === "message" ? [entry.message] : []);
+      if (name === "do" || name === "nested_worker") {
+        const last = messages.at(-1);
+        assert.equal(last?.role, "user", "fork is before the outer codemode assistant message");
+        assert.match(JSON.stringify(last), /Run the fixture codemode/);
+        assert.ok(messages.some((message) => message.role === "toolResult"), "previous conversation survives");
+      } else assert.deepEqual(messages, [], "standalone workers remain blank");
+    }
+    const count = f.launches.length;
+    const parallel = await f.call("codemode", { code: 'return await Promise.all([tools.do({task:"First"}), tools.do({task:"Second"})]);' });
+    assert.match(JSON.stringify(parallel.content), /fixture result/);
+    assert.equal(f.launches.length, count + 2);
+    const branches = f.launches.slice(-2).map((launch) => SessionManager.open(launch.sessionFile).getBranch()
+      .filter((entry) => entry.type === "message"));
+    assert.deepEqual(branches[0], branches[1], "parallel workers fork from the same pre-script conversation");
+    await f.current.reload();
+    f.current.setActiveToolsByName(selected);
+    assert.match(JSON.stringify((await f.call("codemode", script("do"))).content), /fixture result/);
+    await f.current.prompt("/codemode-delegate off");
+    assert.equal(fs.existsSync(f.codemodeConfig), false);
+    assert.deepEqual(f.current.getActiveToolNames(), selected);
+    assert.match(JSON.stringify((await f.call("codemode", script("do"))).content), /tools.do does not exist/);
+    // A direct call remains available even in codemode-only mode after disabling.
+    f.updates.length = 0;
+    await f.run("do", { task: "Direct worker still available" });
+    fs.writeFileSync(f.codemodeConfig, JSON.stringify({ enabled: true }));
+    assert.match(JSON.stringify((await f.call("codemode", script("do"))).content), /fixture result/);
+    fs.rmSync(f.codemodeConfig);
+    assert.match(JSON.stringify((await f.call("codemode", script("do"))).content), /tools.do does not exist/);
+  });
+}
+
+test("codemode cancellation reaches owned workers and retains their session files", { timeout: 30_000 }, async (t) => {
+  const f = await fixture(t);
+  await f.current.prompt("/codemode-delegate on");
+  f.current.setActiveToolsByName(["codemode", "do"]);
+  const arrived = f.holdNext();
+  const pending = f.call("codemode", { code: 'return await tools.do({task:"Wait for cancellation"});' });
+  await arrived;
+  const file = f.launches.at(-1)!.sessionFile;
+  const saved = fs.readFileSync(file, "utf8");
+  await f.current.abort();
+  await pending;
+  // Pi may settle codemode before a nested call's asynchronous cleanup completes.
+  await f.whenClosed;
+  f.release();
+  assert.equal(f.closed.length, 1);
+  assert.equal(fs.readFileSync(file, "utf8"), saved);
+});
+
+test("nested do warning survives reload and script failures retain recovery", { timeout: 30_000 }, async (t) => {
+  const f = await fixture(t);
+  await f.current.prompt("/codemode-delegate on");
+  f.current.setActiveToolsByName(["codemode", "do", "delegate"]);
+  f.setPercent(95);
+  const script = { code: 'return await tools.do({task:"Check warning"});' };
+  const beforeWarning = f.current.sessionManager.getLeafId()!;
+  assert.match(JSON.stringify((await f.call("codemode", script)).content), /Retry do/);
+  assert.equal(f.launches.length, 0);
+  await f.current.reload();
+  assert.match(JSON.stringify((await f.call("codemode", script)).content), /fixture result/);
+  await f.current.navigateTree(beforeWarning, { summarize: false });
+  assert.match(JSON.stringify((await f.call("codemode", script)).content), /Retry do/);
+  f.failStartup("nested startup rejected");
+  const result = await f.call("codemode", script);
+  assert.match(JSON.stringify(result.content), /nested startup rejected/);
+  assert.ok(JSON.stringify(result.content).includes(workerResumeCommand(f.launches.at(-1)!.sessionFile)));
+});
 
 test("split schemas have no context flag, fresh_look is opt-in, and alternate re-registration preserves selections", { timeout: 30_000 }, async (t) => {
   const f = await fixture(t);

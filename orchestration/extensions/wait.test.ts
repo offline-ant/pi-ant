@@ -181,6 +181,9 @@ test("command panels end on exit with status and match output printed before the
   assert.match(exited.content[0].text, /done/);
   const again = await call("wait", { panel: build, timeoutSeconds: 20 });
   assert.equal(again.details.outcome, "exited", "an exited panel answers immediately");
+  await assert.rejects(call("panel-send", { name: build, text: "echo again" }), /The command of panel '[^']+' exited with status 3; its output is no longer captured/);
+  await assert.rejects(call("panel-send", { name: build, keys: ["ctrl+c"] }), /exited with status 3/);
+  assert.match((await call("panel-read", { name: build })).content[0].text, /done/, "an exited panel's output stays readable");
 });
 
 test("shells without prompt marks time out with an explanation instead of guessing", { skip, timeout: 60_000 }, async () => {
@@ -189,7 +192,7 @@ test("shells without prompt marks time out with an explanation instead of guessi
   await call("panel-send", { name, text: "echo hi" });
   const result = await call("wait", { panel: name, timeoutSeconds: 1 });
   assert.equal(result.details.outcome, "timeout");
-  assert.match(result.content[0].text, /No OSC 133 prompt marks have appeared/);
+  assert.match(result.content[0].text, /Input goes to the panel's command, which has shown no OSC 133 prompt marks/);
   assert.match(result.content[0].text, new RegExp(SHELL_INTEGRATION.bash.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
@@ -200,7 +203,7 @@ test("files match appended lines only, and pids end on exit", { skip, timeout: 3
   const matched = await call("wait", { file: "build.log", match: "^FAIL", timeoutSeconds: 10 });
   assert.deepEqual([matched.details.outcome, matched.details.line], ["matched", "FAIL new run"]);
   await assert.rejects(call("wait", { file, timeoutSeconds: 1 }), /needs match/);
-  await assert.rejects(call("wait", { file: "missing.log", match: "x", timeoutSeconds: 1 }), /does not exist/);
+  await assert.rejects(call("wait", { file: "missing.log", match: "x", timeoutSeconds: 1 }), /does not exist: .*missing\.log\. If a panel or process creates it, wait on that panel .* or pid instead/);
   await assert.rejects(call("wait", { file, match: "(", timeoutSeconds: 1 }), /Invalid match regex/);
   await assert.rejects(call("wait", { file, pid: 1, match: "x", timeoutSeconds: 1 }), /exactly one/);
 
