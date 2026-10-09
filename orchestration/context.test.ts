@@ -30,7 +30,7 @@ test("inherited sessions fork before sibling calls without changing parent branc
     const runtime = { model: { provider: "other", id: "alternate" }, thinkingLevel: "high" };
     for (const id of ["a", "b"]) {
       assert.equal(getPreToolCallLeafId(session, "do", id), before);
-      const child = prepareDelegateSession({ tool: "do", task: `Task ${id}` }, ctx, id, runtime);
+      const child = prepareDelegateSession({ tool: "do", task: `Task ${id}` }, ctx, { toolName: "do", toolCallId: id }, runtime);
       childFiles.push(child.sessionFile);
       const fork = SessionManager.open(child.sessionFile);
       assert.equal(fork.getBranch().filter((entry) => entry.type === "message").length, 1);
@@ -40,16 +40,16 @@ test("inherited sessions fork before sibling calls without changing parent branc
     assert.equal(fs.readFileSync(parentFile, "utf8"), original);
     assert.equal(session.getLeafId(), parentLeaf);
     assert.throws(() => getPreToolCallLeafId(session, "do", "missing"), /refusing to fork/);
-    assert.throws(() => prepareDelegateSession({ tool: "do", task: "Task" }, ctx, "standalone", runtime), /refusing to fork/);
-    assert.throws(() => prepareDelegateSession({ tool: "do", task: "Task", folder: "/tmp" }, ctx, "a", runtime), /cannot change|folder/);
+    assert.throws(() => prepareDelegateSession({ tool: "do", task: "Task" }, ctx, { toolName: "do", toolCallId: "standalone" }, runtime), /refusing to fork/);
+    assert.throws(() => prepareDelegateSession({ tool: "do", task: "Task", folder: "/tmp" }, ctx, { toolName: "do", toolCallId: "a" }, runtime), /cannot change|folder/);
     const otherFolder = path.join(root, "other-project");
     fs.mkdirSync(otherFolder);
-    const project = prepareDelegateSession({ tool: "delegate", task: "Task", folder: otherFolder }, ctx, "standalone", runtime);
+    const project = prepareDelegateSession({ tool: "delegate", task: "Task", folder: otherFolder }, ctx, { toolName: "delegate", toolCallId: "standalone" }, runtime);
     childFiles.push(project.sessionFile);
     assert.equal(SessionManager.open(project.sessionFile).getBranch().filter((entry) => entry.type === "message").length, 0);
     assert.equal(project.cwd, otherFolder);
     assert.equal(SessionManager.open(project.sessionFile).getCwd(), otherFolder);
-    const clean = prepareDelegateSession({ tool: "fresh_look", task: "Task", folder: otherFolder }, ctx, "a", runtime);
+    const clean = prepareDelegateSession({ tool: "fresh_look", task: "Task", folder: otherFolder }, ctx, { toolName: "fresh_look", toolCallId: "a" }, runtime);
     childFiles.push(clean.sessionFile);
     assert.equal(clean.cwd, otherFolder);
     assert.equal(SessionManager.open(clean.sessionFile).getBranch().filter((entry) => entry.type === "message").length, 0);

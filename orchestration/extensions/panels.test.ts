@@ -148,7 +148,13 @@ test("neutral tools start shell panels with explicit parent and retain exited na
   if (process.platform === "linux") assert.match(f.calls[1].at(-1)!, /exec script -qfec .*'pi-panel' '[^']*output\.log' .*exec '"'"'[^']*\/bash'"'"' '"'"'-l'"'"' '"'"'-c'"'"' '"'"'printf ready'"'"''$/);
   f.config.dead = true;
   f.config.output = "finished output";
-  assert.match((await f.run("panel-read")).content[0].text, /finished output/);
+  const finished = (await f.run("panel-read")).content[0].text;
+  assert.match(finished, /finished output$/, "an exited command needs no wait hint");
+  fs.appendFileSync(outputPath, 'Script done on 2026-10-08 [COMMAND_EXIT_CODE="101"]\n');
+  const sends = f.calls.filter((args) => args[2] === "send-keys").length;
+  await assert.rejects(f.run("panel-send", { text: "again" }), /The command of panel '[^']+' exited with status 101; .*start a panel whose command is an interactive shell/);
+  await assert.rejects(f.run("panel-send", { keys: ["ctrl+c"] }), /exited with status 101/);
+  assert.equal(f.calls.filter((args) => args[2] === "send-keys").length, sends, "no input reaches an exited panel");
   await assert.rejects(f.run("panel-start", { command: "other" }), /Close it explicitly/);
   await f.list();
   assert.ok(f.notifications[0].includes(`${f.name} [tmux] shell (%9)`));
@@ -165,6 +171,7 @@ test("vanished native surfaces report clearly and release their name to the next
   f.config.missing = true;
   f.config.failRead = true;
   await assert.rejects(f.run("panel-read"), new RegExp(`Panel '${f.name}' no longer exists on tmux`));
+  await assert.rejects(f.run("panel-send", { text: "x" }), new RegExp(`Panel '${f.name}' no longer exists on tmux`));
   f.config.failRead = false;
   const restarted = await f.run("panel-start", { command: "server" });
   assert.match(restarted.content[0].text, /^Started:/);
@@ -210,7 +217,7 @@ test("reads are repeatable bounded snapshots and truncate oversized Unicode outp
   const first = await f.run("panel-read", { lines: 2 });
   const second = await f.run("panel-read", { lines: 2 });
   assert.deepEqual(first, second);
-  assert.match(first.content[0].text, /\ntwo\nthree$/);
+  assert.match(first.content[0].text, /\ntwo\nthree\n\nThe command is still running; use wait /);
   f.config.output = "漢字".repeat(15000);
   const huge = await f.run("panel-read", { lines: 2000 });
   assert.ok(Buffer.byteLength(huge.content[0].text) < 52_000);
@@ -218,8 +225,8 @@ test("reads are repeatable bounded snapshots and truncate oversized Unicode outp
   assert.ok(!huge.content[0].text.includes("�"));
   f.config.output = Array.from({ length: 3000 }, (_, index) => `line ${index}`).join("\n");
   const manyLines = await f.run("panel-read", { lines: 2000 });
-  assert.equal(manyLines.content[0].text.split("\n").length, 2001); // Identity plus snapshot.
-  assert.match(manyLines.content[0].text, /line 2999$/);
+  assert.equal(manyLines.content[0].text.split("\n").length, 2003); // Identity, snapshot, and wait hint.
+  assert.match(manyLines.content[0].text, /line 2999\n\n/);
 });
 
 test("send submits literal lines or keys, validates combinations, and answers with the resulting output", async (t) => {

@@ -93,10 +93,18 @@ another Pi child. Shell panels do not consume worker nesting depth.
   hosts execute that argv under `script`, a PTY relay that also appends raw
   terminal output to a private capture log for `wait`. Panel-start itself has no
   readiness wait; use `wait`. Panels need a terminal host; the web host refuses them.
+  To run several commands in sequence, start an interactive shell that emits OSC
+  133 marks (`fish` 4+, or bash with the integration) and send each command with
+  `panel-send`.
 - `panel-read({name, lines?})`: bounded snapshot, default 500 lines, maximum
-  2,000 lines/50KB. Reads may overlap; no incremental/lossless-log promise.
+  2,000 lines/50KB. Reads may overlap; no incremental/lossless-log promise. While
+  a shell panel's command is running (not a shell idle at its prompt), the result
+  ends with a hint to use `wait` instead of reading again.
 - `panel-send({name, text?, keys?})`: exactly one of a literal line of text or
-  terminal keys such as `ctrl+c` and `Escape`; text always presses Enter. Text
+  terminal keys such as `ctrl+c` and `Escape`; text always presses Enter. Input
+  to a shell panel whose command has exited is refused with its captured exit
+  status: a dead tmux pane, or the uncaptured shell Herdr leaves in the pane,
+  would receive it, and later waits would only report the old exit. Text
   typed at a shell idle at its prompt with OSC 133 marks (see `wait` below; also
   through ssh) is followed in the capture log for up to 5 seconds. If its command
   ends (`D;<status>`, or a prompt start `A`, such as a nested shell's first
@@ -109,7 +117,8 @@ another Pi child. Shell panels do not consume worker nesting depth.
   marks, return the screen after a 250 ms settle. This is terminal input,
   not draft-safe Pi prompt delivery. When typed text goes where no shell reports
   its prompt (see `wait` below), the result ends with a warning naming the
-  receiving program (for example `ssh -tt mac-wire`) and how to fix it; the user
+  receiving program (for example `ssh -tt mac-wire`, or the panel's own unmarked
+  command) and how to fix it; the user
   also gets a one-time TUI notification per panel and program. Keys never warn.
   Pilish Pi targets are RPC conversations,
   not terminals; supervise them in their input buffers. Web targets are RPC
@@ -146,7 +155,8 @@ another Pi child. Shell panels do not consume worker nesting depth.
   themselves; the capture relay is the host-independent source.
 
   `file` waits need `match` and examine only text appended after the call; a
-  truncated file restarts from its beginning. `pid` waits poll process existence
+  truncated file restarts from its beginning. A missing file fails immediately,
+  pointing to a wait on the panel or pid that creates it. `pid` waits poll process existence
   and do not accept `match`. Escape cancels any wait. Panels started before
   output capture existed must be restarted to be waited on.
 
@@ -163,6 +173,45 @@ diagnostic details, not public lookup names.
 Independent sibling `do`/`delegate`/`fresh_look` calls run concurrently and
 join before the parent continues. Pi startup alone is serialized to avoid
 authentication races.
+
+## Codemode delegation
+
+Worker tools are model-only by default. `/codemode-delegate` toggles whether
+`do`, `delegate`, and `fresh_look` can also be called from codemode scripts or
+other tools. Explicit `/codemode-delegate on`, `off`, and `status` work in TUI,
+RPC, and print mode. `on` removes `exposure: "model-only"`, using Pi's default
+`direct` exposure; `off` restores it. Registration updates immediately without
+changing the active-tool selection or `/delegate-alt` schemas. This does not
+enable codemode or inactive workers; use `/tools` for that. In codemode `only`
+mode, enabled workers follow Pi's ordinary callable-tool presentation.
+
+The preference is global to the agent directory, saved atomically in private
+`codemode-delegate.json` as `{"enabled":true}`. `off` removes the file. New
+sessions, reload/resume, and workers read the same preference; other sessions
+refresh on submitted input and worker calls. Invalid configuration fails closed.
+Already-running workers are not cancelled by changing this preference.
+
+```js
+const results = await Promise.all([
+  tools.do({ task: "Check the implementation" }),
+  tools.delegate({ task: "Standalone assignment with its complete brief" }),
+]);
+for (const result of results) text(result);
+```
+
+A nested `do` follows Pi's parent-call links and forks before the **outer
+model-issued tool call's assistant message**. It retains the prior conversation,
+not script-local reads, earlier worker results in that same script, or unfinished
+sibling calls. Include any such findings explicitly in `task`. `delegate` and
+`fresh_look` retain their blank-context policies. The one-time context warning
+uses a branch entry so nested calls also retain acknowledgment across reload.
+
+Codemode receives worker text, not `details` or the direct worker renderer's
+recovery receipt. Await workers and print/return results you want retained.
+Pi cancels nested workers when the script is cancelled, but can settle the script
+before asynchronous worker cleanup finishes and omit the worker's eventual
+recovery error. Session files remain; verify the old worker stopped before
+resuming. Use direct calls when durable per-worker recovery receipts are needed.
 
 ## Alternate-model delegation
 
@@ -306,7 +355,7 @@ explicitly retrying `do` proceeds. `delegate` and `fresh_look` never warn.
 
 ## Files and recovery
 
-Every `do`, `delegate`, and `fresh_look` publishes a copyable resume command as
+Every direct `do`, `delegate`, and `fresh_look` call publishes a copyable resume command as
 soon as its session is prepared, before host startup or output capture. Progress
 and successful results retain it in `details.sessionCommand`, not model-facing
 `content`. The shared TUI result renderer displays the hint as **User-only recovery
@@ -352,7 +401,7 @@ From `pi-ant/`:
 ```sh
 npm run check
 node scripts/test.mjs extensions/self-compact.test.ts orchestration/worker-frame.test.ts orchestration/workers.test.ts
-node scripts/test.mjs orchestration/delegate-alt.test.ts orchestration/extensions/delegate.test.ts orchestration/context.test.ts orchestration/worker-call.test.ts orchestration/worker-result.test.ts orchestration/worker-resume.test.ts
+node scripts/test.mjs orchestration/codemode-delegate.test.ts orchestration/delegate-alt.test.ts orchestration/extensions/delegate.test.ts orchestration/context.test.ts orchestration/worker-call.test.ts orchestration/worker-result.test.ts orchestration/worker-resume.test.ts
 node scripts/test.mjs orchestration/panel-output.test.ts orchestration/extensions/panels.test.ts orchestration/extensions/wait.test.ts extensions/exec-lints.test.ts
 PI_NATIVE_HOST_SMOKE=1 node scripts/test.mjs orchestration/extensions/wait.test.ts  # inside Herdr: same wait tests on Herdr panels
 PI_NATIVE_HOST_SMOKE=1 node scripts/test.mjs orchestration/hosts/native-smoke.test.ts

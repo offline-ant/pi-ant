@@ -71,7 +71,9 @@ test("input is classified by whether a shell reporting its prompt receives it", 
   assert.deepEqual(program, { kind: "program", command: "ssh -tt mac-wire", mark: Buffer.byteLength(ssh) });
   assert.match(promptWarning(program)!, /Input goes to `ssh -tt mac-wire`, which shows no OSC 133 prompt marks/);
   assert.deepEqual(promptReporting(log, size), program, "without input, the current state is classified");
-  assert.match(promptWarning(promptReporting(logWith("mac> "), 5))!, /No OSC 133 prompt marks have appeared/);
+  const none = promptWarning(promptReporting(logWith("mac> "), 5))!;
+  assert.match(none, /Input goes to the panel's command, which has shown no OSC 133 prompt marks/);
+  assert.match(none, /If that command is a shell, it can report its prompt with shell integration/);
   assert.equal(promptWarning({ kind: "prompt" }), undefined);
   const bash = promptReporting(logWith(`${prompt}\x1b]133;C\x07`), Buffer.byteLength(`${prompt}\x1b]133;C\x07`));
   assert.equal(bash.kind === "program" && bash.command, undefined);

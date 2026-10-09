@@ -6,6 +6,7 @@ import { renderWorkerResult } from "../worker-result.ts";
 import { EPHEMERAL_WORKER_CONTEXTS, inheritContextWarningPercent, type EphemeralWorkerTool } from "../delegate-policy.ts";
 import { prepareDelegateSession } from "../context.ts";
 import { createDelegateAltController, delegateModelLabel, type DelegateModelPair } from "../delegate-alt.ts";
+import { createCodemodeDelegateController } from "../codemode-delegate.ts";
 import { createWorkerArtifacts, formatWorkerResult, makeWorkerId, writeWorkerRequest } from "../worker-frame.ts";
 import { runEphemeralWorker } from "../workers.ts";
 import { WORKER_DESIGN_PRINCIPLES } from "../worker-principles.ts";
@@ -51,16 +52,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function branchHasInheritContextWarning(ctx: ExtensionContext): boolean {
   return ctx.sessionManager.getBranch().some(
-    (entry) => entry.type === "message"
-      && entry.message.role === "toolResult"
-      && entry.message.toolName === "do"
-      && isRecord(entry.message.details)
-      && entry.message.details.inheritContextWarning === true,
+    (entry) => entry.type === "custom" && entry.customType === "pi-orchestration:inherit-context-warning",
   );
 }
 
 export default function delegateExtension(pi: ExtensionAPI): void {
   let inheritContextWarningWasReturned = false;
+  let pair: DelegateModelPair | null = null;
+  let codemodeEnabled = false;
+  // Nested calls have no transcript entry. Follow Pi's explicit parent links to
+  // the model-issued call, never infer ancestry from an opaque provider ID.
+  const origins = new Map<string, { toolName: string; toolCallId: string }>();
+  pi.on("tool_call", (event, ctx) => {
+    if (Object.hasOwn(EPHEMERAL_WORKER_CONTEXTS, event.toolName)) {
+      if (!codemode.refresh(ctx) && event.parentToolCallId !== undefined) {
+        return { block: true, reason: "Codemode delegation is disabled. Enable /codemode-delegate or call the worker tool directly." };
+      }
+    }
+    const origin = event.parentToolCallId === undefined
+      ? { toolName: event.toolName, toolCallId: event.toolCallId }
+      : origins.get(event.parentToolCallId);
+    if (!origin) throw new Error("Cannot identify the parent tool call for nested delegation.");
+    origins.set(event.toolCallId, origin);
+  });
+  pi.on("tool_execution_end", (event) => { origins.delete(event.toolCallId); });
+  pi.on("agent_end", () => { origins.clear(); });
 
   function restoreWarningState(ctx: ExtensionContext): void {
     inheritContextWarningWasReturned = branchHasInheritContextWarning(ctx);
@@ -74,7 +90,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
   });
   pi.on("session_tree", async (_event, ctx) => restoreWarningState(ctx));
 
-  function register(pair: DelegateModelPair | null): void {
+  function register(): void {
     for (const tool of Object.keys(EPHEMERAL_WORKER_CONTEXTS) as EphemeralWorkerTool[]) {
       const context = EPHEMERAL_WORKER_CONTEXTS[tool];
       const guidance = toolGuidance[tool];
@@ -83,14 +99,14 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       pi.registerTool({
         name: tool,
         label: guidance.label,
-        // Workers fork at, report progress to, and resume from the model's own tool call.
-        exposure: "model-only",
+        ...(codemodeEnabled ? {} : { exposure: "model-only" as const }),
         description: guidance.description
           + (pair ? ` Models: ${pair.map(delegateModelLabel).join(" and ")}. Set alt=true to use the other model, or the first if the caller is outside the pair.` : ""),
         promptSnippet: guidance.snippet,
         promptGuidelines: [
           ...(tool === "do" ? ["Prefer do for non-trivial investigation, verification, review, and implementation within the current task. Give a brief goal; use delegate only occasionally for large, fully specified standalone assignments. Handle trivial work directly."] : []),
           concurrencyGuideline,
+          ...(codemodeEnabled && tool === "do" ? ["From codemode, do inherits the conversation before the outer tool call, not script-local results; include those findings in task. Await workers and return or print their results."] : []),
         ],
         parameters,
         prepareArguments(args) {
@@ -118,6 +134,8 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           const warningPercent = inheritContextWarningPercent(context, ctx.getContextUsage()?.percent, inheritContextWarningWasReturned);
           if (warningPercent !== undefined) {
             inheritContextWarningWasReturned = true;
+            // Nested results are not transcript entries; persist branch state directly.
+            pi.appendEntry("pi-orchestration:inherit-context-warning", {});
             return {
               content: [{
                 type: "text",
@@ -127,7 +145,9 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             };
           }
 
-          const prepared = prepareDelegateSession({ ...params, tool }, ctx, toolCallId, { model, thinkingLevel });
+          const origin = origins.get(toolCallId);
+          if (!origin) throw new Error("Cannot identify the model-issued worker call.");
+          const prepared = prepareDelegateSession({ ...params, tool }, ctx, origin, { model, thinkingLevel });
           const sessionCommand = workerResumeCommand(prepared.sessionFile);
           const resumeHint = workerResumeHint(sessionCommand);
           // Publish before native startup or its first output capture can block.
@@ -174,10 +194,18 @@ export default function delegateExtension(pi: ExtensionAPI): void {
       });
     }
   }
-  register(null);
-  const alternate = createDelegateAltController(pi, (pair) => {
+  function reregister(): void {
     const activeTools = pi.getActiveTools();
-    register(pair);
+    register();
     pi.setActiveTools(activeTools);
+  }
+  register();
+  const alternate = createDelegateAltController(pi, (next) => {
+    pair = next;
+    reregister();
+  });
+  const codemode = createCodemodeDelegateController(pi, (enabled) => {
+    codemodeEnabled = enabled;
+    reregister();
   });
 }

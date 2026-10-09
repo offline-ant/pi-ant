@@ -18,17 +18,21 @@
  *   — they can't scroll back to see the full output.
  * - `tail` inside remote/nested quoted commands and `tail` filtering `ssh` output
  *   are ignored because they may be needed to reduce remote output.
- * - In panel-start: the trailing `| tail …` is silently stripped.
- * - In bash or panel-send: the command is blocked once so the agent can retry
- *   without the `| tail -<n>`.
- * - Only triggers when a preceding pipe segment contains 'build' or 'check'.
+ * - Only triggers when the pipeline feeding `tail` builds, checks, or tests: a
+ *   command named `build…`/`check…`/`test…`, or a `build`/`check`/`test` argument
+ *   (also `build:prod` and similar script names).
+ * - The command is blocked once (in bash, panel-start, and panel-send alike) and
+ *   never rewritten; the suggested retry drops only the `| tail …` segment and
+ *   keeps its redirections, so `cmd | tail -5 > log` suggests `cmd > log`.
  *
  * Sleep lint:
  * - a local `sleep` of 2 seconds or more, or any `sleep` inside a shell loop
  *   (polling), in bash or panel-send: always blocked. Agents should react when
  *   something is ready with the `wait` tool instead of guessing a duration.
- * - `sleep` inside remote/nested quoted commands and in panel-start commands
- *   (servers and watchers may legitimately pace themselves) is ignored.
+ * - Scripts of local `bash|sh|dash|zsh|fish -c '…'`, also behind wrappers such as
+ *   `timeout 300`, `env X=1`, or `nice -n 5`, are checked by the same rules.
+ * - `sleep` after `ssh` and in panel-start commands (servers and watchers may
+ *   legitimately pace themselves) is ignored.
  *
  * Covers bash, panel-start, and panel-send tool calls.
  */
@@ -64,24 +68,43 @@ const STASH_NOTE =
   "Other agents or the user may have uncommitted work. " +
   "Ask the user for permission, then retry the exact same command.";
 
-// Matches `| tail -<n>` (with optional flags like -n, -f) as the last
-// segment of a pipeline.  Handles `| tail -123`, `| tail -n 50`, etc.
-const PIPE_TAIL_RE = /\|\s*tail\s+-[^\|]*$/;
+/** Commands and arguments whose output a trailing `| tail` would hide. */
+const BUILD_COMMAND_RE = /^(?:build|check|test)/;
+const BUILD_ARG_RE = /^(?:build|check|test)(?::\S*)?$/;
+
+/** A redirection word; an empty last group means its target is the next word. */
+const REDIRECTION_RE = /^(?:\d+|&)?(?:>&|<&|>>|>\||<<<|<<|>|<)(.*)$/;
+/** Commands that run their arguments as another command. */
+const COMMAND_WRAPPERS = new Set(["command", "env", "exec", "nice", "nohup", "setsid", "stdbuf", "sudo", "time", "timeout"]);
+const WRAPPER_DURATION_RE = /^\d+(?:\.\d+)?[smhd]?$/;
+const SHELLS = new Set(["bash", "dash", "fish", "sh", "zsh"]);
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 type PanelStartInput = { name: string; command: string };
-type PanelSendInput = { target: string; text: string; enter?: boolean };
+type PanelSendInput = { name: string; text?: string; keys?: string[] };
 type BashInput = { command: string };
-type ShellToken = { type: "word" | "operator"; text: string; start: number };
+type ShellToken = {
+  type: "word" | "operator";
+  /** Text with quotes and escapes removed. */
+  text: string;
+  start: number;
+  end: number;
+  /** Starts with a quote or escape, so it is literal text rather than a redirection. */
+  literalStart: boolean;
+};
 type ShellInvocation = {
   name: string;
+  /** Arguments, without redirections. */
   args: string[];
-  hasEarlierInPipeline: boolean;
+  redirections: ShellToken[];
+  /** Name, argument, and redirection words in order. */
+  words: ShellToken[];
+  /** Start of the `|` feeding this command, when it is not first in its pipeline. */
+  pipeStart?: number;
   hasSshEarlierInPipeline: boolean;
   /** Inside the body or condition of a while, until, or for loop. */
   inLoop: boolean;
-  rawStart: number;
 };
 
 /**
@@ -99,6 +122,7 @@ function tokenizeShell(command: string): ShellToken[] {
   const tokens: ShellToken[] = [];
   let word = "";
   let wordStart: number | undefined;
+  let literalStart = false;
   let quote: "'" | '"' | undefined;
 
   const appendWordChar = (char: string, index: number) => {
@@ -106,11 +130,14 @@ function tokenizeShell(command: string): ShellToken[] {
     word += char;
   };
 
-  const pushWord = () => {
-    if (word.length === 0) return;
-    tokens.push({ type: "word", text: word, start: wordStart ?? 0 });
+  const pushWord = (end: number) => {
+    if (word.length > 0) tokens.push({ type: "word", text: word, start: wordStart ?? 0, end, literalStart });
     word = "";
     wordStart = undefined;
+    literalStart = false;
+  };
+  const pushOperator = (text: string, start: number) => {
+    tokens.push({ type: "operator", text, start, end: start + text.length, literalStart: false });
   };
 
   for (let i = 0; i < command.length; i++) {
@@ -131,50 +158,58 @@ function tokenizeShell(command: string): ShellToken[] {
     }
 
     if (char === "'" || char === '"') {
+      if (wordStart === undefined) literalStart = true;
       wordStart ??= i;
       quote = char;
       continue;
     }
 
     if (char === "\\" && i + 1 < command.length) {
+      if (wordStart === undefined) literalStart = true;
       appendWordChar(command[i + 1], i);
       i++;
       continue;
     }
 
     if (char === "\n") {
-      pushWord();
-      tokens.push({ type: "operator", text: "\n", start: i });
+      pushWord(i);
+      pushOperator("\n", i);
       continue;
     }
 
     if (/\s/.test(char)) {
-      pushWord();
+      pushWord(i);
+      continue;
+    }
+
+    // `&` within a redirection (`2>&1`, `>&2`, `&>log`) is part of that word.
+    if (char === "&" && (/[<>]$/.test(word) || command[i + 1] === ">")) {
+      appendWordChar(char, i);
       continue;
     }
 
     if (char === "|" || char === "&") {
-      pushWord();
+      pushWord(i);
       const next = command[i + 1];
       if (next === char) {
-        tokens.push({ type: "operator", text: `${char}${next}`, start: i });
+        pushOperator(`${char}${next}`, i);
         i++;
       } else {
-        tokens.push({ type: "operator", text: char, start: i });
+        pushOperator(char, i);
       }
       continue;
     }
 
     if (char === ";" || char === "(" || char === ")") {
-      pushWord();
-      tokens.push({ type: "operator", text: char, start: i });
+      pushWord(i);
+      pushOperator(char, i);
       continue;
     }
 
     appendWordChar(char, i);
   }
 
-  pushWord();
+  pushWord(command.length);
   return tokens;
 }
 
@@ -186,22 +221,24 @@ function getLocalShellInvocations(command: string): ShellInvocation[] {
   const invocations: ShellInvocation[] = [];
   let expectingCommand = true;
   let currentInvocation: ShellInvocation | undefined;
-  let pipelineHasEarlierCommand = false;
+  let pipeStart: number | undefined;
   let pipelineHasSsh = false;
   let loopDepth = 0;
+  let redirectionTargetPending = false;
 
   for (const token of tokenizeShell(command)) {
     if (token.type === "operator") {
+      redirectionTargetPending = false;
       if (token.text === "|") {
         expectingCommand = true;
         currentInvocation = undefined;
-        pipelineHasEarlierCommand = true;
+        pipeStart = token.start;
         continue;
       }
       if (SHELL_COMMAND_SEPARATORS.has(token.text)) {
         expectingCommand = true;
         currentInvocation = undefined;
-        pipelineHasEarlierCommand = false;
+        pipeStart = undefined;
         pipelineHasSsh = false;
       }
       continue;
@@ -232,10 +269,11 @@ function getLocalShellInvocations(command: string): ShellInvocation[] {
       currentInvocation = {
         name: word,
         args: [],
-        hasEarlierInPipeline: pipelineHasEarlierCommand,
+        redirections: [],
+        words: [token],
+        ...(pipeStart !== undefined ? { pipeStart } : {}),
         hasSshEarlierInPipeline: pipelineHasSsh,
         inLoop: loopDepth > 0,
-        rawStart: token.start,
       };
       invocations.push(currentInvocation);
       expectingCommand = false;
@@ -243,7 +281,15 @@ function getLocalShellInvocations(command: string): ShellInvocation[] {
       continue;
     }
 
-    currentInvocation?.args.push(word);
+    if (!currentInvocation) continue;
+    currentInvocation.words.push(token);
+    const redirection = token.literalStart ? undefined : REDIRECTION_RE.exec(word);
+    if (redirectionTargetPending || redirection) {
+      currentInvocation.redirections.push(token);
+      redirectionTargetPending = !redirectionTargetPending && redirection?.[1] === "";
+    } else {
+      currentInvocation.args.push(word);
+    }
   }
 
   return invocations;
@@ -258,7 +304,7 @@ function hasBlockedLocalGrep(command: string): boolean {
   return getLocalShellInvocations(command).some(
     (invocation) =>
       commandBasename(invocation.name) === "grep" &&
-      !invocation.hasEarlierInPipeline &&
+      invocation.pipeStart === undefined &&
       !invocation.hasSshEarlierInPipeline,
   );
 }
@@ -274,25 +320,58 @@ function sleepSeconds(args: string[]): number | undefined {
   return total;
 }
 
-function hasBlockedSleep(command: string): boolean {
+/** The script of a shell run as `<shell> -c <script>`, possibly behind wrappers such as `timeout 300` or `env X=1`. */
+function shellScript(invocation: ShellInvocation): string | undefined {
+  const words = [invocation.name, ...invocation.args];
+  let index = 0;
+  while (COMMAND_WRAPPERS.has(commandBasename(words[index] ?? ""))) {
+    index++;
+    while (index < words.length && (words[index].startsWith("-") || isAssignmentWord(words[index]) || WRAPPER_DURATION_RE.test(words[index]))) index++;
+  }
+  if (!SHELLS.has(commandBasename(words[index] ?? ""))) return undefined;
+  let command = false;
+  for (const word of words.slice(index + 1)) {
+    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(word)) command = true;
+    else if (!word.startsWith("-")) return command ? word : undefined;
+  }
+  return undefined;
+}
+
+function hasBlockedSleep(command: string, inLoop = false): boolean {
   return getLocalShellInvocations(command).some((invocation) => {
-    if (commandBasename(invocation.name) !== "sleep" || invocation.hasSshEarlierInPipeline) return false;
-    if (invocation.inLoop) return true;
+    if (invocation.hasSshEarlierInPipeline) return false;
+    const looping = inLoop || invocation.inLoop;
+    const script = shellScript(invocation);
+    if (script !== undefined) return hasBlockedSleep(script, looping);
+    if (commandBasename(invocation.name) !== "sleep") return false;
+    if (looping) return true;
     const seconds = sleepSeconds(invocation.args);
     return seconds === undefined || seconds >= SLEEP_LIMIT_SECONDS;
   });
 }
 
+/** A trailing local `| tail -<n>` hiding the output of a build, check, or test pipeline. */
 function getBlockedLocalPipeTail(command: string): ShellInvocation | undefined {
   const invocations = getLocalShellInvocations(command);
-  const lastInvocation = invocations[invocations.length - 1];
-  if (!lastInvocation || commandBasename(lastInvocation.name) !== "tail") return undefined;
-  if (!lastInvocation.args.some((arg) => arg.startsWith("-"))) return undefined;
-  if (!lastInvocation.hasEarlierInPipeline || lastInvocation.hasSshEarlierInPipeline) return undefined;
+  const tail = invocations.at(-1);
+  if (!tail || commandBasename(tail.name) !== "tail" || tail.pipeStart === undefined || tail.hasSshEarlierInPipeline) return undefined;
+  if (!tail.args.some((arg) => arg.startsWith("-"))) return undefined;
 
-  const beforeTail = command.slice(0, lastInvocation.rawStart);
-  if (!beforeTail.includes("build") && !beforeTail.includes("check")) return undefined;
-  return lastInvocation;
+  let first = invocations.length - 1;
+  while (first > 0 && invocations[first].pipeStart !== undefined) first--;
+  const feeding = invocations.slice(first, -1);
+  const builds = feeding.some((invocation) =>
+    BUILD_COMMAND_RE.test(commandBasename(invocation.name)) || invocation.args.some((arg) => BUILD_ARG_RE.test(arg)));
+  return builds ? tail : undefined;
+}
+
+/** `command` without its trailing `| tail …` segment, keeping the tail's redirections. */
+function withoutPipeTail(command: string, tail: ShellInvocation): string {
+  return [
+    command.slice(0, tail.pipeStart).trimEnd(),
+    ...tail.redirections.map((token) => command.slice(token.start, token.end)),
+    command.slice(tail.words.at(-1)!.end).trim(),
+  ].filter(Boolean).join(" ");
 }
 
 function blockRestore(toolName: string, command: string) {
@@ -319,13 +398,6 @@ function warnStash(toolName: string, command: string) {
   };
 }
 
-/**
- * Strip the trailing `| tail …` from a command string.
- */
-function stripPipeTail(command: string): string {
-  return command.replace(PIPE_TAIL_RE, "").trimEnd();
-}
-
 // ── Extension ───────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
@@ -334,7 +406,7 @@ export default function (pi: ExtensionAPI) {
   // must re-earn permission for new checkout commands.
   const warnedCheckouts = new Set<string>();
   const warnedStashes = new Set<string>();
-  let warnedBashPipeTail = false;
+  let warnedPipeTail = false;
   let enabled = true;
 
   // ── Toggle command ──────────────────────────────────────────────────
@@ -352,7 +424,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("turn_start", async () => {
     warnedCheckouts.clear();
     warnedStashes.clear();
-    warnedBashPipeTail = false;
+    warnedPipeTail = false;
   });
 
   pi.on("tool_call", async (event) => {
@@ -418,20 +490,15 @@ export default function (pi: ExtensionAPI) {
       return warnStash(event.toolName, command);
     }
 
-    // pipe tail lint — only when a local preceding pipe segment contains 'build' or 'check'
-    if (getBlockedLocalPipeTail(command)) {
-      if (event.toolName === "panel-start") {
-        (event.input as PanelStartInput).command = stripPipeTail(command);
-        return undefined;
-      }
-      // bash / panel-send: block first attempt, allow retry
-      if (warnedBashPipeTail) return undefined;
-      warnedBashPipeTail = true;
+    // pipe tail lint — block the first attempt, allow a retry
+    const tail = getBlockedLocalPipeTail(command);
+    if (tail && !warnedPipeTail) {
+      warnedPipeTail = true;
       return {
         block: true,
         reason:
           `Blocked: trailing \`| tail\` hides build output in ${event.toolName} command: ${command}. ` +
-          `Re-run without the pipe tail: \`${stripPipeTail(command)}\``,
+          `Re-run without the pipe tail: \`${withoutPipeTail(command, tail)}\``,
       };
     }
 
