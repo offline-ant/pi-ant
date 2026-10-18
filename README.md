@@ -28,6 +28,34 @@ with the standalone `pagent` application. `PI_WEB_BACKEND=auto` (default) prefer
 Codex and reports browser fallback when unavailable; `codex` and `browser` select
 strict backends. Backend selection is host configuration, not a tool argument.
 
+## Copy quoted text
+
+After `/reload`, run `/copy-quote` in a terminal Pi session. It reads the latest
+completed assistant response on the current branch. One nonempty blockquote copies
+immediately; several open a numbered picker. Escape cancels without copying; no
+quotes produces a notification rather than falling back to an older answer.
+
+Nested quotes are included in their enclosing quote, with all quote markers removed.
+Internal Markdown (including code fences), literal `>`/`|`, code indentation, and
+source line breaks are preserved. The display and history do not change, and normal
+mouse copying is unaffected. Pi's clipboard helper retains its platform and OSC 52
+behavior. RPC/print modes are refused to avoid writing the server's clipboard.
+
+The extension's small isolated dependency package uses micromark's concrete source
+positions; Pi's bundled Marked tokens do not reliably retain source spans. After
+cloning or deploying, hydrate only that package (no Pi peers are installed):
+
+```sh
+cd extensions/copy-quote && npm ci --ignore-scripts
+```
+
+Checks from the `pi-ant` root, without model calls or touching the real clipboard:
+
+```sh
+node scripts/test.mjs extensions/copy-quote.test.ts
+npm run check
+```
+
 ## Herdr finish prompts
 
 Inside a Herdr Pi TUI, while this Pi is idle:

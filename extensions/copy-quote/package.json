@@ -1,0 +1,8 @@
+{
+  "name": "pi-ant-copy-quote",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "micromark": "4.0.2"
+  }
+}

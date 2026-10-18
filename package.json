@@ -33,6 +33,7 @@
       "./extensions/herdr-finish.ts",
       "./extensions/working-text.ts",
       "./extensions/cwd.ts",
+      "./extensions/copy-quote/index.ts",
       "./extensions/git-commit.ts",
       "./extensions/workboard.ts",
       "./extensions/worktree.ts",
