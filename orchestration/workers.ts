@@ -5,7 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { truncateTail, type AgentToolUpdateCallback, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getHost, hostForTarget } from "./host.ts";
 import type { HostTarget } from "./host-types.ts";
-import { appendWorkerMoreInfo, parseWorkerResult, readWorkerStatus, type WorkerArtifactPaths, type WorkerResultFile } from "./worker-frame.ts";
+import { appendWorkerMoreInfo, formatWorkerRetryTime, parseWorkerResult, readWorkerStatus, type WorkerArtifactPaths, type WorkerResultFile } from "./worker-frame.ts";
 
 const REGISTRY_DIR = path.join(os.tmpdir(), "pi-orchestration-targets");
 const RESULT_POLL_INTERVAL_MS = 250;
@@ -91,6 +91,7 @@ export interface WorkerToolDetails {
   task: string;
   elapsedMs: number;
   status: string;
+  retryAt?: number;
 }
 
 export async function captureWorkerOutput(pi: ExtensionAPI, target: HostTarget, lines = 12, signal?: AbortSignal): Promise<string> {
@@ -119,9 +120,10 @@ export async function waitForWorkerResult(
   let lastStateAt = -STATE_POLL_INTERVAL_MS;
   let unavailableSince: number | undefined;
   const host = hostForTarget(pi, options.target);
-  const details = (status: string): WorkerToolDetails => ({
+  const details = (status: string, retryAt?: number): WorkerToolDetails => ({
     id: options.id, target: options.target, artifacts: options.paths,
     sessionFile: options.sessionFile, task: options.task, elapsedMs: Date.now() - startedAt, status,
+    ...(retryAt === undefined ? {} : { retryAt }),
   });
   const readResult = (): WorkerResultFile | undefined => fs.existsSync(options.paths.resultPath)
     ? parseWorkerResult(fs.readFileSync(options.paths.resultPath, "utf8"), options.paths.resultPath, options.id) : undefined;
@@ -155,14 +157,17 @@ export async function waitForWorkerResult(
       lastProgressAt = elapsedMs;
       const status = readWorkerStatus(options.paths.statusPath);
       const matchingStatus = status?.id === options.id ? status : undefined;
+      const retryAt = matchingStatus?.state === "running" ? matchingStatus.retryAt : undefined;
       const progress = matchingStatus?.state === "supervised"
         ? [`Worker ${options.target.name} is supervised.`, matchingStatus.supervisionReason,
           "Open the worker and type a message to investigate; use /worker-submit to return its reply or /worker-continue <prompt> to resume automatic completion."].filter(Boolean).join("\n")
-        : `Waiting for worker ${options.target.name} (${Math.floor(elapsedMs / 1000)}s elapsed).`;
+        : retryAt !== undefined
+          ? `Worker ${options.target.name} is waiting for Claude five-hour quota; retry scheduled at ${formatWorkerRetryTime(retryAt)}.\nNo tools are replayed; parent cancellation stops recovery.`
+          : `Waiting for worker ${options.target.name} (${Math.floor(elapsedMs / 1000)}s elapsed).`;
       const output = await captureWorkerOutput(pi, options.target, 12, options.signal);
       options.onUpdate({
         content: [{ type: "text", text: `${progress}\nSession: ${options.sessionFile}\n\n${output}` }],
-        details: details(matchingStatus?.state ?? "waiting"),
+        details: details(retryAt === undefined ? matchingStatus?.state ?? "waiting" : "quota-wait", retryAt),
       });
     }
     await delay(RESULT_POLL_INTERVAL_MS, undefined, { signal: options.signal });

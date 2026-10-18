@@ -11,6 +11,8 @@ const CONTINUE_WORKER_COMMAND = "worker-continue";
 const SUBMIT_WORKER_COMMAND = "worker-submit";
 const FINISH_WORKER_NOW_COMMAND = "finish-worker-now";
 const SUBWORKER_TOOLS = new Set(["do", "delegate", "fresh_look"]);
+const RECOVERY_POLICY_EVENT = "pi-claude-agent:recovery-policy";
+const RECOVERY_STATUS_EVENT = "pi-claude-agent:recovery-status";
 const FIRST_ACTION_SUBWORKER_WARNING =
   "This is an automated warning heuristic. You are in a worker frame. Do not simply forward the entire task; investigate it and/or split it into a distinct subtask. Continue working, and retry the worker call if this warning was triggered in error.";
 
@@ -53,6 +55,8 @@ export interface WorkerStatusFile {
   sessionFile?: string;
   contextPercent?: number | null;
   supervisionReason?: string;
+  /** Provider-owned recovery deadline, in absolute epoch milliseconds. */
+  retryAt?: number;
   updatedAt: string;
 }
 
@@ -81,6 +85,7 @@ interface ActiveWorkerRequest {
   pendingContinuePrompt?: string;
   pendingFailure?: string;
   supervisionReason?: string;
+  retryAt?: number;
   submitting: boolean;
 }
 
@@ -223,6 +228,14 @@ export function writeWorkerRequest(paths: WorkerArtifactPaths, request: WorkerRe
   fs.writeFileSync(paths.promptPath, prompt, { encoding: "utf8", mode: 0o600 });
 }
 
+export function formatWorkerRetryTime(retryAt: number): string {
+  return new Date(retryAt).toLocaleString(undefined, {
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false, timeZoneName: "longOffset",
+  });
+}
+
 export function readWorkerStatus(statusPath: string): WorkerStatusFile | undefined {
   if (!fs.existsSync(statusPath)) return undefined;
   const parsed = JSON.parse(fs.readFileSync(statusPath, "utf8")) as unknown;
@@ -286,6 +299,13 @@ function writeFinalResult(
 export default function workerFrameExtension(pi: ExtensionAPI): void {
   let activeRequest: ActiveWorkerRequest | undefined;
 
+  function publishRecoveryPolicy(): void {
+    const request = activeRequest;
+    const allowed = request?.capture === "automatic" && request.phase === "result" && !request.submitting;
+    if (request && !allowed) request.retryAt = undefined;
+    pi.events.emit(RECOVERY_POLICY_EVENT, { allowed });
+  }
+
   function availableWorkerTools(requestedTools: string[]): string[] {
     const available = new Set(pi.getAllTools().map((tool) => tool.name));
     return [...new Set(requestedTools)].filter((tool) => available.has(tool));
@@ -313,6 +333,15 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
       return;
     }
 
+    if (request.retryAt !== undefined) {
+      ctx.ui.setStatus("worker-frame", ctx.ui.theme.fg("warning", "worker:quota-wait"));
+      ctx.ui.setWidget("worker-frame", [
+        `Waiting for Claude five-hour quota; retry scheduled at ${formatWorkerRetryTime(request.retryAt)}.`,
+        "Escape cancels recovery. No tools are replayed.",
+      ]);
+      return;
+    }
+
     const label = request.phase === "result" ? "worker:auto" : "worker:retrospective";
     ctx.ui.setStatus("worker-frame", ctx.ui.theme.fg("accent", label));
     ctx.ui.setWidget("worker-frame", undefined);
@@ -329,12 +358,14 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
       sessionFile: ctx.sessionManager.getSessionFile() ?? undefined,
       contextPercent: getContextPercent(ctx) ?? null,
       supervisionReason: request.supervisionReason,
+      retryAt: request.retryAt,
     });
   }
 
   function superviseWorker(ctx: ExtensionContext, request: ActiveWorkerRequest, reason?: string): void {
     const wasSupervised = request.capture === "supervised";
     request.capture = "supervised";
+    publishRecoveryPolicy();
     if (reason !== undefined || !wasSupervised) request.supervisionReason = reason;
     writeActiveWorkerStatus(ctx, request);
     refreshWorkerUi(ctx);
@@ -367,6 +398,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     request.pendingContinuePrompt = prompt;
     request.pendingFailure = undefined;
     request.supervisionReason = undefined;
+    publishRecoveryPolicy();
     writeActiveWorkerStatus(ctx, request);
     refreshWorkerUi(ctx);
   }
@@ -376,6 +408,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     request.phase = "retrospective";
     request.capture = "automatic";
     request.candidate = undefined;
+    publishRecoveryPolicy();
     writeTextArtifact(path.join(path.dirname(request.request.resultPath), "result.md"), result);
     writeActiveWorkerStatus(ctx, request);
     refreshWorkerUi(ctx);
@@ -389,6 +422,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     isError = false,
     retrospective?: string,
   ): void {
+    pi.events.emit(RECOVERY_POLICY_EVENT, { allowed: false });
     writeFinalResult(ctx, request, result, isError, retrospective);
     activeRequest = undefined;
     refreshWorkerUi(ctx);
@@ -496,6 +530,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
         if (activeRequest !== request) return;
         pi.setThinkingLevel(parsed.thinkingLevel);
         pi.setActiveTools(workerTools);
+        publishRecoveryPolicy();
         writeActiveWorkerStatus(ctx, request);
         refreshWorkerUi(ctx);
         pi.sendUserMessage(`${MAIN_RESULT_PROMPT_PREFIX}\n\n${parsed.task}`);
@@ -732,9 +767,33 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     }
   });
 
+  const unsubscribeRecovery = pi.events.on(RECOVERY_STATUS_EVENT, (data) => {
+    const request = activeRequest;
+    if (!request || request.capture !== "automatic" || request.phase !== "result" || request.submitting
+      || !isRecord(data) || data.sessionId !== request.context.sessionManager.getSessionId()) return;
+    const retryAt = data.retryAt;
+    if (retryAt !== undefined && (typeof retryAt !== "number" || !Number.isSafeInteger(retryAt) || retryAt <= 0)) return;
+    request.retryAt = retryAt;
+    writeActiveWorkerStatus(request.context, request);
+    refreshWorkerUi(request.context);
+  });
+
+  const unsubscribeSwitchCheck = pi.events.on("pi-orchestration:switch-check", (data) => {
+    if (activeRequest && isRecord(data)) data.blocked = true;
+  });
+
   pi.on("session_shutdown", () => {
+    unsubscribeSwitchCheck();
     unsubscribeHandoff();
-    activeRequest = undefined;
+    unsubscribeRecovery();
+    pi.events.emit(RECOVERY_POLICY_EVENT, { allowed: false });
+    if (activeRequest) {
+      activeRequest.retryAt = undefined;
+      writeActiveWorkerStatus(activeRequest.context, activeRequest);
+      const ctx = activeRequest.context;
+      activeRequest = undefined;
+      refreshWorkerUi(ctx);
+    }
   });
 
   pi.on("agent_settled", (_event, ctx) => {

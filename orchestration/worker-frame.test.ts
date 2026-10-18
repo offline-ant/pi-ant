@@ -5,6 +5,7 @@ import { createEventBus, type EventBus } from "@earendil-works/pi-coding-agent";
 import { SELF_COMPACT_HANDOFF_EVENT, type SelfCompactHandoff } from "./self-compact-handoff.ts";
 import workerFrameExtension, {
   createWorkerArtifacts,
+  formatWorkerRetryTime,
   parseWorkerResult,
   readWorkerStatus,
   writeWorkerRequest as writeProtocolRequest,
@@ -31,6 +32,8 @@ interface WorkerFrameHarness {
   context: unknown;
   handlers: Map<string, EventHandler[]>;
   notifications: string[];
+  recoveryPolicies: boolean[];
+  sentRecoveryPolicies: Array<boolean | undefined>;
   sentDeliveryModes: Array<"steer" | "followUp" | undefined>;
   sentMessages: string[];
   shutdowns: number;
@@ -54,6 +57,8 @@ function createHarness(): WorkerFrameHarness {
     context: undefined,
     handlers,
     notifications,
+    recoveryPolicies: [],
+    sentRecoveryPolicies: [],
     sentDeliveryModes: [],
     sentMessages,
     shutdowns: 0,
@@ -61,6 +66,10 @@ function createHarness(): WorkerFrameHarness {
     waitForIdle: async () => undefined,
     widgets,
   };
+
+  harness.events.on("pi-claude-agent:recovery-policy", (data) => {
+    harness.recoveryPolicies.push((data as { allowed: boolean }).allowed);
+  });
 
   const pi = {
     events: harness.events,
@@ -74,6 +83,7 @@ function createHarness(): WorkerFrameHarness {
     },
     sendUserMessage: (message: string, options?: { deliverAs?: "steer" | "followUp" }) => {
       sentMessages.push(message);
+      harness.sentRecoveryPolicies.push(harness.recoveryPolicies.at(-1));
       harness.sentDeliveryModes.push(options?.deliverAs);
     },
     setModel: async (model: unknown) => {
@@ -96,6 +106,7 @@ function createHarness(): WorkerFrameHarness {
     sessionManager: {
       getBranch: () => [],
       getSessionFile: () => "/tmp/worker-frame-test-session.jsonl",
+      getSessionId: () => "worker-frame-test",
     },
     shutdown: () => {
       harness.shutdowns++;
@@ -286,6 +297,7 @@ test("worker-continue gives guidance and restores automatic result capture", asy
     assert.equal(harness.widgets.get("worker-frame"), undefined);
     assert.equal(harness.sentMessages.at(-1), "Focus on the integration test, then finish");
     assert.equal(harness.sentDeliveryModes.at(-1), "steer");
+    assert.equal(harness.sentRecoveryPolicies.at(-1), true);
 
     await runCommand(harness, "worker-submit", "Stale result");
     assert.match(harness.notifications.at(-1) ?? "", /guidance is queued/);
@@ -333,6 +345,7 @@ test("worker-continue preserves the main result while resuming an automatic retr
     assert.deepEqual(harness.activeTools, ["read", "bash"]);
     assert.equal(harness.sentMessages.at(-1), "Include only the important observation");
     assert.equal(harness.sentDeliveryModes.at(-1), "steer");
+    assert.equal(harness.sentRecoveryPolicies.at(-1), false);
     await emit(harness, "message_start", userMessageStart("Include only the important observation"));
     await emit(harness, "agent_end", assistantEvent("Important guided observation"));
 
@@ -483,6 +496,8 @@ test("extension messages preserve automatic result capture", async () => {
     assert.equal(result.result, "Automatic result");
     assert.equal(result.retrospective, "everything was ok");
     assert.equal(harness.shutdowns, 1);
+    assert.deepEqual(harness.sentRecoveryPolicies, [true, false], "publish the policy before each internal prompt");
+    assert.equal(harness.recoveryPolicies.at(-1), false);
   } finally {
     fs.rmSync(paths.artifactDir, { recursive: true, force: true });
   }
@@ -825,6 +840,7 @@ test("finishing during asynchronous model selection cannot restart a completed r
     assert.equal(result.result, "Recovered during startup");
     assert.deepEqual(harness.sentMessages, []);
     assert.equal(readWorkerStatus(paths.statusPath)?.state, "closed");
+    assert.ok(harness.recoveryPolicies.every((allowed) => !allowed), "completed setup cannot re-enable recovery");
   } finally { releaseModel(); fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
 });
 
@@ -926,6 +942,80 @@ test("worker shutdown detaches handoff listeners and ignores late callbacks", as
     assert.equal(harness.notifications.length, 0);
   } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
 });
+
+test("provider recovery status preserves automatic work, follows only this session, and clears without a new prompt", async () => {
+  const harness = createHarness();
+  const paths = createWorkerArtifacts();
+  const retryAt = Date.now() + 60_000;
+  const report = (data: unknown) => harness.events.emit("pi-claude-agent:recovery-status", data);
+  try {
+    writeWorkerRequest(paths, { id: "quota-wait", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
+    await runCommand(harness, "worker-run", paths.requestPath);
+    assert.deepEqual(harness.recoveryPolicies, [true]);
+    for (const data of [null, {}, { sessionId: "another", retryAt }, { sessionId: "worker-frame-test", retryAt: NaN }, { sessionId: "worker-frame-test", retryAt: -1 }]) report(data);
+    assert.equal(readWorkerStatus(paths.statusPath)?.retryAt, undefined);
+    report({ sessionId: "worker-frame-test", retryAt });
+    assert.equal(readWorkerStatus(paths.statusPath)?.state, "running");
+    assert.equal(readWorkerStatus(paths.statusPath)?.retryAt, retryAt);
+    assert.equal(harness.statuses.get("worker-frame"), "worker:quota-wait");
+    assert.ok(harness.widgets.get("worker-frame")?.join("\n").includes(formatWorkerRetryTime(retryAt)));
+    await emit(harness, "turn_end", {});
+    await emit(harness, "input", { source: "extension", text: "internal prompt" });
+    assert.equal(readWorkerStatus(paths.statusPath)?.retryAt, retryAt);
+    report({ sessionId: "another" });
+    assert.equal(readWorkerStatus(paths.statusPath)?.retryAt, retryAt);
+    report({ sessionId: "worker-frame-test", retryAt: retryAt + 20_000 });
+    assert.equal(readWorkerStatus(paths.statusPath)?.retryAt, retryAt + 20_000);
+    report({ sessionId: "worker-frame-test" });
+    assert.equal(readWorkerStatus(paths.statusPath)?.retryAt, undefined);
+    assert.equal(harness.statuses.get("worker-frame"), "worker:auto");
+    assert.equal(harness.widgets.get("worker-frame"), undefined);
+    assert.equal(harness.sentMessages.length, 1, "recovery status never injects a continuation message");
+    assert.equal(fs.existsSync(paths.resultPath), false);
+    await emit(harness, "agent_end", assistantEvent("Recovered main result"));
+    assert.equal(harness.sentRecoveryPolicies.at(-1), false, "retrospective inference must fail fast");
+    report({ sessionId: "worker-frame-test", retryAt });
+    assert.equal(readWorkerStatus(paths.statusPath)?.retryAt, undefined);
+    await emit(harness, "agent_end", assistantErrorEvent("Claude five-hour subscription limit reached"));
+    await emit(harness, "agent_settled", {});
+    const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "quota-wait");
+    assert.equal(result.result, "Recovered main result");
+    assert.equal(result.isError, false);
+    assert.match(result.retrospective ?? "", /retrospective unavailable/);
+  } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
+});
+
+for (const takeover of ["interactive", "rpc", "submit", "finish", "failure", "shutdown"] as const) {
+  test(`worker recovery policy and deadline are cleared by ${takeover} without reviving automatic work`, async () => {
+    const harness = createHarness();
+    const paths = createWorkerArtifacts();
+    const report = () => harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "worker-frame-test", retryAt: Date.now() + 60_000 });
+    try {
+      writeWorkerRequest(paths, { id: "takeover", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
+      await runCommand(harness, "worker-run", paths.requestPath);
+      report();
+      assert.notEqual(readWorkerStatus(paths.statusPath)?.retryAt, undefined);
+      if (takeover === "submit") await runCommand(harness, "worker-submit", "Human result");
+      else if (takeover === "finish") await runCommand(harness, "finish-worker-now", "Human result");
+      else if (takeover === "shutdown") await emit(harness, "session_shutdown", {});
+      else if (takeover === "failure") {
+        await emit(harness, "agent_end", assistantErrorEvent("An unrelated transport failure"));
+        await emit(harness, "agent_settled", {});
+      } else await emit(harness, "input", { source: takeover, text: "Wait for me" });
+      assert.equal(harness.recoveryPolicies.at(-1), false);
+      assert.equal(readWorkerStatus(paths.statusPath)?.retryAt, undefined);
+      assert.doesNotMatch(harness.statuses.get("worker-frame") ?? "", /quota-wait/);
+      const after = fs.readFileSync(paths.statusPath, "utf8");
+      report();
+      assert.equal(fs.readFileSync(paths.statusPath, "utf8"), after, "late status cannot re-enable recovery");
+      if (["interactive", "rpc", "failure"].includes(takeover)) {
+        assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
+        assert.equal(harness.sentMessages.length, 1);
+        assert.equal(fs.existsSync(paths.resultPath), false);
+      }
+    } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
+  });
+}
 
 test("result parsing rejects mismatched late requests and malformed artifacts", () => {
   const valid = { id: "late", result: "Stale", timestamp: new Date().toISOString() };

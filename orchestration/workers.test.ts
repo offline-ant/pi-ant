@@ -5,7 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { HostTarget } from "./host-types.ts";
-import { createWorkerArtifacts, writeWorkerRequest, writeWorkerStatus, type WorkerRequestFile } from "./worker-frame.ts";
+import { createWorkerArtifacts, formatWorkerRetryTime, writeWorkerRequest, writeWorkerStatus, type WorkerRequestFile } from "./worker-frame.ts";
 import { claimName, listTargets, readTarget, removeTarget, runEphemeralWorker, saveTarget, validateName, waitForWorkerResult } from "./workers.ts";
 
 const target = (name: string): HostTarget => ({ host: "tmux", endpoint: "/tmp/fake-orchestration", id: "%2", kind: "pi", name });
@@ -234,6 +234,76 @@ for (const outcome of ["completion", "cancellation"] as const) {
       await fake.cleanup(); restore();
       fs.rmSync(paths.artifactDir, { recursive: true, force: true });
     }
+  });
+}
+
+for (const outcome of ["completion", "cancellation"] as const) {
+  test(`quota recovery remains owned and publishes its deadline until ${outcome}`, async () => {
+    const restore = selectFakeTmux();
+    const paths = createWorkerArtifacts();
+    const name = `quota-${process.pid}-${outcome}`;
+    const abort = new AbortController();
+    const retryAt = Date.now() + 60_000;
+    let request: WorkerRequestFile | undefined;
+    let observed = false;
+    const fake = fakeTmux((received) => {
+      request = received;
+      writeWorkerStatus(received.statusPath, { id: received.id, state: "running", retryAt });
+    });
+    try {
+      writeWorkerRequest(paths, { id: name, task: "Recover after reset", tools: ["read"], model: { provider: "fake", id: "fake" }, thinkingLevel: "high", resultPath: paths.resultPath, statusPath: paths.statusPath });
+      const running = runEphemeralWorker(fake.pi, {
+        id: name, name, cwd: "/tmp", sessionFile: "/tmp/quota-session.jsonl", args: [], paths, task: "Recover after reset", signal: abort.signal,
+        onUpdate: (update) => {
+          assert.ok(request);
+          const text = update.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
+          assert.match(text, /waiting for Claude five-hour quota/);
+          assert.ok(text.includes(formatWorkerRetryTime(retryAt)));
+          assert.doesNotMatch(text, /worker-continue/);
+          assert.equal((update.details as { status: string; retryAt: number }).status, "quota-wait");
+          assert.equal((update.details as { retryAt: number }).retryAt, retryAt);
+          assert.equal(fake.closes.length, 0);
+          assert.ok(readTarget(name));
+          assert.throws(() => claimName(name), /already being used/);
+          assert.equal(fs.existsSync(paths.resultPath), false);
+          observed = true;
+          if (outcome === "completion") complete(request);
+          else abort.abort();
+        },
+      });
+      if (outcome === "completion") {
+        const result = await running;
+        assert.equal(result.result.result, "Recover after reset");
+        assert.equal(result.details.status, "finished");
+        assert.equal(result.details.retryAt, undefined);
+      } else await assert.rejects(running, /abort/i);
+      assert.equal(observed, true);
+      assert.equal(fake.closes.length, 1);
+      assert.equal(readTarget(name), undefined);
+      claimName(name)();
+    } finally {
+      abort.abort();
+      await fake.cleanup(); restore();
+      fs.rmSync(paths.artifactDir, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const state of ["running", "supervised"] as const) {
+  test(`parent ignores quota deadline on ${state === "running" ? "another request" : "supervised work"}`, async () => {
+    const paths = createWorkerArtifacts();
+    const abort = new AbortController();
+    const pi = { exec: async () => ({ code: 0, stdout: "0", stderr: "", killed: false }) } as unknown as ExtensionAPI;
+    try {
+      writeWorkerStatus(paths.statusPath, { id: state === "running" ? "another" : "matching", state, retryAt: Date.now() + 60_000 });
+      await assert.rejects(waitForWorkerResult(pi, {
+        id: "matching", target: target("matching"), paths, task: "Task", sessionFile: "/tmp/test.jsonl", signal: abort.signal,
+        onUpdate: (update) => {
+          assert.doesNotMatch(JSON.stringify(update), /quota-wait|retryAt|retry scheduled/);
+          abort.abort();
+        },
+      }), /abort/i);
+    } finally { abort.abort(); fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
   });
 }
 

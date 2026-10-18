@@ -392,6 +392,35 @@ without another model request. Parent cancellation still stops the worker.
 Startup, process, and protocol failures remain terminal. A failed retrospective
 returns the successful main result with an unavailable-retrospective note.
 
+Claude Agent five-hour recovery stays inside the provider's original request.
+After immediate account failover, eligible automatic main work waits until the
+reported reset plus 20 seconds, then retries inference from the exact native
+input/tool-result checkpoint. A repeated confirmed five-hour rejection retries
+20 seconds later unless Claude supplies a new future reset. Completed tools are
+not replayed and no `/worker-continue` or extra user message is injected. The
+worker remains automatic and the parent remains pending; local UI and parent
+progress show the scheduled retry time in the process's local timezone with its
+UTC offset. Parent cancellation or Escape cancels the provider wait.
+
+The private extension event contract is:
+
+- Worker → provider: `pi-claude-agent:recovery-policy` with `{allowed:boolean}`.
+  Automatic main start/resume publishes `true` before its prompt; retrospective,
+  human takeover/submission, explicit finish, and shutdown publish `false`.
+  Retrospective failure therefore returns the saved main result without waiting
+  for quota, and supervision is never restarted automatically.
+- Provider → worker: `pi-claude-agent:recovery-status` with
+  `{sessionId:string,retryAt?:number}`. `retryAt` is absolute epoch milliseconds;
+  omission clears it. Only the current session's automatic main work accepts it.
+  `status.json` and parent progress details carry `retryAt` while waiting;
+  progress details use `status: "quota-wait"`. The worker owns no retry timer.
+
+Unsent draft edits do not change policy. Ordinary submitted human input takes
+supervision and disables delayed recovery before it is queued; normal Pi steering
+semantics still apply. Other errors, unsafe checkpoints, and partial responses
+retain normal failure/supervision handling. Already-supervised workers need an
+explicit `/worker-continue <prompt>`; loading this integration does not revive them.
+
 When `self_compact` is enabled, its private `pi-ant:self-compact-handoff` events
 identify the terminating tool call and its resumed or failed handoff. Only a
 matching successful tool result preserves automatic capture while native compaction
