@@ -18,6 +18,7 @@
       "./extensions/panels.ts",
       "./extensions/wait.ts",
       "./extensions/fork-here.ts",
+      "./extensions/switch.ts",
       "./extensions/delegate.ts"
     ]
   }

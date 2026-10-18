@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 export const TERMINAL_INPUT_EXTENSION = fileURLToPath(new URL("./extensions/terminal-input.ts", import.meta.url));
 
 /** Dispatch through Pi rather than pasting into an unknown human editor draft. */
-export function terminalRequest(socketPath: string, request: { kind: "ping" } | { kind: "prompt"; text: string }, signal?: AbortSignal): Promise<void> {
+export function terminalRequest(socketPath: string, request: { kind: "ping"; sessionFile?: string } | { kind: "prompt"; text: string }, signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
     const socket = net.createConnection(socketPath);

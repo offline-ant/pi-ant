@@ -268,6 +268,81 @@ with a complete brief, or `fresh_look` when project guidance is also unwanted.
 
 ## Interactive commands
 
+`/switch [herdr|tau]` opens an ordinary idle conversation in another frontend;
+no argument opens a picker. It opens the **same session file**, not a fork and
+not a live-process migration. The session must already be saved, have no queued
+input, and not belong to a registered worker/fork, active worker request
+(including supervision), or active Ugo workflow. Emacs/tmux destinations are not
+implemented yet. An ordinary session in Emacs may move to a reachable Herdr or
+Tau; its root identity alone does not make it a managed worker.
+
+The destination is checked first. Pi then saves the actual tools on the current
+branch and reloads the same file with `switchSession(file, {withSession})`,
+releasing the old provider runtime and idle cache warmer. The replacement then
+launches the destination without submitting a prompt. The source stays open with
+its conversation visible; a notification (plus a widget in the TUI) names the
+destination and reminds you to `/resume` before continuing there. Nothing exits,
+and there is no rollback: on failure the source simply remains open.
+
+There is no live synchronization or exclusive ownership. Views do not update
+each other. Native `/resume`, selecting the same session, reloads its latest
+history from disk; do that in an idle view before continuing there, and leave the
+other view idle. Typing in a stale view appends to its stale branch.
+
+- **Tau:** reuses a healthy local server, or automatically starts the installed
+  `pi-tau-web-server` from PATH when discovery is absent or its recorded process
+  is dead. Install this workspace's fork, not an unrelated upstream release.
+  Startup happens before the source is reloaded and uses Tau's configured bind
+  (`TAU_HOST`, settings, default `0.0.0.0`) and authentication (defaults `rs`/`l`;
+  explicitly disabled authentication stays disabled). It preserves the
+  agent/session directories and waits for the owned process's publication plus
+  authenticated API readiness. It is detached with no terminal handles; closing
+  the original panel does not stop Tau.
+  An explicit web endpoint is authoritative. A live but unreachable server,
+  authentication failure, or malformed/inaccessible discovery is an error, not
+  permission to launch another server or restart it. Concurrent autostarts use
+  a short private `<agentDir>/tau/startup.lock` claim and recheck discovery.
+  An interrupted claim needs explicit recovery after checking its recorded PID;
+  no age-based lock deletion. Unready owned children are stopped and reaped;
+  a ready server becomes shared and remains running even if the switch fails.
+
+  The resume request sends `refresh: true`. A new child must report
+  `started: true`; an existing idle tab for the file is reloaded in place and must
+  report `refreshed: true`. Busy or queued tabs are rejected, and reused tabs are
+  never deleted. Tau's terminal-owner guard still applies; ordinary roots have no
+  registry record. The notice shows the loopback link, credential-free
+  `browserUrls` from discovery (for example `http://192.0.2.2:3001/#session=<id>`
+  over WireGuard), and the server PID and private `tau/server.log` location when
+  known. Stop a shared server only deliberately: SIGTERM to its verified PID
+  stops all its live Tau sessions. Logs are private (0600) and append until
+  manually rotated. The native desktop opener receives the loopback
+  `/#session=<id>` link; it is detached with ignored stdio and the switch waits
+  only for spawn. Opener failure is reported, not fatal. Over SSH this may open
+  the host's browser, not the client device's browser.
+
+  Shared filesystem access remains an assumption: loopback alone does not
+  establish it for containers or SSH forwards. Displayed URLs never contain
+  endpoint credentials.
+- **Herdr:** checks an explicit local socket or discovers the CLI's default
+  running server, then pins that socket. It creates a fresh **unfocused workspace**
+  labelled `Pi: <cwd>` and verifies the loaded file through the existing private
+  input socket's ping. No existing pane is reused or destroyed. A Herdr socket is
+  carried into Tau for the return trip, but old pane/tab/workspace identities,
+  nesting, and private control/target identity are not.
+
+Conversation/tree, current branch, model/thinking, tool selection, cwd and agent
+directory are retained. Unsent drafts/attachments, queued prompts, running tools,
+provider processes, shell panels and terminal layout do not move. Existing
+branch-local orchestration overrides remain intentional; `/orchestration-host`
+still controls future workers/panels, independently of the conversation's UI.
+Tau itself has no shell panels.
+
+Run `/reload` in Pi to load the command. Tau's updated server and browser assets
+must be compiled; an existing server still needs a user-approved restart when
+safe. `/switch tau` starts an absent server but never restarts an existing one.
+Herdr must already be running. Verification uses disposable sessions, not existing
+user conversations.
+
 `/fork-here [name] [folder] [-- <prompt>]` opens an independent conversation on
 the same host, defaulting to the parent's cwd and the next available `fork-N`.
 No prompt means idle. The parent branch, session, and editor draft are unchanged.
@@ -400,6 +475,8 @@ From `pi-ant/`:
 
 ```sh
 npm run check
+node scripts/test.mjs orchestration/extensions/switch.test.ts orchestration/switch-destinations.test.ts orchestration/tau-server.test.ts orchestration/switch-session.test.ts orchestration/switch-rpc.test.ts
+PI_SWITCH_NATIVE=1 node scripts/test.mjs orchestration/switch-native.test.ts
 node scripts/test.mjs extensions/self-compact.test.ts orchestration/worker-frame.test.ts orchestration/workers.test.ts
 node scripts/test.mjs orchestration/codemode-delegate.test.ts orchestration/delegate-alt.test.ts orchestration/extensions/delegate.test.ts orchestration/context.test.ts orchestration/worker-call.test.ts orchestration/worker-result.test.ts orchestration/worker-resume.test.ts
 node scripts/test.mjs orchestration/panel-output.test.ts orchestration/extensions/panels.test.ts orchestration/extensions/wait.test.ts extensions/exec-lints.test.ts
@@ -409,7 +486,20 @@ PI_LIFECYCLE_SMOKE=1 node scripts/test.mjs orchestration/hosts/lifecycle-smoke.t
 PI_FORK_SMOKE=1 node scripts/test.mjs orchestration/hosts/fork-smoke.test.ts
 ```
 
-The last two use the installed real Pi with its in-process faux provider and
+The switch checks cover command guards, transports, same-file replacement, a real
+SDK `/resume` after several destination turns, a surviving RPC source, Tau
+refresh/reuse, detached startup, concurrent startup, and failure cleanup. Its
+opt-in native test runs inside Herdr, creates only owned disposable workspaces and
+an isolated Tau server, and makes no inference requests. It covers Herdr →
+automatically started Tau → Herdr → refreshed Tau with the same file/session,
+non-tip branch, tools, model/thinking and cwd, retained sources, and
+credential-free links reaching a fake opener. It requires the local Tau fork's
+compiled executable installed as `pi-tau-web-server` on PATH. A test-local wrapper
+records its exec PID for owned cleanup; it invokes that installed executable,
+never a substitute server. The test never starts a real browser or restarts the
+user's server.
+
+The last two commands use the installed real Pi with its in-process faux provider and
 owned tmux/Herdr/Emacs targets. They exercise result/retrospective separation,
 self-closing workers, per-request model/tool selection, draft protection, supervision/recovery, retry and
 overflow compaction settlement, and public idle/prompted forks. Unit tests cover
