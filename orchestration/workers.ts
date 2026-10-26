@@ -182,6 +182,7 @@ export async function runEphemeralWorker(
     cwd: string;
     sessionFile: string;
     args: string[];
+    env?: Record<string, string>;
     paths: WorkerArtifactPaths;
     task: string;
     signal?: AbortSignal;
@@ -196,7 +197,7 @@ export async function runEphemeralWorker(
     const host = getHost(pi);
     target = await host.start({
       kind: "pi", name: options.name, cwd: options.cwd, sessionFile: options.sessionFile,
-      args: options.args, prompt: `/worker-run ${options.paths.requestPath}`, placement: "worker", parent: host.parent(),
+      args: options.args, ...(options.env ? { env: options.env } : {}), prompt: `/worker-run ${options.paths.requestPath}`, placement: "worker", parent: host.parent(),
     }, options.signal);
     saveTarget(target);
     const output = await waitForWorkerResult(pi, { ...options, target });

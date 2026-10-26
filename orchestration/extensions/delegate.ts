@@ -11,10 +11,16 @@ import { createWorkerArtifacts, formatWorkerResult, makeWorkerId, writeWorkerReq
 import { runEphemeralWorker } from "../workers.ts";
 import { WORKER_SCOPE_RULE } from "../worker-scope.ts";
 import { workerResumeCommand, workerResumeHint } from "../worker-resume.ts";
+import { formatRemoteLocation, parseRemoteTarget, remoteChildEnvironment, resolveRemoteLocation, sessionRemote, type RemoteLocation } from "../remote-session.ts";
 
+const remoteParam = Type.Optional(Type.String({
+  minLength: 1,
+  description: "Run the worker's tools on this SSH host, user@host[:/abs/path] (default path: remote home). The worker's Pi, model and session stay local. Defaults to this session's remote host, if any.",
+}));
 const delegateParams = Type.Object({
   task: Type.String({ minLength: 1, description: "Complete brief: requirements, relevant context, and desired result." }),
-  folder: Type.Optional(Type.String({ description: "Working directory; defaults to the current one." })),
+  folder: Type.Optional(Type.String({ description: "Working directory; defaults to the current one. A path on the remote host when tools run remotely." })),
+  remote: remoteParam,
   alt: Type.Optional(Type.Boolean({
     default: false,
     description: "Use the other configured model, or the first if the caller is outside the pair. Defaults to false (inherit the caller's model).",
@@ -22,6 +28,7 @@ const delegateParams = Type.Object({
 }, { additionalProperties: false });
 const doParams = Type.Object({
   task: Type.String({ minLength: 1, description: "Goal, scope, and desired result. Do not repeat established context." }),
+  remote: remoteParam,
   alt: delegateParams.properties.alt,
 }, { additionalProperties: false });
 
@@ -48,6 +55,18 @@ const concurrencyGuideline = "Batch independent do, delegate, and fresh_look cal
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+/**
+ * Where a worker runs its tools: an explicit target, else this session's.
+ * Resolved here so an unreachable host or missing folder fails before startup.
+ */
+async function workerRemoteLocation(params: DelegateParams, signal?: AbortSignal): Promise<RemoteLocation | undefined> {
+  if (params.remote !== undefined) return resolveRemoteLocation(parseRemoteTarget(params.remote), params.folder, signal);
+  const session = sessionRemote();
+  if (!session) return undefined;
+  const location = await session.location(signal);
+  return params.folder === undefined ? location : resolveRemoteLocation({ destination: location.destination, path: location.cwd }, params.folder, signal);
 }
 
 function branchHasInheritContextWarning(ctx: ExtensionContext): boolean {
@@ -121,6 +140,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             if (Object.hasOwn(args, "alt") && typeof args.alt !== "boolean") {
               throw new Error(`${tool} alt must be a boolean.`);
             }
+            if (Object.hasOwn(args, "remote")) parseRemoteTarget(String(args.remote));
           }
           return args as DelegateParams;
         },
@@ -147,13 +167,16 @@ export default function delegateExtension(pi: ExtensionAPI): void {
 
           const origin = origins.get(toolCallId);
           if (!origin) throw new Error("Cannot identify the model-issued worker call.");
-          const prepared = prepareDelegateSession({ ...params, tool }, ctx, origin, { model, thinkingLevel });
-          const sessionCommand = workerResumeCommand(prepared.sessionFile);
+          const location = await workerRemoteLocation(params, signal);
+          const remote = location && formatRemoteLocation(location);
+          const workerInfo = remote ? `${modelInfo} Tools run on ${remote} over SSH.` : modelInfo;
+          const prepared = prepareDelegateSession({ ...params, tool, remote }, ctx, origin, { model, thinkingLevel });
+          const sessionCommand = workerResumeCommand(prepared.sessionFile, remote);
           const resumeHint = workerResumeHint(sessionCommand);
           // Publish before native startup or its first output capture can block.
           onUpdate?.({
-            content: [{ type: "text", text: `${modelInfo}\nStarting worker.` }],
-            details: { sessionFile: prepared.sessionFile, sessionCommand, cwd: prepared.cwd, status: "starting" },
+            content: [{ type: "text", text: `${workerInfo}\nStarting worker.` }],
+            details: { sessionFile: prepared.sessionFile, sessionCommand, cwd: prepared.cwd, ...remote && { remote }, status: "starting" },
           });
           try {
             const id = makeWorkerId();
@@ -174,21 +197,22 @@ export default function delegateExtension(pi: ExtensionAPI): void {
             });
             const output = await runEphemeralWorker(pi, {
               ...prepared, id, name: `${tool}-${id}`, paths, task: params.task, signal,
+              ...location && { env: remoteChildEnvironment(location) },
               onUpdate: onUpdate ? (update) => onUpdate({
-                ...update, content: [{ type: "text", text: modelInfo }, ...update.content],
+                ...update, content: [{ type: "text", text: workerInfo }, ...update.content],
                 details: { ...update.details, sessionCommand },
               }) : undefined,
             });
             return {
-              content: [{ type: "text", text: `${modelInfo}\n\n${formatWorkerResult(output.result)}` }],
-              details: { ...output.details, context, cwd: prepared.cwd, result: output.result,
+              content: [{ type: "text", text: `${workerInfo}\n\n${formatWorkerResult(output.result)}` }],
+              details: { ...output.details, context, cwd: prepared.cwd, ...remote && { remote }, result: output.result,
                 model: { provider: model.provider, id: model.id }, thinkingLevel, alt: params.alt === true,
                 args: prepared.args, sessionCommand },
             };
           } catch (error) {
             // Throwing preserves Pi's isError flag, including parent Escape.
             // Error details are discarded by Pi; keep recovery in model-visible text.
-            throw new Error(`${resumeHint}\n\n${modelInfo}\n${error instanceof Error ? error.message : String(error)}`);
+            throw new Error(`${resumeHint}\n\n${workerInfo}\n${error instanceof Error ? error.message : String(error)}`);
           }
         },
       });

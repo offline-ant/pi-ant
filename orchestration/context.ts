@@ -56,7 +56,8 @@ export function prepareFreshSession(cwd: string, purpose: string, data: unknown)
 }
 
 export function prepareDelegateSession(
-  request: { tool: EphemeralWorkerTool; folder?: string; task: string },
+  /** With `remote`, folder was resolved on that host; the local cwd stays the caller's. */
+  request: { tool: EphemeralWorkerTool; folder?: string; task: string; remote?: string },
   ctx: ExtensionContext,
   call: { toolName: string; toolCallId: string },
   runtime: { model: { provider: string; id: string }; thinkingLevel: string },
@@ -64,11 +65,12 @@ export function prepareDelegateSession(
   if (request.tool === "do" && request.folder !== undefined) {
     throw new Error("do does not accept folder; use delegate for a standalone assignment in another directory.");
   }
-  const cwd = resolveCwd(ctx.cwd, request.folder);
+  const cwd = request.remote === undefined ? resolveCwd(ctx.cwd, request.folder) : ctx.cwd;
+  const remote = request.remote === undefined ? {} : { remote: request.remote };
   const args = modelCliArgs(runtime.model, runtime.thinkingLevel);
   const context = EPHEMERAL_WORKER_CONTEXTS[request.tool];
   if (context !== "inherit") {
-    const sessionFile = prepareFreshSession(cwd, "delegate", { tool: request.tool, context, createdAt: new Date().toISOString() });
+    const sessionFile = prepareFreshSession(cwd, "delegate", { tool: request.tool, context, ...remote, createdAt: new Date().toISOString() });
     return { cwd, sessionFile, args: [...args, ...cleanContextCliArgs(context, fileURLToPath(new URL("./worker-frame.ts", import.meta.url)))] };
   }
   const parentSession = ctx.sessionManager.getSessionFile();
@@ -79,7 +81,7 @@ export function prepareDelegateSession(
   if (!sessionFile) throw new Error("Could not create a persistent session for do.");
   if (leafId === null) forked.resetLeaf();
   else forked.branch(leafId);
-  forked.appendCustomEntry("pi-orchestration:delegate-runtime", { task: request.task, parentSession, childSession: sessionFile, cwd });
+  forked.appendCustomEntry("pi-orchestration:delegate-runtime", { task: request.task, parentSession, childSession: sessionFile, cwd, ...remote });
   flushSessionFile(forked, sessionFile);
   return { cwd, sessionFile, args };
 }

@@ -7,6 +7,7 @@ import { createHerdrHost } from "./hosts/herdr.ts";
 import { createTmuxHost } from "./hosts/tmux.ts";
 import { createWebHost } from "./hosts/web.ts";
 import { childNestingEnvironment } from "./nesting.ts";
+import { REMOTE_ENV } from "./remote-session.ts";
 
 interface Environment {
   available: HostSelection[];
@@ -150,11 +151,13 @@ function createHost(pi: ExtensionAPI, kind: HostKind, endpoint: string): Host {
         signal?.throwIfAborted();
         const nesting = spec.kind === "pi" ? childNestingEnvironment()
           : process.env.PI_NESTED === undefined ? {} : { PI_NESTED: process.env.PI_NESTED };
+        // Pi children run their tools where this process does unless the spec names another target.
+        const remote: Record<string, string> = spec.kind === "pi" && process.env[REMOTE_ENV] ? { [REMOTE_ENV]: process.env[REMOTE_ENV] } : {};
         return native.start({
           ...spec,
           env: {
             ...(process.env.PI_CODING_AGENT_DIR ? { PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR } : {}),
-            ...spec.env, ...nesting, PI_ORCHESTRATION_HOST: kind, PI_ORCHESTRATION_ENDPOINT: endpoint,
+            ...remote, ...spec.env, ...nesting, PI_ORCHESTRATION_HOST: kind, PI_ORCHESTRATION_ENDPOINT: endpoint,
           },
         }, signal);
       };

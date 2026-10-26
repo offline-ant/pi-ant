@@ -148,13 +148,15 @@ test("Pi startup is serialized across extension APIs; cancelled queued work neve
   assert.deepEqual(started, ["first", "second"]);
 });
 
-test("all hosts receive the parent's activated depth and pinned selection before native startup", async () => {
+test("all hosts receive the parent's activated depth, remote target and pinned selection before native startup", async () => {
   const depthKey = Symbol.for("pi-orchestration:nesting-depth");
   const globals = globalThis as typeof globalThis & { [depthKey]?: number };
   const savedDepth = globals[depthKey];
   const savedEnv = process.env.PI_NESTED;
   const savedAgentDirectory = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = "/tmp/parent-agent-directory";
+  const savedRemote = process.env.PI_REMOTE;
+  process.env.PI_REMOTE = "me@box:/srv";
   delete globals[depthKey];
   process.env.PI_NESTED = "1";
   initializeNesting();
@@ -180,8 +182,9 @@ test("all hosts receive the parent's activated depth and pinned selection before
             assert.equal(data.spec?.env?.PI_ORCHESTRATION_ENDPOINT, endpoint);
             assert.equal(data.spec?.env?.CUSTOM, "preserved");
             assert.equal(data.spec?.env?.PI_CODING_AGENT_DIR, "/tmp/parent-agent-directory");
+            assert.equal(data.spec?.env?.PI_REMOTE, "me@box:/srv");
           } else {
-            for (const entry of ["PI_NESTED=2", `PI_ORCHESTRATION_HOST=${kind}`, `PI_ORCHESTRATION_ENDPOINT=${endpoint}`, "CUSTOM=preserved", "PI_CODING_AGENT_DIR=/tmp/parent-agent-directory"]) {
+            for (const entry of ["PI_REMOTE=me@box:/srv", "PI_NESTED=2", `PI_ORCHESTRATION_HOST=${kind}`, `PI_ORCHESTRATION_ENDPOINT=${endpoint}`, "CUSTOM=preserved", "PI_CODING_AGENT_DIR=/tmp/parent-agent-directory"]) {
               assert.ok(args.includes(entry), `Missing ${entry}: ${JSON.stringify(args)}`);
             }
           }
@@ -200,6 +203,7 @@ test("all hosts receive the parent's activated depth and pinned selection before
     if (savedDepth === undefined) delete globals[depthKey]; else globals[depthKey] = savedDepth;
     if (savedEnv === undefined) delete process.env.PI_NESTED; else process.env.PI_NESTED = savedEnv;
     if (savedAgentDirectory === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = savedAgentDirectory;
+    if (savedRemote === undefined) delete process.env.PI_REMOTE; else process.env.PI_REMOTE = savedRemote;
   }
 });
 

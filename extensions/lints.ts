@@ -20,6 +20,7 @@ import { Container, Spacer, Text, type Component } from "@earendil-works/pi-tui"
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { execSync, spawnSync } from "node:child_process";
+import { sessionRemote } from "../orchestration/remote-session.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -274,6 +275,9 @@ function collectLintWarnings(
 // ---------------------------------------------------------------------------
 
 export default function (pi: ExtensionAPI) {
+  // Local linters cannot see files on an SSH target; its edit and write tools
+  // belong to orchestration/extensions/remote.ts.
+  if (sessionRemote()) return;
   const hasTy = commandExists("ty");
   const hasShellcheck = commandExists("shellcheck");
   const cwd = process.cwd();

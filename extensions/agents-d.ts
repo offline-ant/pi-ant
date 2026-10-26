@@ -33,6 +33,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { sessionRemote } from "../orchestration/remote-session.ts";
 import {
   readdirSync,
   readFileSync,
@@ -265,6 +266,8 @@ export function buildAgentsDContext(cwd: string): AgentsDContext | null {
 
 export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
+    // Sessions whose tools run over SSH load the remote AGENTS.d (orchestration/remote-context.ts).
+    if (sessionRemote()) return;
     const result = buildAgentsDContext(ctx.cwd);
     if (!result) {
       return; // no AGENTS.d/ directory

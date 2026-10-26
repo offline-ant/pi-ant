@@ -19,7 +19,8 @@
       "./extensions/wait.ts",
       "./extensions/fork-here.ts",
       "./extensions/switch.ts",
-      "./extensions/delegate.ts"
+      "./extensions/delegate.ts",
+      "./extensions/remote.ts"
     ]
   }
 }

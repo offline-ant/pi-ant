@@ -87,6 +87,8 @@ another Pi child. Shell panels do not consume worker nesting depth.
   automatic retrospective. Optional `alt` appears on all three only when enabled
   with `/delegate-alt`; omitted/false retains the caller's model, true uses the
   other configured model, or the first if the caller is outside the pair.
+  Optional `remote: "user@host[:/path]"` runs the worker's tools on that SSH
+  host; see [Remote execution over SSH](#remote-execution-over-ssh).
 - `panel-start({name, command, folder?})`: start a server, watcher, or
   interactive program. The command runs in the shell Pi's `bash` tool resolves
   (`shellPath` setting, else bash), as a login shell (`-l`) when that is bash;
@@ -178,6 +180,69 @@ diagnostic details, not public lookup names.
 Independent sibling `do`/`delegate`/`fresh_look` calls run concurrently and
 join before the parent continues. Pi startup alone is serialized to avoid
 authentication races.
+
+## Remote execution over SSH
+
+A Pi process whose environment sets `PI_REMOTE=user@host[:/abs/path]` (any
+OpenSSH destination, including `~/.ssh/config` aliases; without a path, the
+remote home) keeps Pi itself local: providers and authentication, sessions,
+browser/web tools, codemode, workers and panels' native hosts. Only execution
+moves. `extensions/remote.ts` replaces `read`, `write`, `edit`, `bash`, `ls`
+and `find` with Pi's own tool definitions over remote `*Operations`
+(`remote-tools.ts`), and routes the user's `!`/`!!` commands through the
+`user_bash` hook. Relative paths resolve against the remote directory and `~`
+is the remote home. The remote host needs bash, coreutils, `base64 -d` and, for
+`find`, `rg`; nothing of Pi is installed there.
+
+- **Connection:** `ssh.ts` runs every call through one multiplexed OpenSSH
+  connection per destination (`ControlMaster=auto`, `ControlPersist=600`,
+  `BatchMode=yes`, sockets in the private `$TMPDIR/pi-ssh-<uid>/`, shared by
+  this user's Pi processes). Remote login shells differ (fish, zsh, bash), so
+  the remote command is a fixed bootstrap carrying a base64-encoded bash script
+  (limit about 90 KB per command). File contents travel on stdin, byte-exact.
+- **bash:** output streams as it arrives. The command runs in its own remote
+  process group under a watchdog that kills the group when ssh's stdin closes,
+  so Escape, timeouts and a dying Pi stop it remotely (without a tty, killing
+  the local ssh client alone would not). The exit status is reported separately,
+  so background descendants that keep stdout open do not hold the result, and a
+  missing status is reported as a connection failure. Truncated output's
+  full-output file is copied to the same path on the remote host.
+- **grep:** Pi's grep spawns ripgrep locally even with custom operations, so
+  remote sessions deactivate it and replace it with a tool that fails with "use
+  rg through bash".
+- **System prompt:** the `cwd` section shows the remote directory and a `remote`
+  section explains the split. Each run loads remote `AGENTS.override.md`/
+  `AGENTS.md`/`CLAUDE.md` from the remote cwd and its ancestors (Pi's rules,
+  without worktree shadowing) into project context, and remote `AGENTS.d/` into
+  the `agents_d` section, in one round trip. Local project context files (local
+  cwd and ancestors) and local skills are removed; global `~/.pi/agent/AGENTS.md`
+  stays. pi-ant's local `agents-d.ts` and `lints.ts` stand down. Workers started
+  with `--no-context-files` (`fresh_look`) receive no remote instructions.
+- **Failures:** an invalid or unreachable target never falls back to local
+  execution: tools fail with the SSH error, the prompt says the host is
+  unavailable, and the footer status shows `SSH <target> unavailable` instead of
+  `SSH <user@host:/cwd>`. A later call reconnects.
+- **Workers:** `do`, `delegate` and `fresh_look` accept `remote`. The parent
+  resolves the target and directory over SSH before starting a worker (a
+  `delegate`/`fresh_look` `folder` is a path on that host, relative to its
+  directory), then starts the ordinary local child with
+  `PI_REMOTE=<host>:<absolute dir>`. Without `remote`, a remote session's
+  workers, forks and nested workers inherit its target through the host
+  environment on every host (tmux, Herdr, Emacs, web). The recovery command
+  restores the worker's target, or unsets `PI_REMOTE` for local workers.
+- **Panels:** in a remote session `panel-start` runs
+  `ssh -t <host> 'cd <dir> && exec bash -l -c <command>'` under the same capture,
+  so `panel-send`/`wait` work with the remote shell's OSC 133 marks; `folder` is
+  remote.
+- **Resume:** sessions record `pi-orchestration:remote` entries; resuming one
+  without `PI_REMOTE` warns that tools now run locally.
+
+Limits: `wait({file|pid})`, the TUI's `@` file completion, `/cwd`, worktree
+commands, the edit preview diff before execution, and any other extension
+that touches the filesystem directly still act locally. Remote non-interactive
+shell startup files must not print to stdout. Changing the target of a running
+process requires a restart. `/switch` and `/take` are not remote-aware; a
+destination started without `PI_REMOTE` shows the resume warning above.
 
 ## Codemode delegation
 
@@ -545,6 +610,8 @@ or rewritten by orchestration cleanup; only already-persisted progress is recove
 - `/tmp/pi-orchestration-targets`: target records and exclusive request claims.
 - `/tmp/pi-terminal-*`: private terminal-input sockets, removed with owned targets.
 - `/tmp/pi-panel-*`: Herdr shell command liveness files, removed on close.
+- `$TMPDIR/pi-ssh-<uid>/`: private OpenSSH control sockets for remote
+  execution; masters exit 10 minutes after their last use.
 - `/tmp/pi-panel-output-*`: raw panel capture logs (`output.log`, unbounded
   while the panel lives) and `wait.json` cursors, removed on `panel-close`.
 
@@ -566,6 +633,8 @@ PI_TAKE_NATIVE=1 node scripts/test.mjs orchestration/take-native.test.ts
 node scripts/test.mjs extensions/self-compact.test.ts orchestration/worker-frame.test.ts orchestration/workers.test.ts
 node scripts/test.mjs orchestration/codemode-delegate.test.ts orchestration/delegate-alt.test.ts orchestration/extensions/delegate.test.ts orchestration/context.test.ts orchestration/worker-call.test.ts orchestration/worker-result.test.ts orchestration/worker-resume.test.ts
 node scripts/test.mjs orchestration/panel-output.test.ts orchestration/extensions/panels.test.ts orchestration/extensions/wait.test.ts extensions/exec-lints.test.ts
+node scripts/test.mjs orchestration/remote.test.ts orchestration/extensions/remote.test.ts orchestration/extensions/delegate.test.ts orchestration/host.test.ts
+PI_REMOTE_NATIVE=1 node scripts/test.mjs orchestration/remote-native.test.ts  # real sshd; PI_REMOTE_NATIVE_TARGET defaults to localhost
 PI_NATIVE_HOST_SMOKE=1 node scripts/test.mjs orchestration/extensions/wait.test.ts  # inside Herdr: same wait tests on Herdr panels
 PI_NATIVE_HOST_SMOKE=1 node scripts/test.mjs orchestration/hosts/native-smoke.test.ts
 PI_LIFECYCLE_SMOKE=1 node scripts/test.mjs orchestration/hosts/lifecycle-smoke.test.ts

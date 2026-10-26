@@ -9,6 +9,8 @@ import type { Host, HostTarget } from "../host-types.ts";
 import { capturedArgv, capturedExitStatus, commandOutput, createPanelOutput, promptReporting, promptWarning, readCursor, recordInput, removePanelOutput, scanOutput, GDB_COMMAND, PROMPT_INTEGRATION, writeCursor } from "../panel-output.ts";
 import { renderToolCall } from "../tool-call.ts";
 import { claimName, listTargets, readTarget, removeTarget, saveTarget, validateName } from "../workers.ts";
+import { formatRemoteLocation, resolveRemoteLocation, sessionRemote } from "../remote-session.ts";
+import { remoteTerminalArgv } from "../ssh.ts";
 
 const MAX_LINES = 2000;
 const MAX_BYTES = 50 * 1024;
@@ -29,6 +31,21 @@ function snapshot(text: string, lines = MAX_LINES): string {
   return (result.content || "(no output)") + (result.truncated
     ? "\n[Snapshot truncated to the last requested lines or 50KB; inspect the native panel for earlier output.]"
     : "");
+}
+
+/**
+ * Where a panel runs: locally in the bash tool's shell, or, in a session whose
+ * tools run over SSH, in a remote bash login shell at the remote directory.
+ */
+async function panelLaunch(command: string, folder: string | undefined, ctx: Pick<ExtensionContext, "cwd" | "isProjectTrusted">, signal?: AbortSignal): Promise<{ cwd: string; argv: string[]; label: string }> {
+  const remote = sessionRemote();
+  if (!remote) {
+    const cwd = resolveCwd(ctx.cwd, folder);
+    return { cwd, argv: panelArgv(command, ctx), label: cwd };
+  }
+  const session = await remote.location(signal);
+  const location = folder === undefined ? session : await resolveRemoteLocation({ destination: session.destination, path: session.cwd }, folder, signal);
+  return { cwd: ctx.cwd, argv: remoteTerminalArgv(location.destination, location.cwd, command), label: formatRemoteLocation(location) };
 }
 
 /** Run a panel command in the shell Pi's bash tool resolves, as a login shell when that is bash. */
@@ -112,7 +129,8 @@ export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMA
       + "After the command exits, its output stays readable and its name reserved until panel-close, but the panel accepts no more input. "
       + `To run several commands in sequence, start an interactive shell that reports its prompt with OSC 133 marks (\`fish\` 4+, or \`bash --rcfile ${PROMPT_INTEGRATION.bash} -i\`) and send each command with panel-send, which then returns its output and exit status; wait also works. `
       + `For gdb, start \`${GDB_COMMAND} …\` so it reports its prompt the same way, including when \`run\` or \`continue\` stops. `
-      + "Use built-in bash for ordinary foreground commands. Use wait, never sleep, to react when its output, shell prompt, or exit is ready.",
+      + "Use built-in bash for ordinary foreground commands. Use wait, never sleep, to react when its output, shell prompt, or exit is ready. "
+      + "When this session's tools run on a remote host over SSH, the command and folder are on that host.",
     parameters: Type.Object({
       name: nameSchema,
       command: Type.String({ minLength: 1 }),
@@ -122,7 +140,7 @@ export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMA
     async execute(_id, params, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
       const name = validateName(params.name);
-      const cwd = resolveCwd(ctx.cwd, params.folder);
+      const { cwd, argv, label } = await panelLaunch(params.command, params.folder, ctx, signal);
       const release = claimName(name);
       try {
         const existing = readTarget(name);
@@ -139,15 +157,15 @@ export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMA
         const output = createPanelOutput();
         let target: HostTarget;
         try {
-          target = { ...await host.start({ kind: "shell", name, cwd, argv: capturedArgv(panelArgv(params.command, ctx), output.log), placement: "worker", parent: host.parent() }, signal), outputPath: output.log };
+          target = { ...await host.start({ kind: "shell", name, cwd, argv: capturedArgv(argv, output.log), placement: "worker", parent: host.parent() }, signal), outputPath: output.log };
         } catch (error) {
           removePanelOutput(output.log);
           throw error;
         }
         saveTarget(target);
         return {
-          content: [{ type: "text", text: `Started: ${identity(target)} in ${cwd}` }],
-          details: { target, cwd, command: params.command },
+          content: [{ type: "text", text: `Started: ${identity(target)} in ${label}` }],
+          details: { target, cwd: label, command: params.command },
         };
       } finally {
         release();

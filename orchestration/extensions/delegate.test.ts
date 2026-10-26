@@ -11,9 +11,10 @@ import type { EphemeralWorkerTool } from "../delegate-policy.ts";
 import type { WorkerRequestFile } from "../worker-frame.ts";
 import { workerResumeCommand } from "../worker-resume.ts";
 import delegateExtension, { type DelegateParams } from "./delegate.ts";
+import { installSshStub, setSessionRemote } from "../test/ssh-stub.ts";
 
 const toolNames = ["do", "delegate", "fresh_look"] as const;
-interface Launch { args: string[]; sessionFile: string }
+interface Launch { args: string[]; sessionFile: string; env: Record<string, string> }
 
 function hasAlt(tool: Tool): boolean {
   const schema = tool.parameters as { properties: Record<string, unknown> };
@@ -31,6 +32,7 @@ async function fixture(t: TestContext, codemodeOnly = false) {
     if (previousHostState === undefined) delete globals[hostStateKey];
     else globals[hostStateKey] = previousHostState;
   });
+  setSessionRemote(t, undefined);
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "pi-delegate-sdk-"));
   const agentDir = path.join(directory, "agent");
   const config = path.join(agentDir, "delegate-alt.json");
@@ -437,6 +439,44 @@ test("do inherits the pre-call conversation, delegate and fresh_look start blank
     assert.equal(launch.args.includes("--system-prompt"), name === "fresh_look");
     assert.ok(!launch.args.includes("--no-extensions"));
   }
+});
+
+test("remote workers resolve their SSH target before startup and run with it; session targets are inherited", { timeout: 30_000 }, async (t) => {
+  const stub = installSshStub(t);
+  const project = path.join(stub.home, "proj");
+  fs.mkdirSync(path.join(project, "sub"), { recursive: true });
+  const f = await fixture(t);
+  f.current.setActiveToolsByName(["read", ...toolNames]);
+  await f.run("do", { task: "Local work" });
+  assert.equal(f.launches.at(-1)!.env.PI_REMOTE, undefined, "local sessions start local workers");
+
+  const remoteDo = await f.call("do", { task: "Remote work", remote: `box:${project}` });
+  assert.equal(remoteDo.isError, false, JSON.stringify(remoteDo));
+  assert.equal(f.launches.at(-1)!.env.PI_REMOTE, `box:${project}`);
+  assert.match(JSON.stringify(remoteDo.content), new RegExp(`Tools run on box:${project} over SSH`));
+  const details = remoteDo.details as { remote: string; sessionCommand: string; cwd: string };
+  assert.equal(details.remote, `box:${project}`);
+  assert.equal(details.cwd, f.directory, "the worker's Pi process and session stay local");
+  assert.match(details.sessionCommand, new RegExp(`'PI_REMOTE=box:${project}'`));
+
+  await f.call("delegate", { task: "Remote standalone", remote: "box:~/proj", folder: "sub" });
+  assert.equal(f.launches.at(-1)!.env.PI_REMOTE, `box:${path.join(project, "sub")}`);
+  assert.equal(SessionManager.open(f.launches.at(-1)!.sessionFile).getCwd(), f.directory);
+
+  const count = f.launches.length;
+  for (const [remote, error] of [["down", /SSH connection to down failed/], ["box:/no/such/dir", /is not accessible/], ["-oProxyCommand=x", /Invalid SSH destination/]] as const) {
+    const result = await f.call("delegate", { task: "Unreachable", remote });
+    assert.equal(result.isError, true);
+    assert.match(JSON.stringify(result.content), error);
+  }
+  assert.equal(f.launches.length, count, "failed targets start no worker");
+
+  // A session whose own tools run remotely passes its target on; folders are remote paths.
+  setSessionRemote(t, `box:${project}`);
+  await f.call("do", { task: "Inherited remote" });
+  assert.equal(f.launches.at(-1)!.env.PI_REMOTE, `box:${project}`);
+  await f.call("delegate", { task: "Inherited remote folder", folder: "sub" });
+  assert.equal(f.launches.at(-1)!.env.PI_REMOTE, `box:${path.join(project, "sub")}`);
 });
 
 test("worker compaction guidance follows the enabled tool selection for all three worker tools", { timeout: 30_000 }, async (t) => {
