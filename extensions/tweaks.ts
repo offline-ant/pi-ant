@@ -1,5 +1,5 @@
 /**
- * Tweaks — small session-level adjustments and # prompt snippets.
+ * Tweaks — # prompt snippet autocompletion.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -43,10 +43,5 @@ export default function (pi: ExtensionAPI) {
         return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
       },
     }));
-
-    let active = pi.getActiveTools();
-    // Enable grep (registered but not in the default active set)
-    if (!active.includes("grep")) active = [...active, "grep"];
-    pi.setActiveTools(active);
   });
 }

@@ -45,6 +45,7 @@ own its design, commands and layout instead of restating them.>
   or a paused clock instead of waiting out deadlines.
 - Wait on readiness or events, not fixed delays.
 - Use `uv` for Python dependency, environment, build and test work.
+- Prefer `rg` over `grep`/`find`.
 
 ## Git and safety
 

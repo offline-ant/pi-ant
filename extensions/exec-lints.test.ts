@@ -34,6 +34,21 @@ test("commands of 120 characters or more skip every lint except the git guards",
   }
 });
 
+test("standalone local grep is blocked once in favor of rg; pipeline filters, remote and panel commands are not", async () => {
+  const { handle, newTurn } = lints();
+  const bash = (command: string) => handle({ toolName: "bash", input: { command } });
+  const blocked = await bash("grep -rn foo src");
+  assert.equal(blocked?.block, true);
+  assert.match(blocked!.reason!, /Use `rg` \(ripgrep\)/);
+  assert.equal(await bash("grep -rn foo src"), undefined);
+  await newTurn();
+  assert.equal((await bash("cd src && /usr/bin/grep foo x.ts"))?.block, true);
+  for (const command of ["ps aux | grep node", "ssh host 'grep -rn foo /etc'", "ssh host grep foo /etc/hosts", "rg -n foo src"]) {
+    assert.equal(await bash(command), undefined, command);
+  }
+  assert.equal(await handle({ toolName: "panel-send", input: { name: "p", text: "grep foo x" } }), undefined);
+});
+
 test("a trailing pipe tail on build output is blocked once and never rewritten, keeping its redirections in the suggestion", async () => {
   const { handle, newTurn } = lints();
   // The real case: silently stripping `| tail …` also dropped `> s1-big.log`.

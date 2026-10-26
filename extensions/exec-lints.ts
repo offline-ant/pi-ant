@@ -7,11 +7,12 @@
  *   The git guards apply regardless of length.
  *
  * Grep:
- * - standalone local `grep`: blocked — use the built-in grep tool instead.
- * - `grep` used as a pipeline filter (`... | grep ...`) is allowed because the
- *   built-in grep tool cannot replace stdin filtering.
+ * - standalone local `grep` in bash: blocked on first attempt, allowed on retry
+ *   (warn once) — use `rg` (ripgrep) instead; the built-in grep tool is disabled.
+ * - `grep` used as a pipeline filter (`... | grep ...`) is allowed because it
+ *   filters stdin rather than searching files.
  * - `grep` inside remote/nested quoted commands (for example `ssh host '... grep ...'`)
- *   is ignored because the built-in grep tool cannot replace it.
+ *   is ignored because the remote may lack `rg`.
  *
  * Git safety:
  * - `git restore`: always blocked (other agents may have uncommitted work).
@@ -53,8 +54,8 @@ const SHELL_COMMAND_SEPARATORS = new Set([";", "&", "&&", "||", "|", "\n", "("])
 const SHELL_COMMAND_START_KEYWORDS = new Set(["if", "then", "do", "else", "elif", "while", "until"]);
 
 const GREP_NOTE =
-  "Use the built-in `grep` tool instead of the bash `grep` command. " +
-  "It's faster, respects .gitignore, and returns structured results.";
+  "Use `rg` (ripgrep) instead of `grep` for content and file search (`rg -n pattern path`, `rg --files -g glob`). " +
+  "It's faster and respects .gitignore. If you really need `grep`, retry the exact same command.";
 
 const SLEEP_NOTE =
   "Do not sleep to wait for builds, servers, panels, or processes. Use the `wait` tool, which returns as soon as " +
@@ -413,12 +414,13 @@ export default function (pi: ExtensionAPI) {
   // must re-earn permission for new checkout commands.
   const warnedCheckouts = new Set<string>();
   const warnedStashes = new Set<string>();
+  const warnedGreps = new Set<string>();
   let warnedPipeTail = false;
   let enabled = true;
 
   // ── Toggle command ──────────────────────────────────────────────────
   pi.registerCommand("exec-lints", {
-    description: "Toggle exec-lints on/off (git restore/checkout/stash guards, pipe-tail and sleep lints)",
+    description: "Toggle exec-lints on/off (git restore/checkout/stash guards, grep, pipe-tail and sleep lints)",
     handler: async (_args, ctx) => {
       enabled = !enabled;
       if (ctx.hasUI) {
@@ -431,6 +433,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("turn_start", async () => {
     warnedCheckouts.clear();
     warnedStashes.clear();
+    warnedGreps.clear();
     warnedPipeTail = false;
   });
 
@@ -440,12 +443,13 @@ export default function (pi: ExtensionAPI) {
     if (command == null) return undefined;
     const linted = command.length < LINT_MAX_COMMAND_LENGTH;
 
-    // grep command — block standalone local bash invocations only, use grep tool instead
-    if (linted && event.toolName === "bash" && hasBlockedLocalGrep(command)) {
+    // grep command — block the first standalone local bash invocation, use rg instead
+    if (linted && event.toolName === "bash" && !warnedGreps.has(command) && hasBlockedLocalGrep(command)) {
+      warnedGreps.add(command);
       return {
         block: true,
         reason:
-          `Blocked: \`grep\` in bash command: ${command}. ${GREP_NOTE}`,
+          `Blocked (first attempt): \`grep\` in bash command: ${command}. ${GREP_NOTE}`,
       };
     }
 
