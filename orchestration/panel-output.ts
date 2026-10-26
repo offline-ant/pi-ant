@@ -14,13 +14,17 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** Shell integration files emitting OSC 133 marks, for shells that do not emit them natively. */
-export const SHELL_INTEGRATION = {
+/** Integration files emitting OSC 133 prompt marks, for shells and programs that do not emit them natively. */
+export const PROMPT_INTEGRATION = {
   bash: fileURLToPath(new URL("./shell/osc133.bash", import.meta.url)),
   fish: fileURLToPath(new URL("./shell/osc133.fish", import.meta.url)),
+  gdb: fileURLToPath(new URL("./shell/osc133.gdb", import.meta.url)),
 };
-export const SHELL_INTEGRATION_HINT = "fish 4+ emits them natively; for bash or fish 3, source "
-  + `${SHELL_INTEGRATION.bash} from ~/.bashrc or ${SHELL_INTEGRATION.fish} from ~/.config/fish/config.fish, copying the file first on remote hosts.`;
+/** How gdb is started so that it reports its prompt and never stops at unmarked pager or confirmation questions. */
+export const GDB_COMMAND = `gdb -q -x ${PROMPT_INTEGRATION.gdb} -ex 'set pagination off' -ex 'set confirm off'`;
+export const PROMPT_INTEGRATION_HINT = "fish 4+ emits them natively; for bash or fish 3, source "
+  + `${PROMPT_INTEGRATION.bash} from ~/.bashrc or ${PROMPT_INTEGRATION.fish} from ~/.config/fish/config.fish, copying the file first on remote hosts. `
+  + `Start gdb as \`${GDB_COMMAND} …\`.`;
 
 const quote = (text: string): string => `'${text.replaceAll("'", `'"'"'`)}'`;
 /** util-linux `script` writes these lines around the captured output, even with -q. */
@@ -137,9 +141,9 @@ export function promptWarning(reporting: PromptReporting): string | undefined {
   if (reporting.kind === "prompt") return undefined;
   const consequence = "so wait without match cannot tell when input is done";
   if (reporting.kind === "program") {
-    return `Warning: Input goes to ${reporting.command ? `\`${reporting.command}\`` : "a running command"}, which shows no OSC 133 prompt marks (for example ssh to a host without shell integration), ${consequence}; it ends only when that command exits. Use wait with match, or install shell integration where that shell runs: ${SHELL_INTEGRATION_HINT}`;
+    return `Warning: Input goes to ${reporting.command ? `\`${reporting.command}\`` : "a running command"}, which shows no OSC 133 prompt marks (for example ssh to a host without shell integration), ${consequence}; it ends only when that command exits. Use wait with match, or install shell integration where that shell runs: ${PROMPT_INTEGRATION_HINT}`;
   }
-  return `Warning: Input goes to the panel's command, which has shown no OSC 133 prompt marks, ${consequence}; it ends only when that command exits. Use wait with match. If that command is a shell, it can report its prompt with shell integration: ${SHELL_INTEGRATION_HINT}`;
+  return `Warning: Input goes to the panel's command, which has shown no OSC 133 prompt marks, ${consequence}; it ends only when that command exits. Use wait with match. If that command is a shell or gdb, it can report its prompt: ${PROMPT_INTEGRATION_HINT}`;
 }
 
 /** Terminal output as plain text: control sequences removed, carriage-return overwrites resolved. */
@@ -263,18 +267,21 @@ export function scanOutput(log: string, offset: number, match: RegExp | undefine
 }
 
 /**
- * Plain output of a command typed at offset `input` that ended at `end`: from its
- * command start `C` (omitting the echoed command line), bounded to the last bytes.
+ * Plain output of a command typed at offset `input` that ended at `end`, bounded to
+ * the last bytes: from its command start `C`, or, for programs that mark no command
+ * start (gdb), between the echoed input line and its command end `D`.
  */
 export function commandOutput(log: string, input: number, end: number): string {
   const start = Math.max(input, end - READ_LIMIT);
   const buffer = Buffer.alloc(end - start);
   const fd = fs.openSync(log, "r");
   try { fs.readSync(fd, buffer, 0, buffer.length, start); } finally { fs.closeSync(fd); }
-  const commandStart = marksIn(buffer, start).find((mark) => mark.kind === "C");
-  // Without a command start the line was empty, unless the read cut it off.
+  const marks = marksIn(buffer, start);
+  const commandStart = marks.find((mark) => mark.kind === "C");
+  // Without a command start, output follows the echoed line (or the line the bounded read cut)
+  // when a command end closes it; a prompt start without one means no command ran.
   const body = commandStart ? buffer.subarray(commandStart.end - start)
-    : start > input ? buffer.subarray(buffer.indexOf(0x0a) + 1)
+    : start > input || marks.at(-1)?.kind === "D" ? buffer.subarray(buffer.indexOf(0x0a) + 1)
     : Buffer.alloc(0);
   const lines = body.toString("utf8").split("\n").map(plainLine);
   while (lines.length && lines.at(-1)!.trim() === "") lines.pop();

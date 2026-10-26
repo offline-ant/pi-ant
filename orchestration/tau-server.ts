@@ -58,17 +58,20 @@ function publication(file: string): Publication | undefined {
     || !("pid" in parsed) || !Number.isSafeInteger(parsed.pid) || Number(parsed.pid) <= 0) {
     throw new Error(`Malformed Tau discovery at ${file}; inspect it before starting another server.`);
   }
+  // A stopped owner's advertisement is obsolete, not configuration for the next
+  // server. Check liveness before validating its browser listener metadata.
+  if (!alive(Number(parsed.pid))) return undefined;
   let browserUrls: string[] | undefined;
   if ("browserUrls" in parsed) {
     try {
       if (!Array.isArray(parsed.browserUrls)) throw new Error();
-      const endpoint = new URL(parsed.endpoint);
-      const hosts = localHosts();
+      // Browsers use Tau's HTTPS listener, possibly through configured host names
+      // that this process cannot verify; only the endpoint must be local.
       browserUrls = [...new Set(parsed.browserUrls.map((value: unknown) => {
         if (typeof value !== "string") throw new Error();
         const url = new URL(value);
-        if (url.protocol !== "http:" || endpoint.protocol !== url.protocol || url.port !== endpoint.port
-          || !hosts.has(url.hostname) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error();
+        if (url.protocol !== "https:" || ["0.0.0.0", "[::]"].includes(url.hostname)
+          || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error();
         return url.origin;
       }))];
     } catch { throw new Error(`Malformed Tau browser URLs at ${file}; inspect discovery before retrying.`); }
@@ -92,6 +95,22 @@ async function probe(endpoint: string, timeoutMs: number): Promise<void> {
   }
 }
 
+/** Discover an existing server without starting or replacing anything. */
+export async function findTauServer(env: NodeJS.ProcessEnv = process.env, timeoutMs = 5_000): Promise<TauServer | undefined> {
+  const agentDir = path.resolve(env.PI_CODING_AGENT_DIR || path.join(env.HOME || os.homedir(), ".pi", "agent"));
+  if (env.PI_ORCHESTRATION_HOST?.trim() === "web") {
+    const endpoint = env.PI_ORCHESTRATION_ENDPOINT;
+    if (!endpoint) throw new Error("Explicit web orchestration requires PI_ORCHESTRATION_ENDPOINT.");
+    await probe(endpoint, timeoutMs);
+    return { endpoint, started: false };
+  }
+  const record = publication(path.join(agentDir, "tau", "server.json"));
+  if (!record) return undefined;
+  await probe(record.endpoint, timeoutMs);
+  const logFile = path.join(agentDir, "tau", "server.log");
+  return { ...record, started: false, ...(fs.existsSync(logFile) ? { logFile } : {}) };
+}
+
 /** Start only on explicit request, never during extension discovery. Ready servers become shared. */
 export async function ensureTauServer(env: NodeJS.ProcessEnv = process.env, timing: StartupTiming = {}): Promise<TauServer> {
   const startupTimeoutMs = timing.startupTimeoutMs ?? 30_000;
@@ -101,18 +120,7 @@ export async function ensureTauServer(env: NodeJS.ProcessEnv = process.env, timi
   const directory = path.join(agentDir, "tau");
   const runtimeFile = path.join(directory, "server.json");
   const logFile = path.join(directory, "server.log");
-  const explicit = env.PI_ORCHESTRATION_HOST?.trim() === "web" ? env.PI_ORCHESTRATION_ENDPOINT : undefined;
-  if (env.PI_ORCHESTRATION_HOST?.trim() === "web") {
-    if (!explicit) throw new Error("Explicit web orchestration requires PI_ORCHESTRATION_ENDPOINT; no Tau server was started.");
-    await probe(explicit, requestTimeoutMs);
-    return { endpoint: explicit, started: false };
-  }
-  const reuse = async (): Promise<TauServer | undefined> => {
-    const record = publication(runtimeFile);
-    if (!record || !alive(record.pid)) return undefined;
-    await probe(record.endpoint, requestTimeoutMs);
-    return { ...record, started: false, ...(fs.existsSync(logFile) ? { logFile } : {}) };
-  };
+  const reuse = () => findTauServer(env, requestTimeoutMs);
   const existing = await reuse();
   if (existing) return existing;
 
@@ -176,7 +184,7 @@ export async function ensureTauServer(env: NodeJS.ProcessEnv = process.env, timi
       while (true) {
         if (closed || failed) throw new Error(`Could not start pi-tau-web-server from PATH. Check its installation and ${logFile}.`);
         const record = publication(runtimeFile);
-        if (record && alive(record.pid)) {
+        if (record) {
           if (record.pid !== child.pid) {
             // A manually started server won publication. Never stop or replace it.
             await stop();

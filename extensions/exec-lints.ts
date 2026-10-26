@@ -1,6 +1,11 @@
 /**
  * Execution-level lints and safety guards.
  *
+ * Length limit:
+ * - The grep, sleep, pipe-tail, and (disabled) Rust formatter lints apply only to
+ *   commands shorter than 120 characters; longer commands pass unchanged.
+ *   The git guards apply regardless of length.
+ *
  * Grep:
  * - standalone local `grep`: blocked — use the built-in grep tool instead.
  * - `grep` used as a pipeline filter (`... | grep ...`) is allowed because the
@@ -78,6 +83,8 @@ const REDIRECTION_RE = /^(?:\d+|&)?(?:>&|<&|>>|>\||<<<|<<|>|<)(.*)$/;
 const COMMAND_WRAPPERS = new Set(["command", "env", "exec", "nice", "nohup", "setsid", "stdbuf", "sudo", "time", "timeout"]);
 const WRAPPER_DURATION_RE = /^\d+(?:\.\d+)?[smhd]?$/;
 const SHELLS = new Set(["bash", "dash", "fish", "sh", "zsh"]);
+/** Commands at least this long skip every lint except the git guards. */
+const LINT_MAX_COMMAND_LENGTH = 120;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -431,9 +438,10 @@ export default function (pi: ExtensionAPI) {
     if (!enabled) return undefined;
     const command = extractCommand(event);
     if (command == null) return undefined;
+    const linted = command.length < LINT_MAX_COMMAND_LENGTH;
 
     // grep command — block standalone local bash invocations only, use grep tool instead
-    if (event.toolName === "bash" && hasBlockedLocalGrep(command)) {
+    if (linted && event.toolName === "bash" && hasBlockedLocalGrep(command)) {
       return {
         block: true,
         reason:
@@ -442,7 +450,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     // sleep — always block in commands the agent waits on; panel-start commands run on their own.
-    if (event.toolName !== "panel-start" && hasBlockedSleep(command)) {
+    if (linted && event.toolName !== "panel-start" && hasBlockedSleep(command)) {
       return {
         block: true,
         reason: `Blocked: \`sleep\` in ${event.toolName} command: ${command}. ${SLEEP_NOTE}`,
@@ -452,8 +460,9 @@ export default function (pi: ExtensionAPI) {
     // Optional Rust formatter lint. Uncomment to re-enable.
     /*
     if (
-      /(?:^|[;&|\n]\s*)cargo\s+fmt\b/.test(command) ||
-      /(?:^|[;&|\n]\s*)rustfmt\b/.test(command)
+      linted &&
+      (/(?:^|[;&|\n]\s*)cargo\s+fmt\b/.test(command) ||
+        /(?:^|[;&|\n]\s*)rustfmt\b/.test(command))
     ) {
       return {
         block: true,
@@ -491,7 +500,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     // pipe tail lint — block the first attempt, allow a retry
-    const tail = getBlockedLocalPipeTail(command);
+    const tail = linted ? getBlockedLocalPipeTail(command) : undefined;
     if (tail && !warnedPipeTail) {
       warnedPipeTail = true;
       return {

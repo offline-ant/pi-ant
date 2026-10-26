@@ -36,6 +36,7 @@
       "./extensions/copy-quote/index.ts",
       "./extensions/git-commit.ts",
       "./extensions/workboard.ts",
+      "./extensions/init-agents-md.ts",
       "./extensions/worktree.ts",
       "./extensions/document-flow-review.ts",
       "./extensions/vim.ts",

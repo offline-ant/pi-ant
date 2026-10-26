@@ -9,7 +9,7 @@ import { createDelegateAltController, delegateModelLabel, type DelegateModelPair
 import { createCodemodeDelegateController } from "../codemode-delegate.ts";
 import { createWorkerArtifacts, formatWorkerResult, makeWorkerId, writeWorkerRequest } from "../worker-frame.ts";
 import { runEphemeralWorker } from "../workers.ts";
-import { WORKER_DESIGN_PRINCIPLES } from "../worker-principles.ts";
+import { WORKER_SCOPE_RULE } from "../worker-scope.ts";
 import { workerResumeCommand, workerResumeHint } from "../worker-resume.ts";
 
 const delegateParams = Type.Object({
@@ -163,7 +163,7 @@ export default function delegateExtension(pi: ExtensionAPI): void {
               id,
               task: [tool === "do"
                 ? "Complete the task below using the existing conversation. Use nested do calls only for genuinely separate subtasks; do not forward the whole assignment."
-                : "", WORKER_DESIGN_PRINCIPLES,
+                : "", WORKER_SCOPE_RULE,
                 tools.includes("self_compact") ? "Use self_compact only when substantial work remains; never to wrap up." : "",
                 "Task:", params.task].filter(Boolean).join("\n\n"),
               tools,

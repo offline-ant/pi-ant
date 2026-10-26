@@ -5,7 +5,7 @@ export interface PromptSnippet {
 }
 
 export const PRINCIPLES_SUFFIX =
-  "Note our principles: Prefer the smallest clean long-term design. Treat the cost of change as zero and optimize for the clean end state. We have no users or legacy state to preserve: do not write compatibility code or parsers for obsolete formats. Prefer straightforward solutions over preemptive defensiveness; before adding a new choice or mechanism, establish that it is required. Do the hard part first; remove stale code and avoid shims, duplicate mechanisms, and speculative abstractions. Code not written cannot be wrong; delete anything that does not need to exist. Simplify as far as possible without worsening asymptotic complexity. Rename unclear concepts to match reality.";
+  "Note our principles: Prefer the smallest clean long-term design. Treat the cost of change as zero and optimize for the clean end state. We have no users or legacy state to preserve: do not write compatibility code or parsers for obsolete formats. Prefer straightforward solutions over preemptive defensiveness; before adding a new choice or mechanism, establish that it is required. A request or accepted plan establishes its scope; consumer count does not, and a general design no larger than the special case is the simpler one. Do the hard part first; remove stale code and avoid shims, duplicate mechanisms, and speculative abstractions. Code not written cannot be wrong; delete anything that does not need to exist. Simplify as far as possible without worsening asymptotic complexity. Rename unclear concepts to match reality.";
 
 export const EDIT_PRINCIPLES_SUFFIX =
   "Note our edit principels: Write for humans, not completeness checkers. Text never written is never wrong; omission is often better than another qualification. State the main point early and cut anything that does not serve the document's job. Prefer direct verbs, concrete nouns, visible actors, and plain terms. Let each paragraph do one thing. Make the strongest useful claim plainly, then narrow it where the exception matters instead of burdening every sentence with caveats. Name genuine uncertainty precisely. Structure for skimming, vary sentence rhythm naturally, and avoid canned transitions, artificial symmetry, significance puffery, and tidy conclusions that add nothing. Do not polish text that should be deleted.";
@@ -17,7 +17,7 @@ export const SIMPLIFY_SUFFIX =
   "Before changing anything, propose what can be deleted, inlined, merged, renamed, or not built. Prefer the smallest clean end state over options, compatibility layers, and abstractions that do not pull their weight. Show concrete simplifications and ask about material design choices; wait for approval before implementing them.";
 
 export const DELEGATE_REVIEW_SUFFIX =
-  "Use delegate (alt=true if available) for a generic review of this, requesting only issues and potential improvements. Then evaluate its suggestions: apply clearly good ones, ignore bad ones, and ask me about anything uncertain.";
+  "Use delegate (alt=true if available) for a generic review of this, requesting only issues and potential improvements, not narrowing of the requested scope unless that removes substantial complexity. Then evaluate its suggestions: apply clearly good ones, ignore bad ones, and ask me about anything uncertain.";
 
 export const TS_SUFFIX = "Thoughts? Suggestions?";
 
@@ -39,7 +39,7 @@ Focus on preventing the common failure mode: adding a plausible abstraction befo
 
 Check:
 
-1. Smallest end-state shape: what is the simplest API shape that satisfies the real use cases? Can this be a concrete type/function before it becomes a trait, facade, callback wrapper, provider abstraction, or plugin seam?
+1. Smallest end-state shape: what is the simplest API shape that satisfies the requested scope? Can this be a concrete type/function before it becomes a trait, facade, callback wrapper, provider abstraction, or plugin seam?
 2. State ownership and boundaries: what state is durable/shared vs per-session/per-evaluation/per-call? Is runtime/temporary state leaking into durable objects?
 3. No alternate semantics: do fast paths, trusted paths, local shortcuts, caches, or materialized views preserve the same semantic contract, or explicitly name their different authority contract?
 4. Naming matches reality: which stale names should be removed now rather than carried as compatibility?

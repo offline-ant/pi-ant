@@ -128,7 +128,7 @@ test("a second command is rejected during preflight and new work cancels release
   finish();
   await first;
   assert.deepEqual(f.counts(), { prepares: 1, replacements: 0 });
-  assert.match(f.messages.at(-1)!, /became busy/);
+  assert.match(f.messages.at(-1)!, /current turn and queued messages/);
 });
 
 test("active worker, including idle supervision, blocks switching without a registry entry", async (t) => {

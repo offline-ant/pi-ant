@@ -6,7 +6,7 @@ import { truncateTail, type ExtensionAPI } from "@earendil-works/pi-coding-agent
 import { Type } from "typebox";
 import { hostForTarget } from "../host.ts";
 import type { HostTarget } from "../host-types.ts";
-import { capturedExitStatus, lastPromptMark, promptReporting, promptWarning, readCursor, scanOutput, SHELL_INTEGRATION_HINT, writeCursor, type PromptMark, type ScanOutcome } from "../panel-output.ts";
+import { capturedExitStatus, lastPromptMark, promptReporting, promptWarning, readCursor, scanOutput, PROMPT_INTEGRATION_HINT, writeCursor, type PromptMark, type ScanOutcome } from "../panel-output.ts";
 import { renderToolCall } from "../tool-call.ts";
 import { readTarget, validateName } from "../workers.ts";
 
@@ -70,7 +70,7 @@ function scan(log: string, offset: number, regex: RegExp | undefined, promptAfte
 function describe(outcome: Outcome, source: string): string {
   switch (outcome.kind) {
     case "matched": return `Matched in ${source}`;
-    case "prompt": return `The shell in ${source} is back at its prompt${outcome.status !== undefined ? ` (last command exit status ${outcome.status})` : ""}`;
+    case "prompt": return `The shell or program in ${source} is back at its prompt${outcome.status !== undefined ? ` (last command exit status ${outcome.status})` : ""}`;
     case "exited": return `${source} exited${outcome.status !== undefined ? ` with status ${outcome.status}` : ""}`;
     case "timeout": return `Timed out waiting for ${source}`;
   }
@@ -86,10 +86,10 @@ export default function waitExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "wait",
     label: "Wait",
-    description: "Wait until a panel, log file, or process is ready instead of sleeping. Returns at the first of: a line matching `match` (JavaScript regex) in new output; a panel's shell returning to its prompt; the panel's or pid's process exiting; or timeoutSeconds. "
+    description: "Wait until a panel, log file, or process is ready instead of sleeping. Returns at the first of: a line matching `match` (JavaScript regex) in new output; a panel's shell or gdb returning to its prompt; the panel's or pid's process exiting; or timeoutSeconds. "
       + "For a panel, new output is everything since the last panel-send or previous wait on it, so output printed just before the call is not missed. "
-      + "A command typed into an interactive shell in a panel (including over ssh) is detected as finished only when that shell reports its prompt with OSC 133 marks; panel-send warns when its input goes somewhere without them. "
-      + `${SHELL_INTEGRATION_HINT} For a file, only text appended after the call counts and \`match\` is required.`,
+      + "A command typed into an interactive shell or gdb in a panel (including over ssh) is detected as finished only when it reports its prompt with OSC 133 marks; panel-send warns when its input goes somewhere without them. "
+      + `${PROMPT_INTEGRATION_HINT} For a file, only text appended after the call counts and \`match\` is required.`,
     promptSnippet: "Wait for panel output, shell prompts, process exit, or log lines, instead of sleep",
     promptGuidelines: ["Never run sleep to wait for builds, servers, or panels; use wait so you continue as soon as the result is ready."],
     parameters: Type.Object({

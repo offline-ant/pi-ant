@@ -134,12 +134,12 @@ test("browser failure after confirmed resume returns a usable encoded link, neve
     assert.match(url, /\/#session=live%20%2F%3F%23$/);
     throw new Error("private-password from opener");
   }, { endpoint, pid: 123, logFile: "/private/tau/server.log", started: true,
-    browserUrls: ["http://private-user:private-password@192.0.2.2:3001/"] });
+    browserUrls: ["https://private-user:private-password@pc:3443/"] });
   const result = await prepared.start();
   assert.match(result, /Browser could not be opened/);
   assert.match(result, /PID: 123; log: \/private\/tau\/server.log/);
   assert.match(result, /independently of this panel/);
-  assert.ok(result.includes("http://192.0.2.2:3001/#session=live%20%2F%3F%23"));
+  assert.ok(result.includes("https://pc:3443/#session=live%20%2F%3F%23"));
   assert.doesNotMatch(result, /private-user|private-password/);
 });
 

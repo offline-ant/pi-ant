@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import { resolveCwd } from "../context.ts";
 import { getHost, hostForTarget } from "../host.ts";
 import type { Host, HostTarget } from "../host-types.ts";
-import { capturedArgv, capturedExitStatus, commandOutput, createPanelOutput, promptReporting, promptWarning, readCursor, recordInput, removePanelOutput, scanOutput, SHELL_INTEGRATION, writeCursor } from "../panel-output.ts";
+import { capturedArgv, capturedExitStatus, commandOutput, createPanelOutput, promptReporting, promptWarning, readCursor, recordInput, removePanelOutput, scanOutput, GDB_COMMAND, PROMPT_INTEGRATION, writeCursor } from "../panel-output.ts";
 import { renderToolCall } from "../tool-call.ts";
 import { claimName, listTargets, readTarget, removeTarget, saveTarget, validateName } from "../workers.ts";
 
@@ -110,7 +110,8 @@ export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMA
     label: "Start Panel",
     description: "Start a long-running command in a named terminal panel: a server, watcher, or interactive program. The command runs in the bash tool's shell (a login shell when that is bash). "
       + "After the command exits, its output stays readable and its name reserved until panel-close, but the panel accepts no more input. "
-      + `To run several commands in sequence, start an interactive shell that reports its prompt with OSC 133 marks (\`fish\` 4+, or \`bash --rcfile ${SHELL_INTEGRATION.bash} -i\`) and send each command with panel-send, which then returns its output and exit status; wait also works. `
+      + `To run several commands in sequence, start an interactive shell that reports its prompt with OSC 133 marks (\`fish\` 4+, or \`bash --rcfile ${PROMPT_INTEGRATION.bash} -i\`) and send each command with panel-send, which then returns its output and exit status; wait also works. `
+      + `For gdb, start \`${GDB_COMMAND} …\` so it reports its prompt the same way, including when \`run\` or \`continue\` stops. `
       + "Use built-in bash for ordinary foreground commands. Use wait, never sleep, to react when its output, shell prompt, or exit is ready.",
     parameters: Type.Object({
       name: nameSchema,
@@ -179,7 +180,7 @@ export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMA
     name: "panel-send",
     label: "Send to Panel",
     description: "Type a line of text or press native keys such as ctrl+c and Escape in a panel, then return its output. Supply exactly one of text or keys. A panel whose command has exited accepts no input. "
-      + `Text typed at a shell prompt that emits OSC 133 prompt marks (also over ssh) returns that command's exit status and full output when it finishes within ${commandGraceMs / 1000} seconds; a longer command returns the panel screen, so follow it with wait. `
+      + `Text typed at a shell or gdb prompt that emits OSC 133 prompt marks (also over ssh) returns that command's full output (and a shell's exit status) when it finishes within ${commandGraceMs / 1000} seconds; a longer command returns the panel screen, so follow it with wait. `
       + "Keys and input to a running program return the screen shortly afterwards. This is terminal input, not draft-safe Pi prompt submission. Text sent where no shell reports its prompt, such as ssh to a host without shell integration, returns a warning: wait without match cannot see it finish.",
     parameters: Type.Object({
       name: nameSchema,
@@ -210,7 +211,7 @@ export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMA
           // The result already shows this output; later waits continue after it.
           writeCursor(log, { ...readCursor(log), cursor: progress.end });
           // A nested shell's first prompt (ssh) also ends the line that started it.
-          const summary = `Back at the shell prompt after ${elapsed}${progress.status !== undefined ? ` (exit status ${progress.status})` : ""}. Output:`;
+          const summary = `Back at the prompt after ${elapsed}${progress.status !== undefined ? ` (exit status ${progress.status})` : ""}. Output:`;
           return {
             content: [{ type: "text", text: `${identity(target)}\n${summary}\n${snapshot(commandOutput(log, input, progress.end))}` }],
             details: { target, outcome: progress.kind, ...(progress.status !== undefined ? { status: progress.status } : {}) },

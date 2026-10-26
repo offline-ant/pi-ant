@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
+import * as https from "node:https";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -92,10 +93,15 @@ test("native /switch autostarts isolated Tau, keeps every source open and refres
     const result = await exec(process.env.HERDR_BIN_PATH || "herdr", args, { env: { ...process.env, HERDR_SOCKET_PATH: endpoint }, timeout: 120_000 });
     return result.stdout.trim() ? JSON.parse(result.stdout) as Record<string, unknown> : {};
   };
-  const listener = net.createServer();
-  await new Promise<void>((resolve) => listener.listen(0, "0.0.0.0", resolve));
-  const port = (listener.address() as net.AddressInfo).port;
-  await new Promise<void>((resolve) => listener.close(() => resolve()));
+  const freePort = async (): Promise<number> => {
+    const listener = net.createServer();
+    await new Promise<void>((resolve) => listener.listen(0, "0.0.0.0", resolve));
+    const free = (listener.address() as net.AddressInfo).port;
+    await new Promise<void>((resolve) => listener.close(() => resolve()));
+    return free;
+  };
+  const port = await freePort();
+  const httpsPort = await freePort();
   const workspaces = new Set<string>();
   let base = "";
   let headers: Record<string, string> = {};
@@ -114,7 +120,7 @@ test("native /switch autostarts isolated Tau, keeps every source open and refres
       args: ["--provider", "switch-native-fixture", "--model", "one", "--thinking", "high", "--no-skills", "--no-context-files", "--no-prompt-templates"],
       env: { ...switchEnvironment({ HOME: directory, PI_CODING_AGENT_DIR: agentDir, HERDR_SOCKET_PATH: endpoint }),
         PATH: `${bin}${path.delimiter}${process.env.PATH || ""}`, PI_CODING_AGENT_SESSION_DIR: path.dirname(sessionDir),
-        TAU_HOST: "", TAU_PORT: String(port), TAU_USER: "switch-test", TAU_PASS: "switch-test-secret" },
+        TAU_HOST: "", TAU_HTTP_PORT: String(port), TAU_PORT: String(httpsPort), TAU_USER: "switch-test", TAU_PASS: "switch-test-secret" },
     };
     // Match a Tau child originally started outside Herdr. In particular, the
     // CLI treats an empty socket variable as invalid rather than as "default".
@@ -145,18 +151,26 @@ test("native /switch autostarts isolated Tau, keeps every source open and refres
     assert.equal(new URL(base).port, String(port));
     assert.deepEqual(lines(launches), [String(initialRecord.pid)], "exactly one local fork server was launched");
     // Default host is the wildcard address: every local IPv4 interface serves
-    // Tau, is advertised without credentials, and still requires authentication.
+    // Tau over HTTPS, is advertised without credentials, and still requires
+    // authentication. Plain HTTP stays on loopback.
     const browserUrls = initialRecord.browserUrls ?? [];
     assert.ok(!browserUrls.some((url) => /switch-test|secret|@/.test(url)), "browser URLs carry no credentials");
     const external = Object.values(os.networkInterfaces()).flatMap((entries) => entries ?? [])
       .find((entry) => !entry.internal && entry.family === "IPv4")?.address;
     if (external) {
-      const url = `http://${external}:${port}`;
+      const url = `https://${external}:${httpsPort}`;
       assert.ok(browserUrls.includes(url), `discovery advertises ${url}`);
-      const anonymous = await fetch(`${url}/api/live-sessions`, { signal: AbortSignal.timeout(30_000) });
-      assert.equal(anonymous.status, 401, "non-loopback access requires authentication");
-      const authenticated = await fetch(`${url}/api/live-sessions`, { headers, signal: AbortSignal.timeout(30_000) });
-      assert.equal(authenticated.status, 200, "non-loopback access works with the configured credentials");
+      const ca = fs.readFileSync(path.join(agentDir, "tau", "tls", "ca.crt"));
+      const status = (requestHeaders: Record<string, string>) => new Promise<number>((resolve, reject) => {
+        https.get(`${url}/api/live-sessions`, { ca, headers: requestHeaders, timeout: 30_000 }, (response) => {
+          response.resume();
+          resolve(response.statusCode ?? 0);
+        }).on("error", reject);
+      });
+      assert.equal(await status({}), 401, "non-loopback access requires authentication");
+      assert.equal(await status(headers), 200, "non-loopback access works with the configured credentials and generated CA");
+      await assert.rejects(fetch(`http://${external}:${port}/api/live-sessions`, { signal: AbortSignal.timeout(30_000) }),
+        "plain HTTP is not reachable from the network");
     } else t.diagnostic("No non-internal IPv4 interface; skipped external bind check");
     await until(async () => (await sessions()).some((entry) => entry.sessionFile === sessionFile), "Tau destination readiness", 75_000);
     const live = (await sessions()).find((entry) => entry.sessionFile === sessionFile)!;

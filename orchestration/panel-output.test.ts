@@ -73,7 +73,7 @@ test("input is classified by whether a shell reporting its prompt receives it", 
   assert.deepEqual(promptReporting(log, size), program, "without input, the current state is classified");
   const none = promptWarning(promptReporting(logWith("mac> "), 5))!;
   assert.match(none, /Input goes to the panel's command, which has shown no OSC 133 prompt marks/);
-  assert.match(none, /If that command is a shell, it can report its prompt with shell integration/);
+  assert.match(none, /If that command is a shell or gdb, it can report its prompt: .*Start gdb as `gdb -q -x \S+\/osc133\.gdb /);
   assert.equal(promptWarning({ kind: "prompt" }), undefined);
   const bash = promptReporting(logWith(`${prompt}\x1b]133;C\x07`), Buffer.byteLength(`${prompt}\x1b]133;C\x07`));
   assert.equal(bash.kind === "program" && bash.command, undefined);
@@ -95,6 +95,17 @@ test("a typed line ends at the first command end after it, and its output starts
   const emptyEnd = Buffer.byteLength(empty) - 2;
   assert.deepEqual(scanOutput(logWith(empty), input, undefined, input).found, { outcome: { kind: "prompt" }, end: emptyEnd });
   assert.equal(commandOutput(logWith(empty), input, emptyEnd), "", "an empty line has no output");
+});
+
+test("a program that marks no command start, like gdb, returns output between the echoed line and its command end", () => {
+  const prompt = "\x1b[?2004h\x1b]133;D\x07\x1b]133;A\x07(gdb) \x1b]133;B\x07";
+  const typed = `${prompt}print x\r\n\x1b[?2004l\r\x1b[36m$1\x1b[m = 1\r\n`;
+  const log = logWith(`${typed}${prompt}`);
+  const input = Buffer.byteLength(prompt);
+  const end = Buffer.byteLength(`${typed}\x1b[?2004h\x1b]133;D\x07`);
+  assert.deepEqual(scanOutput(log, input, undefined, input).found, { outcome: { kind: "prompt" }, end });
+  assert.equal(commandOutput(log, input, end), "$1 = 1");
+  assert.deepEqual(promptReporting(log, Buffer.byteLength(`${typed}${prompt}`)), { kind: "prompt" });
 });
 
 test("command output keeps the last bytes of very long output, starting at a whole line", () => {

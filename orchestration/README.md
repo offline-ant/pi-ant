@@ -127,7 +127,7 @@ another Pi child. Shell panels do not consume worker nesting depth.
   log. Cancel an active worker request rather than closing it through this tool.
 - `wait({panel?|file?|pid?, match?, timeoutSeconds})`: the replacement for
   `sleep`. Exactly one source. It returns at the first of: a new output line
-  matching the JavaScript regex `match`; the panel's shell back at its prompt; the
+  matching the JavaScript regex `match`; the panel's shell or gdb back at its prompt; the
   panel or pid process exiting (with its status when known); or the timeout.
   Results state the outcome, elapsed time, matched line or exit status, and the
   panel screen or the file's new lines. Progress updates show the latest line.
@@ -147,7 +147,12 @@ another Pi child. Shell panels do not consume worker nesting depth.
   fish 3.7.1 and Windows Git Bash 5.3). Detection of unmarked input needs no
   ssh wrapper: when the last mark is a command start `C` (fish includes its
   command line) and nothing follows, input after it reaches that command, for
-  example an ssh session, REPL, or nested shell without integration. A wait on a panel whose shell is already idle
+  example an ssh session, REPL, or nested shell without integration. gdb reports
+  its prompt with `gdb -q -x <pi-ant>/orchestration/shell/osc133.gdb -ex 'set
+  pagination off' -ex 'set confirm off'`: its prompt carries a status-less `D`
+  and `A`, so `panel-send` returns each command's output (the text between the
+  echoed line and that `D`) and `wait` ends when `run`/`continue` stops. Pager and
+  confirmation questions have no marks, hence the two settings. A wait on a panel whose shell is already idle
   at its prompt answers immediately; after `panel-send` it waits for that
   command's end. Without marks, a command typed into an interactive shell cannot
   be detected as finished: such waits end only on match, exit, or timeout, and
@@ -300,7 +305,12 @@ other view idle. Typing in a stale view appends to its stale branch.
   the original panel does not stop Tau.
   An explicit web endpoint is authoritative. A live but unreachable server,
   authentication failure, or malformed/inaccessible discovery is an error, not
-  permission to launch another server or restart it. Concurrent autostarts use
+  permission to launch another server or restart it. Browser URL metadata is
+  validated only for a live recorded owner; a confirmed dead owner's obsolete
+  URLs cannot block startup. Browser origins must be HTTPS and may differ in
+  hostname and port from the loopback HTTP orchestration endpoint. After the
+  HTTPS upgrade, `/reload` existing Pi sessions to load that validator; do not
+  rewrite valid discovery or restart a healthy Tau. Concurrent autostarts use
   a short private `<agentDir>/tau/startup.lock` claim and recheck discovery.
   An interrupted claim needs explicit recovery after checking its recorded PID;
   no age-based lock deletion. Unready owned children are stopped and reaped;
@@ -310,8 +320,8 @@ other view idle. Typing in a stale view appends to its stale branch.
   `started: true`; an existing idle tab for the file is reloaded in place and must
   report `refreshed: true`. Busy or queued tabs are rejected, and reused tabs are
   never deleted. Tau's terminal-owner guard still applies; ordinary roots have no
-  registry record. The notice shows the loopback link, credential-free
-  `browserUrls` from discovery (for example `http://192.0.2.2:3001/#session=<id>`
+  registry record. The notice shows the loopback HTTP link, credential-free HTTPS
+  `browserUrls` from discovery (for example `https://pc:3443/#session=<id>`
   over WireGuard), and the server PID and private `tau/server.log` location when
   known. Stop a shared server only deliberately: SIGTERM to its verified PID
   stops all its live Tau sessions. Logs are private (0600) and append until
@@ -342,6 +352,52 @@ must be compiled; an existing server still needs a user-approved restart when
 safe. `/switch tau` starts an absent server but never restarts an existing one.
 Herdr must already be running. Verification uses disposable sessions, not existing
 user conversations.
+
+### Take an idle conversation into the current frontend
+
+`/take tau` in Herdr selects an idle Tau conversation and loads it into the
+**current Pi process and pane**. In Tau, use the tab-strip **Take from Herdr…**
+button, its command-palette action, or `/take herdr`; the selected ordinary Herdr
+conversation replaces the current live tab in place. No argument chooses the
+other frontend. Neither action starts inference or submits the human draft.
+
+Both ends must be idle, without queued messages, managed worker/fork ownership,
+or active Ugo. Selection filters unavailable sources and the transfer rechecks
+both ends. The source saves its actual tools and stays loaded while the receiver
+uses native session replacement and verifies the same file, selected branch,
+cwd, model, thinking and tools. Its own CLI model
+flags do not override the taken conversation. Only after confirmed readiness does
+the source Pi exit; its Herdr pane/workspace is never closed. Failed readiness
+leaves the source loaded, without a source reload. There is no automatic wait,
+retry or rollback. Transfer requests follow the peer connection rather than a
+nested deadline; a frozen peer needs explicit termination before the waiting
+view unlocks. Leave settings unchanged while transferring: prompts are blocked,
+but this is not a lock on every model/tool setting shortcut.
+
+Both processes must use the same local Pi agent directory; Pi's runtime cannot
+replace that process-level directory in place, so incompatible sources are not
+offered. Unsent drafts and shell panels are not copied or edited. The receiver's
+previous conversation remains saved. `/switch` retains its existing open-copy
+semantics; `/take` is the operation that closes the previous Pi process.
+
+Ordinary Herdr/Tau roots expose private 0600 Unix control sockets in
+`/tmp/pi-session-take-<uid>/` (0700). Addresses derive from Herdr's server/pane
+identity or Tau's child PID; existing frontend listings provide discovery, with
+no ownership database. Tau uses its PID even when its server inherited Herdr
+markers; it clears inherited terminal/managed identities before explicit child
+overrides. A crashed listener's socket is reclaimed only after connection refusal,
+never while a live listener answers. Requests dispatch registered extension
+commands directly, not terminal text, and return structured readiness or failure. Only in-flight
+control state survives native session replacement. `/reload` both Pi ends after
+updating; Tau's compiled backend needs a deliberate restart to load its generic
+post-command history/cwd synchronization. Existing user sessions are never
+reloaded or stopped automatically for deployment.
+
+`PI_TAKE_NATIVE=1 node scripts/test.mjs orchestration/take-native.test.ts` verifies
+the two-way transfer inside Herdr using an isolated Tau server and owned
+workspaces, including non-tip branches, cross-cwd/model changes, current-process
+reuse, draft preservation, managed-source races, failed receiver readiness and
+source-only exit. It makes no inference requests.
 
 `/fork-here [name] [folder] [-- <prompt>]` opens an independent conversation on
 the same host, defaulting to the parent's cwd and the next available `fork-N`.
@@ -504,8 +560,9 @@ From `pi-ant/`:
 
 ```sh
 npm run check
-node scripts/test.mjs orchestration/extensions/switch.test.ts orchestration/switch-destinations.test.ts orchestration/tau-server.test.ts orchestration/switch-session.test.ts orchestration/switch-rpc.test.ts
+node scripts/test.mjs orchestration/extensions/switch.test.ts orchestration/switch-destinations.test.ts orchestration/tau-server.test.ts orchestration/switch-session.test.ts orchestration/switch-rpc.test.ts orchestration/session-take.test.ts
 PI_SWITCH_NATIVE=1 node scripts/test.mjs orchestration/switch-native.test.ts
+PI_TAKE_NATIVE=1 node scripts/test.mjs orchestration/take-native.test.ts
 node scripts/test.mjs extensions/self-compact.test.ts orchestration/worker-frame.test.ts orchestration/workers.test.ts
 node scripts/test.mjs orchestration/codemode-delegate.test.ts orchestration/delegate-alt.test.ts orchestration/extensions/delegate.test.ts orchestration/context.test.ts orchestration/worker-call.test.ts orchestration/worker-result.test.ts orchestration/worker-resume.test.ts
 node scripts/test.mjs orchestration/panel-output.test.ts orchestration/extensions/panels.test.ts orchestration/extensions/wait.test.ts extensions/exec-lints.test.ts

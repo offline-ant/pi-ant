@@ -9,7 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test, { type TestContext } from "node:test";
-import { ensureTauServer, localTauConnection } from "./tau-server.ts";
+import { ensureTauServer } from "./tau-server.ts";
 
 const execute = promisify(execFile);
 interface Launch { pid: number; argv: string[]; stdin: string | null; env: Record<string, string | null> }
@@ -81,7 +81,7 @@ test("absent Tau starts detached with configured host/auth, private logs and cle
   const launch = f.launches()[0]!;
   assert.deepEqual(launch.argv, []);
   for (const key of ["TAU_HOST", "TAU_USER", "TAU_PASS"]) assert.equal(launch.env[key], f.env[key]);
-  assert.deepEqual(result.browserUrls, [new URL(result.endpoint).origin]);
+  assert.deepEqual(result.browserUrls, ["https://pc:3443", "https://127.0.0.1:3443"]);
   if (process.platform === "linux") assert.equal(launch.stdin, "/dev/null");
   assert.equal(launch.env.PI_CODING_AGENT_DIR, f.directory);
   assert.equal(launch.env.PI_CODING_AGENT_SESSION_DIR, f.env.PI_CODING_AGENT_SESSION_DIR);
@@ -138,6 +138,23 @@ test("dead published owner permits startup; stale startup claims require explici
   assert.equal((await ensureTauServer(f.env, timing)).started, true);
 });
 
+for (const [name, browserUrls] of Object.entries({
+  http: ["http://127.0.0.1:3001"], malformed: ["not a URL"], invalidType: null,
+})) {
+  test(`dead owner's ${name} browser metadata does not block startup or readiness`, async (t) => {
+    const f = fixture(t);
+    const pid = 2_000_000_000;
+    assert.equal(alive(pid), false);
+    fs.writeFileSync(f.runtime, JSON.stringify({ endpoint: "http://127.0.0.1:1", pid, browserUrls }));
+    const result = await ensureTauServer(f.env, timing);
+    assert.equal(result.started, true);
+    assert.equal(f.launches().length, 1);
+    assert.equal(result.pid, f.launches()[0]!.pid);
+    assert.deepEqual(result.browserUrls, ["https://pc:3443", "https://127.0.0.1:3443"]);
+    assert.equal((await ensureTauServer(f.env, timing)).started, false);
+  });
+}
+
 test("live published server is reused without finding a CLI", async (t) => {
   const f = fixture(t);
   fs.unlinkSync(f.executable);
@@ -147,25 +164,21 @@ test("live published server is reused without finding a CLI", async (t) => {
   assert.equal(f.launches().length, 0);
 });
 
-test("published browser URLs are local, credential-free, same-port HTTP origins", async (t) => {
+test("published HTTPS browser origins may use host names and a different port from loopback HTTP", async (t) => {
   const f = fixture(t);
   const endpoint = await server(t);
-  const port = new URL(endpoint).port;
-  const browserUrls = [`http://127.0.0.1:${port}`, `http://[::1]:${port}`];
-  for (const entry of Object.values(os.networkInterfaces()).flatMap((entries) => entries ?? [])) {
-    if (entry.internal || entry.address.includes("%") || /^fe[89ab]/i.test(entry.address)) continue;
-    browserUrls.push(`http://${entry.family === "IPv6" ? `[${entry.address}]` : entry.address}:${port}`);
-  }
-  fs.writeFileSync(f.runtime, JSON.stringify({ endpoint, pid: process.pid, browserUrls: [...browserUrls, browserUrls[0]] }));
-  assert.deepEqual((await ensureTauServer(f.env, timing)).browserUrls, [...new Set(browserUrls.map((url) => new URL(url).origin))]);
-  for (const url of browserUrls) assert.doesNotThrow(() => localTauConnection(url));
+  const browserUrls = ["https://pc:3443/", "https://192.0.2.1:3443", "https://192.0.2.2:3443", "https://127.0.0.1:3443", "https://[::1]:3443", "https://pc:3443"];
+  assert.equal(new URL(endpoint).protocol, "http:");
+  assert.notEqual(new URL(endpoint).port, "3443");
+  fs.writeFileSync(f.runtime, JSON.stringify({ endpoint, pid: process.pid, browserUrls }));
+  assert.deepEqual((await ensureTauServer(f.env, timing)).browserUrls, ["https://pc:3443", "https://192.0.2.1:3443", "https://192.0.2.2:3443", "https://127.0.0.1:3443", "https://[::1]:3443"]);
   assert.equal(f.launches().length, 0);
 });
 
 for (const [name, browserUrls] of Object.entries({
-  null: null, string: "private-password", number: [123], remote: ["http://example.com:3001"], wildcard: ["http://0.0.0.0:3001"],
-  credentials: ["http://fixture:private-password@127.0.0.1:3001"], https: ["https://127.0.0.1:3001"], port: ["http://127.0.0.1:3002"],
-  path: ["http://127.0.0.1:3001/private-password"], query: ["http://127.0.0.1:3001/?private-password"], fragment: ["http://127.0.0.1:3001/#private-password"],
+  null: null, string: "private-password", number: [123], http: ["http://127.0.0.1:3443"], wildcard: ["https://0.0.0.0:3443"],
+  ipv6Wildcard: ["https://[::]:3443"], credentials: ["https://fixture:private-password@127.0.0.1:3443"],
+  path: ["https://127.0.0.1:3443/private-password"], query: ["https://127.0.0.1:3443/?private-password"], fragment: ["https://127.0.0.1:3443/#private-password"],
 })) {
   test(`invalid ${name} browser URL publication is rejected without exposing its contents`, async (t) => {
     const f = fixture(t);

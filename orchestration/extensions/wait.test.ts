@@ -7,7 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import test, { after, before } from "node:test";
 import type { ExecOptions, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { capturedArgv, SHELL_INTEGRATION } from "../panel-output.ts";
+import { capturedArgv, GDB_COMMAND, PROMPT_INTEGRATION } from "../panel-output.ts";
 import { removeTarget } from "../workers.ts";
 import panelsExtension from "./panels.ts";
 import waitExtension from "./wait.ts";
@@ -88,7 +88,7 @@ async function prompted(name: string): Promise<void> {
 }
 
 test("bash with the integration file reports finished commands, their status, and idle prompts", { skip, timeout: 60_000 }, async () => {
-  const name = await panel(`exec bash --rcfile ${SHELL_INTEGRATION.bash} -i`);
+  const name = await panel(`exec bash --rcfile ${PROMPT_INTEGRATION.bash} -i`);
   await prompted(name);
 
   const idle = await call("wait", { panel: name, timeoutSeconds: 20 });
@@ -96,7 +96,7 @@ test("bash with the integration file reports finished commands, their status, an
 
   const quick = await call("panel-send", { name, text: "echo one; echo two; (exit 4)" });
   assert.deepEqual([quick.details.outcome, quick.details.status], ["finished", 4], quick.content[0].text);
-  assert.match(quick.content[0].text, /\nBack at the shell prompt after \d+\.\ds \(exit status 4\)\. Output:\none\ntwo$/, "only the command's own output, without its echoed line or the next prompt");
+  assert.match(quick.content[0].text, /\nBack at the prompt after \d+\.\ds \(exit status 4\)\. Output:\none\ntwo$/, "only the command's own output, without its echoed line or the next prompt");
   const after = await call("wait", { panel: name, timeoutSeconds: 20 });
   assert.deepEqual([after.details.outcome, after.details.status], ["prompt", 4], "a later wait answers immediately");
 
@@ -124,6 +124,30 @@ test("bash with the integration file reports finished commands, their status, an
   assert.equal(interrupted.details.status, 130);
 });
 
+test("gdb with the integration file reports its prompt after commands and when the program stops", { skip: skip || ((!has("gdb") || !has("cc")) && "requires gdb and cc"), timeout: 60_000 }, async () => {
+  const source = path.join(dir, "stop.c");
+  fs.writeFileSync(source, "#include <unistd.h>\nint stop_here(int n) { return n; }\nint main(void) { usleep(2500000); return stop_here(7); }\n");
+  const binary = path.join(dir, "stop");
+  execFileSync("cc", ["-g", "-O0", "-o", binary, source]);
+  const name = await panel(`exec ${GDB_COMMAND} ${binary}`);
+  await prompted(name);
+
+  const set = await call("panel-send", { name, text: "break stop_here" });
+  assert.deepEqual([set.details.outcome, set.details.status], ["finished", undefined], set.content[0].text);
+  assert.match(set.content[0].text, /Back at the prompt after \d+\.\ds\. Output:\nBreakpoint 1 at .*stop\.c, line 2\.$/, "only the command's output, without its echoed line or the next prompt");
+
+  const started = await call("panel-send", { name, text: "run" });
+  assert.equal(started.details.outcome, "running", started.content[0].text);
+  const stopped = await call("wait", { panel: name, timeoutSeconds: 20 });
+  assert.equal(stopped.details.outcome, "prompt", stopped.content[0].text);
+  assert.match(stopped.content[0].text, /Breakpoint 1, stop_here \(n=7\)/);
+
+  const printed = await call("panel-send", { name, text: "print n * 2" });
+  assert.equal(printed.details.outcome, "finished", printed.content[0].text);
+  assert.match(printed.content[0].text, /Output:\n\$1 = 14$/);
+  assert.doesNotMatch(printed.content[0].text, /Warning:/);
+});
+
 test("fish reports its prompt without configuration", { skip: skip || (fishMajor < 4 && "requires fish 4+"), timeout: 60_000 }, async () => {
   const name = await panel("exec fish --no-config -i");
   await prompted(name);
@@ -133,13 +157,13 @@ test("fish reports its prompt without configuration", { skip: skip || (fishMajor
   assert.deepEqual([finished.details.outcome, finished.details.status], ["prompt", 1]);
   const empty = await call("panel-send", { name, text: "" });
   assert.deepEqual([empty.details.outcome, empty.details.status], ["finished", undefined], "an empty line ends at the next prompt");
-  assert.match(empty.content[0].text, /Back at the shell prompt after \d+\.\ds\. Output:\n\(no output\)$/);
+  assert.match(empty.content[0].text, /Back at the prompt after \d+\.\ds\. Output:\n\(no output\)$/);
 });
 
 test("a nested marked shell, as over ssh, ends the line that starts it and reports its own commands", { skip: skip || (fishMajor < 4 && "requires fish 4+"), timeout: 60_000 }, async () => {
   const name = await panel("exec fish --no-config -i");
   await prompted(name);
-  const login = await call("panel-send", { name, text: `bash --rcfile ${SHELL_INTEGRATION.bash} -i` });
+  const login = await call("panel-send", { name, text: `bash --rcfile ${PROMPT_INTEGRATION.bash} -i` });
   assert.equal(login.details.outcome, "finished", "the nested shell's first prompt ends the line");
   const inner = await call("panel-send", { name, text: "printf 'α\\nβ\\n'" });
   assert.deepEqual([inner.details.outcome, inner.details.status], ["finished", 0], inner.content[0].text);
@@ -193,7 +217,7 @@ test("shells without prompt marks time out with an explanation instead of guessi
   const result = await call("wait", { panel: name, timeoutSeconds: 1 });
   assert.equal(result.details.outcome, "timeout");
   assert.match(result.content[0].text, /Input goes to the panel's command, which has shown no OSC 133 prompt marks/);
-  assert.match(result.content[0].text, new RegExp(SHELL_INTEGRATION.bash.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.match(result.content[0].text, new RegExp(PROMPT_INTEGRATION.bash.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 });
 
 test("files match appended lines only, and pids end on exit", { skip, timeout: 30_000 }, async () => {

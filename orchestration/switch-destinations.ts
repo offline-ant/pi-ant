@@ -119,9 +119,9 @@ export async function prepareTauSwitch(
 
 type HerdrCommand = (args: string[]) => Promise<string>;
 
-function herdrCommand(endpoint?: string): HerdrCommand {
-  const binary = process.env.HERDR_BIN_PATH || "herdr";
-  const env = { ...process.env };
+export function herdrCommand(endpoint?: string, environment: NodeJS.ProcessEnv = process.env): HerdrCommand {
+  const binary = environment.HERDR_BIN_PATH || "herdr";
+  const env = { ...environment };
   // An empty HERDR_SOCKET_PATH is an invalid socket to the CLI, not its default.
   if (endpoint) env.HERDR_SOCKET_PATH = endpoint;
   else delete env.HERDR_SOCKET_PATH;

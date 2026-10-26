@@ -21,16 +21,29 @@ test("execution lints inspect neutral panel commands and text, not keys", async 
   assert.equal(await handle({ toolName: "panel-send", input: { name: "test", keys: ["ctrl+c"] } }), undefined);
 });
 
+test("commands of 120 characters or more skip every lint except the git guards", async () => {
+  const { handle } = lints();
+  const long = (command: string) => command.padEnd(120);
+  for (const command of ["grep -rn foo src", "sleep 600", "npm run check | tail -10"]) {
+    assert.equal((await handle({ toolName: "bash", input: { command: command.padEnd(119) } }))?.block, true, command);
+    assert.equal(await handle({ toolName: "bash", input: { command: long(command) } }), undefined, command);
+  }
+  assert.equal(await handle({ toolName: "panel-send", input: { name: "p", text: long("sleep 60") } }), undefined);
+  for (const command of ["git restore src", "git checkout main", "git stash"]) {
+    assert.equal((await handle({ toolName: "bash", input: { command: long(command) } }))?.block, true, command);
+  }
+});
+
 test("a trailing pipe tail on build output is blocked once and never rewritten, keeping its redirections in the suggestion", async () => {
   const { handle, newTurn } = lints();
   // The real case: silently stripping `| tail …` also dropped `> s1-big.log`.
-  const command = "cd /home/user/sn/lace && CARGO_TARGET_DIR=/x timeout 600 cargo test -p lace-sans-io --lib foo -- --ignored 2>&1 | tail -15 > /home/user/sn-build/s1-big.log";
+  const command = "cd /sn/lace && CARGO_TARGET_DIR=/x timeout 600 cargo test -p lace --lib foo -- --ignored 2>&1 | tail -15 > /b/s1.log";
   const input = { name: "big-gen", command };
   const result = await handle({ toolName: "panel-start", input });
   assert.equal(result?.block, true);
   assert.equal(input.command, command);
   assert.equal(/Re-run without the pipe tail: `(.*)`$/s.exec(result!.reason!)?.[1],
-    "cd /home/user/sn/lace && CARGO_TARGET_DIR=/x timeout 600 cargo test -p lace-sans-io --lib foo -- --ignored 2>&1 > /home/user/sn-build/s1-big.log");
+    "cd /sn/lace && CARGO_TARGET_DIR=/x timeout 600 cargo test -p lace --lib foo -- --ignored 2>&1 > /b/s1.log");
   // A deliberate retry in the same turn passes, whichever tool it uses.
   assert.equal(await handle({ toolName: "bash", input: { command } }), undefined);
   await newTurn();

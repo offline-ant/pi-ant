@@ -21,7 +21,7 @@ const server = http.createServer((req, res) => {
 server.listen(0, "127.0.0.1", () => {
   if (mode === "unpublished" || mode === "ignore-term") return;
   const endpoint = `http://fixture:private-password@127.0.0.1:${server.address().port}`;
-  fs.writeFileSync(runtime, JSON.stringify({ endpoint, pid: process.pid, browserUrls: [new URL(endpoint).origin] }), { mode: 0o600 });
+  fs.writeFileSync(runtime, JSON.stringify({ endpoint, pid: process.pid, browserUrls: ["https://pc:3443/", "https://127.0.0.1:3443"] }), { mode: 0o600 });
   console.log("fixture ready");
 });
 process.on("SIGTERM", () => {
