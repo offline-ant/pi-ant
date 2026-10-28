@@ -48,6 +48,39 @@ Remote sessions cannot use the shared local filesystem or Emacs server."
 (defvar pi-orchestration--targets (make-hash-table :test 'equal)
   "Native targets created by this adapter, indexed by opaque target ID.")
 
+(defvar pi-orchestration-target-functions nil
+  "Functions called with a target ID and `start' or `close' after either.
+User interfaces use this to refresh their view of `pi-orchestration-targets'.")
+
+(defun pi-orchestration--run-target-functions (id event)
+  "Report target ID's lifecycle EVENT without letting observers break it."
+  (dolist (function pi-orchestration-target-functions)
+    (with-demoted-errors "pi-orchestration observer: %S"
+      (funcall function id event))))
+
+(defun pi-orchestration-parent-buffer (parent)
+  "Return the live native buffer of PARENT, a target ID or root chat name.
+Workers name their parent by target ID; root sessions by chat buffer name."
+  (when parent
+    (let ((target (gethash parent pi-orchestration--targets)))
+      (if target
+          (plist-get target :buffer)
+        (get-buffer parent)))))
+
+(defun pi-orchestration-targets ()
+  "Return native targets as plists with :id, :kind, :name, :buffer and :parent.
+:parent is the parent's live native buffer, or nil when unknown or gone."
+  (let (targets)
+    (maphash (lambda (id target)
+               (push (list :id id :kind (plist-get target :kind)
+                           :name (plist-get target :name)
+                           :buffer (plist-get target :buffer)
+                           :parent (pi-orchestration-parent-buffer
+                                    (plist-get target :parent)))
+                     targets))
+             pi-orchestration--targets)
+    targets))
+
 (defun pi-orchestration--environment (values)
   "Convert JSON object VALUES to an environment alist."
   (let (result)
@@ -91,7 +124,9 @@ Remote sessions cannot use the shared local filesystem or Emacs server."
                         (cons "PI_ORCHESTRATION_ENDPOINT" endpoint)
                         (cons "PI_ORCHESTRATION_TARGET" id))
                   (pi-orchestration--environment (plist-get spec :env))))
-         (target (list :kind kind :responses (make-hash-table :test 'equal)
+         (target (list :kind kind :name name
+                       :parent (plist-get (plist-get spec :parent) :id)
+                       :responses (make-hash-table :test 'equal)
                        :ready nil :error nil :buffer nil :process nil)))
     (when (file-remote-p directory)
       (error "Orchestration requires a local directory and shared filesystem"))
@@ -129,6 +164,7 @@ Remote sessions cannot use the shared local filesystem or Emacs server."
       (error
        (pi-orchestration--close id)
        (signal (car err) (cdr err))))
+    (pi-orchestration--run-target-functions id 'start)
     (list :target (list :host "emacs" :endpoint endpoint :id id
                         :kind kind :name name
                         :sessionFile (plist-get spec :sessionFile)))))
@@ -248,7 +284,8 @@ finishes cleanup when graceful shutdown exceeds the caller's deadline."
           (if pi-target
               (pilish-close-session buffer)
             (when (buffer-live-p buffer) (kill-buffer buffer))))
-        (remhash id pi-orchestration--targets))
+        (remhash id pi-orchestration--targets)
+        (pi-orchestration--run-target-functions id 'close))
       (list :success t))))
 
 (defun pi-orchestration-dispatch (encoded)

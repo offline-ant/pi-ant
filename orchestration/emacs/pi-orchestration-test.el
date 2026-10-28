@@ -80,6 +80,37 @@
       (pi-orchestration--close id t)
       (delete-directory dir t))))
 
+(ert-deftest pi-orchestration-targets-report-parents-and-lifecycle ()
+  (let* ((pi-orchestration--targets (make-hash-table :test 'equal))
+         (root (generate-new-buffer "*pilish-chat:/tmp/root*"))
+         (events nil)
+         (pi-orchestration-target-functions
+          (list (lambda (id event) (push (list id event) events)))))
+    (unwind-protect
+        (progn
+          (pi-orchestration--start
+           (list :id "panel-a" :endpoint "test"
+                 :spec (list :kind "shell" :name "a" :cwd "/tmp/"
+                             :parent (list :id (buffer-name root))
+                             :argv ["/bin/sh" "-c" "read line"])))
+          (pi-orchestration--start
+           (list :id "panel-b" :endpoint "test"
+                 :spec '(:kind "shell" :name "b" :cwd "/tmp/" :parent (:id "panel-a")
+                               :argv ["/bin/sh" "-c" "read line"])))
+          (should (equal (reverse events) '(("panel-a" start) ("panel-b" start))))
+          (let ((targets (pi-orchestration-targets)))
+            (should (eq (plist-get (cl-find "panel-a" targets :key (lambda (target) (plist-get target :id)) :test #'equal) :parent)
+                        root))
+            (should (eq (plist-get (cl-find "panel-b" targets :key (lambda (target) (plist-get target :id)) :test #'equal) :parent)
+                        (plist-get (pi-orchestration--target "panel-a") :buffer)))
+            (should (equal (plist-get (car targets) :kind) "shell")))
+          (pi-orchestration--close "panel-b")
+          (should (equal (car events) '("panel-b" close)))
+          (should (= (length (pi-orchestration-targets)) 1)))
+      (pi-orchestration--close "panel-a")
+      (pi-orchestration--close "panel-b")
+      (kill-buffer root))))
+
 (ert-deftest pi-orchestration-dispatch-treats-arguments-as-data ()
   (let* ((text "\" ) (error \"injected\") ;\n你好")
          (request (base64-encode-string (encode-coding-string (json-encode (list :operation text)) 'utf-8) t))

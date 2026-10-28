@@ -27,6 +27,10 @@ Pi's settings. No extension-local npm installation is needed.
   ```
 
   The adapter also loads the companion when handling native operations.
+  User interfaces (such as `pi-deck`) read live targets with
+  `pi-orchestration-targets` (ID, kind, name, buffer and the parent's buffer,
+  taken from the start spec's `parent`) and observe starts and closes through
+  `pi-orchestration-target-functions`.
 - **Web:** a [tau](https://github.com/milanglacier/pi-tau-web-server) server (this
   workspace's `../../tau` fork) owning `pi --mode rpc` children, each one a live
   browser tab. Prompts are RPC commands, so submission is draft-safe without a
