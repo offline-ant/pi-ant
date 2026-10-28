@@ -20,7 +20,7 @@ const exec = promisify(execFile);
 const native = process.env.PI_LIFECYCLE_SMOKE === "1";
 const frame = fileURLToPath(new URL("../worker-frame.ts", import.meta.url));
 const fixture = fileURLToPath(new URL("../test/lifecycle-fixture.ts", import.meta.url));
-const emacsFixture = fileURLToPath(new URL("../test/lifecycle-emacs.el", import.meta.url));
+const emacsFixture = fileURLToPath(new URL("../test/emacs-host.el", import.meta.url));
 const pi = {
   async exec(command: string, args: string[], options: ExecOptions = {}) {
     try {

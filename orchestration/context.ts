@@ -46,13 +46,13 @@ export function resolveCwd(base: string, folder?: string): string {
   return cwd;
 }
 
-export function prepareFreshSession(cwd: string, purpose: string, data: unknown): string {
+export function prepareFreshSession(cwd: string, purpose: string, data: unknown): { sessionFile: string; sessionId: string } {
   const session = SessionManager.create(cwd);
   const sessionFile = session.getSessionFile();
   if (!sessionFile) throw new Error(`Could not create a persistent session for ${purpose}.`);
   session.appendCustomEntry(`pi-orchestration:${purpose}`, data);
   flushSessionFile(session, sessionFile);
-  return sessionFile;
+  return { sessionFile, sessionId: session.getSessionId() };
 }
 
 export function prepareDelegateSession(
@@ -61,7 +61,7 @@ export function prepareDelegateSession(
   ctx: ExtensionContext,
   call: { toolName: string; toolCallId: string },
   runtime: { model: { provider: string; id: string }; thinkingLevel: string },
-): { cwd: string; sessionFile: string; args: string[] } {
+): { cwd: string; sessionFile: string; sessionId: string; args: string[] } {
   if (request.tool === "do" && request.folder !== undefined) {
     throw new Error("do does not accept folder; use delegate for a standalone assignment in another directory.");
   }
@@ -70,8 +70,8 @@ export function prepareDelegateSession(
   const args = modelCliArgs(runtime.model, runtime.thinkingLevel);
   const context = EPHEMERAL_WORKER_CONTEXTS[request.tool];
   if (context !== "inherit") {
-    const sessionFile = prepareFreshSession(cwd, "delegate", { tool: request.tool, context, ...remote, createdAt: new Date().toISOString() });
-    return { cwd, sessionFile, args: [...args, ...cleanContextCliArgs(context, fileURLToPath(new URL("./worker-frame.ts", import.meta.url)))] };
+    const { sessionFile, sessionId } = prepareFreshSession(cwd, "delegate", { tool: request.tool, context, ...remote, createdAt: new Date().toISOString() });
+    return { cwd, sessionFile, sessionId, args: [...args, ...cleanContextCliArgs(context, fileURLToPath(new URL("./worker-frame.ts", import.meta.url)))] };
   }
   const parentSession = ctx.sessionManager.getSessionFile();
   if (!parentSession || !fs.existsSync(parentSession)) throw new Error("Current session is not persisted; cannot start do.");
@@ -83,5 +83,5 @@ export function prepareDelegateSession(
   else forked.branch(leafId);
   forked.appendCustomEntry("pi-orchestration:delegate-runtime", { task: request.task, parentSession, childSession: sessionFile, cwd, ...remote });
   flushSessionFile(forked, sessionFile);
-  return { cwd, sessionFile, args };
+  return { cwd, sessionFile, sessionId: forked.getSessionId(), args };
 }

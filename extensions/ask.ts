@@ -33,6 +33,8 @@ const OTHER_OPTION = "Other (type your own)";
 const FORK_OPTION = "Fork (discuss separately)";
 const DONE_OPTION = "Done selecting";
 const BACK_OPTION = "← Go back";
+const EDIT_OPTION = "Edit an option as your answer…";
+const EDIT_TITLE = "Edit which option?";
 const RECOMMENDED_SUFFIX = " (Recommended)";
 const CURRENT_SUFFIX = " (Current)";
 const ASK_SELECTOR_KEYBINDINGS = {
@@ -366,24 +368,66 @@ class WrappedAskList implements Component {
 	}
 }
 
+/** Labels of standard dialogs identify the answer, so repeated labels get a counter. */
+function uniqueLabels(labels: string[]): string[] {
+	const counts = new Map<string, number>();
+	return labels.map((label) => {
+		const count = (counts.get(label) ?? 0) + 1;
+		counts.set(label, count);
+		return count === 1 ? label : `${label} (${count})`;
+	});
+}
+
+async function selectLabeled<T>(
+	title: string,
+	entries: Array<{ label: string; value: T }>,
+	ctx: ExtensionContext,
+): Promise<T | undefined> {
+	const labels = uniqueLabels(entries.map((entry) => entry.label));
+	const selected = await ctx.ui.select(title, labels, { signal: ctx.signal });
+	if (ctx.signal?.aborted || selected === undefined) return undefined;
+	return entries[labels.indexOf(selected)]?.value;
+}
+
+/**
+ * Standard select dialogs (RPC frontends) have no edit key: one extra entry
+ * before the fork option picks the option to edit, instead of one entry per option.
+ */
+async function selectAskChoiceWithDialogs(
+	title: string,
+	choices: AskPickerChoice[],
+	ctx: ExtensionContext,
+): Promise<AskPickerResult> {
+	const editable = choices.filter((choice) => choice.value.kind === "option" && choice.editPrefill !== undefined);
+	const entries: Array<{ label: string; value: AskPickerChoice | "edit" }> = choices.map((choice) => ({
+		label: choice.display,
+		value: choice,
+	}));
+	if (editable.length > 0) {
+		const forkIndex = choices.findIndex((choice) => choice.value.kind === "fork");
+		entries.splice(forkIndex < 0 ? entries.length : forkIndex, 0, { label: EDIT_OPTION, value: "edit" });
+	}
+	while (true) {
+		const selected = await selectLabeled(title, entries, ctx);
+		if (selected === undefined) return { action: "cancel" };
+		if (selected !== "edit") return { action: "selected", choice: selected };
+		const choice = await selectLabeled(
+			EDIT_TITLE,
+			editable.map((option) => ({ label: option.display, value: option })),
+			ctx,
+		);
+		if (ctx.signal?.aborted) return { action: "cancel" };
+		if (choice) return { action: "edit", choice };
+	}
+}
+
 async function selectAskChoice(
 	title: string,
 	choices: AskPickerChoice[],
 	ctx: ExtensionContext,
 ): Promise<AskPickerResult> {
 	if (ctx.signal?.aborted) return { action: "cancel" };
-	if (ctx.mode !== "tui") {
-		const actions = choices.flatMap((choice) => [
-			{ label: `${choice.id.slice(7)}. ${choice.display}`, result: { action: "selected", choice } as AskPickerResult },
-			...(choice.editPrefill === undefined ? [] : [{
-				label: `${choice.id.slice(7)}. Edit: ${choice.display}`,
-				result: { action: "edit", choice } as AskPickerResult,
-			}]),
-		]);
-		const selected = await ctx.ui.select(title, actions.map((action) => action.label), { signal: ctx.signal });
-		if (ctx.signal?.aborted) return { action: "cancel" };
-		return actions.find((action) => action.label === selected)?.result ?? { action: "cancel" };
-	}
+	if (ctx.mode !== "tui") return selectAskChoiceWithDialogs(title, choices, ctx);
 
 	const result = await ctx.ui.custom<AskPickerResult>(
 		(tui, theme, keybindings, done) => {
@@ -759,7 +803,11 @@ export default function askExtension(pi: ExtensionAPI) {
 				const question = params.questions[index];
 				const id = question.id ?? `question_${index + 1}`;
 				const normalizedQuestion: AskQuestion = { ...question, id };
-				const title = `(${index + 1}/${params.questions.length}) ${question.question}`;
+				const heading = `(${index + 1}/${params.questions.length}) ${question.question}`;
+				// Standard dialogs show one question at a time; list the answers given so far.
+				const title = ctx.mode === "tui" || index === 0
+					? heading
+					: [heading, ...results.slice(0, index).map((result) => `✓ ${previewText(result.question)} → ${answerPreview(result)}`)].join("\n");
 				const action = normalizedQuestion.multi
 					? await askMultiChoice(normalizedQuestion, title, ctx, results[index], index > 0, launchFork)
 					: await askSingleChoice(normalizedQuestion, title, ctx, results[index], index > 0, launchFork);

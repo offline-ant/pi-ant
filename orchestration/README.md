@@ -11,10 +11,15 @@ Pi's settings. No extension-local npm installation is needed.
 - **Herdr:** tested with 0.8.2; named Pi agents in owned panes.
 - **Emacs:** local Pilish with the named-session API in this workspace's
   `/home/user/Projects/pi/pilish` checkout. The required generic APIs are
-  published on [offline-ant/pilish's pi-orchestration branch](https://github.com/offline-ant/pilish/tree/pi-orchestration)
-  (verified revision `3987521`, on v3.1.0); stock Pilish does not include them.
-  EAT 0.9.4 is the sole shell terminal. Pi uses RPC chat/input pairs; shell panels support terminal keys
-  and fullscreen applications. Load Pilish and EAT on the server's load path.
+  on [offline-ant/pilish's pi-orchestration branch](https://github.com/offline-ant/pilish/tree/pi-orchestration)
+  (the local branch is rebased onto upstream v3.4.0+; the published one still
+  carries the older v3.1.0 history); stock Pilish does not include them.
+  [ghostel](https://github.com/dakra/ghostel) (libghostty-vt, 0.59.0 with its
+  native module) is the sole shell terminal. Pi uses RPC chat/input pairs; shell
+  panels support terminal keys and fullscreen applications. Ghostel renders a
+  terminal into its buffer only while displayed, so panel reads take the
+  terminal's own text (scrollback and active screen) and work for hidden
+  panels. Load Pilish and ghostel on the server's load path.
   Load `emacs/pi-orchestration.el` in Pilish's `use-package :config`, before
   the first root Pi spawn (not just when a worker starts):
 
@@ -590,6 +595,9 @@ and successful results retain it in `details.sessionCommand`, not model-facing
 `content`. The shared TUI result renderer displays the hint as **User-only recovery
 command (not sent to model)** in both collapsed and expanded views. Rendering does
 not add it to the prompt. Non-TUI clients may display that metadata themselves.
+Progress and successful results also carry `details.savedConversations` (version 1:
+absolute session directory `root`, relative `file`, header `sessionId`, label
+`<tool>-<id>`), which Pilish renders as a read-only link to the worker transcript.
 Thrown errors, including parent Escape and startup/process/protocol failures, keep
 the hint in model-visible content because Pi discards error details; these are not
 labeled user-only. Finished tool results persist in the parent transcript,
@@ -640,6 +648,7 @@ node scripts/test.mjs orchestration/panel-output.test.ts orchestration/extension
 node scripts/test.mjs orchestration/remote.test.ts orchestration/extensions/remote.test.ts orchestration/extensions/delegate.test.ts orchestration/host.test.ts
 PI_REMOTE_NATIVE=1 node scripts/test.mjs orchestration/remote-native.test.ts  # real sshd; PI_REMOTE_NATIVE_TARGET defaults to localhost
 PI_NATIVE_HOST_SMOKE=1 node scripts/test.mjs orchestration/extensions/wait.test.ts  # inside Herdr: same wait tests on Herdr panels
+PI_NATIVE_HOST_SMOKE=emacs node scripts/test.mjs orchestration/extensions/wait.test.ts  # same wait tests on ghostel panels in a disposable Emacs daemon
 PI_NATIVE_HOST_SMOKE=1 node scripts/test.mjs orchestration/hosts/native-smoke.test.ts
 PI_LIFECYCLE_SMOKE=1 node scripts/test.mjs orchestration/hosts/lifecycle-smoke.test.ts
 PI_FORK_SMOKE=1 node scripts/test.mjs orchestration/hosts/fork-smoke.test.ts
@@ -664,4 +673,14 @@ self-closing workers, per-request model/tool selection, draft protection, superv
 overflow compaction settlement, and public idle/prompted forks. Unit tests cover
 claims, cancellation cleanup, mismatched results, context preparation, sibling
 startup ordering, and TUI/RPC ask selection preservation. No paid provider calls
-are needed. Native tests require local tmux, Herdr, Emacs, Pilish, and EAT.
+are needed. Native tests require local tmux, Herdr, Emacs, Pilish, and ghostel.
+Emacs daemons load `test/emacs-host.el`: packages from `PI_EMACS_ELPA`
+(default `~/.emacs.d/elpa`), Pilish from `PI_EMACS_PILISH` (default: the
+workspace checkout beside `pi-ant`) and ghostel's module from
+`PI_EMACS_GHOSTEL_MODULE` (default `~/.emacs.d/var/ghostel/`). The companion's
+ERT tests (native ghostel panels, key bytes, Pilish targets) run with:
+
+```sh
+emacs -Q --batch --eval '(progn (setq package-user-dir (expand-file-name "~/.emacs.d/elpa")) (package-initialize) (setq ghostel-module-directory (expand-file-name "~/.emacs.d/var/ghostel/")))' \
+  -L ../pilish -L ../pilish/test -L orchestration/emacs -l pi-orchestration-test -f ert-run-tests-batch-and-exit
+```

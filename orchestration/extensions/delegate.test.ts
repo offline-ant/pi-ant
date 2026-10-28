@@ -215,14 +215,33 @@ async function fixture(t: TestContext, codemodeOnly = false) {
     assert.ok(!JSON.stringify(result.content).includes(command));
     assert.doesNotMatch(JSON.stringify(result.content), /To resume\/continue|enter a prompt to continue/);
     assert.equal((result.details as { sessionCommand: string }).sessionCommand, command);
+    // Pilish's read-only transcript link: absolute root, relative file, header ID.
+    const sessionFile = launches.at(-1)!.sessionFile;
+    const header = JSON.parse(fs.readFileSync(sessionFile, "utf8").split("\n")[0]!) as { type: string; id: string };
+    assert.equal(header.type, "session");
+    const saved = {
+      version: 1, root: path.dirname(path.resolve(sessionFile)),
+      items: [{ sessionId: header.id, file: path.basename(sessionFile), label: `${name}-${request.id}` }],
+    };
+    assert.deepEqual((result.details as { savedConversations: unknown }).savedConversations, saved);
+    assert.ok(path.isAbsolute(saved.root));
+    assert.ok(!JSON.stringify(result.content).includes(header.id));
     const persisted = SessionManager.open(current.sessionManager.getSessionFile()!).getBranch()
       .findLast((entry) => entry.type === "message" && entry.message.role === "toolResult");
     assert.ok(persisted?.type === "message" && persisted.message.role === "toolResult");
     assert.equal((persisted.message.details as { sessionCommand: string }).sessionCommand, command);
+    assert.deepEqual((persisted.message.details as { savedConversations: unknown }).savedConversations, saved);
     assert.ok(!JSON.stringify(persisted.message.content).includes(command));
     for (const update of updates) {
       assert.doesNotMatch(JSON.stringify(update.result.content), /To resume\/continue|enter a prompt to continue|pi --session/);
       assert.ok((update.result.details as { sessionCommand?: string }).sessionCommand);
+    }
+    const runUpdates = updates.filter((update) =>
+      (update.result.details as { savedConversations?: { items: { sessionId: string }[] } }).savedConversations?.items[0]?.sessionId === header.id);
+    assert.ok(runUpdates.length > 0);
+    assert.ok(runUpdates.some((update) => (update.result.details as { status?: string }).status === "starting"));
+    for (const update of runUpdates) {
+      assert.deepEqual((update.result.details as { savedConversations: unknown }).savedConversations, saved);
     }
     assert.equal(closed.length, requests.length);
     return result;

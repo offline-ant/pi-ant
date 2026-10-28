@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test, { after, before } from "node:test";
 import type { ExecOptions, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -20,15 +21,19 @@ function has(command: string): boolean {
 const fishMajor = has("fish") ? Number(/(\d+)\./.exec(execFileSync("fish", ["--version"], { encoding: "utf8" }))?.[1] ?? 0) : 0;
 /** Herdr runs the same tests natively when explicitly requested from inside a Herdr pane. */
 const herdr = process.env.PI_NATIVE_HOST_SMOKE === "1" && process.env.HERDR_ENV === "1" && !!process.env.HERDR_SOCKET_PATH && !!process.env.HERDR_PANE_ID;
+/** PI_NATIVE_HOST_SMOKE=emacs runs them on ghostel panels in a disposable Emacs daemon. */
+const emacs = process.env.PI_NATIVE_HOST_SMOKE === "emacs";
+const emacsFixture = fileURLToPath(new URL("../test/emacs-host.el", import.meta.url));
 /** A short panel-send grace keeps tests of running commands quick. */
 const GRACE_MS = 1500;
-const skip = process.platform !== "linux" || !has("script") || (!herdr && !has("tmux")) ? "requires Linux, tmux or Herdr, and util-linux script" : false;
+const skip = process.platform !== "linux" || !has("script") || (emacs ? !has("emacs") : !herdr && !has("tmux"))
+  ? "requires Linux, tmux, Herdr or Emacs, and util-linux script" : false;
 
 interface Result { content: Array<{ type: string; text: string }>; details: { outcome?: string; status?: number; line?: string } }
 type Execute = (id: string, params: Record<string, unknown>, signal: AbortSignal | undefined, update: undefined, ctx: ExtensionContext) => Promise<Result>;
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-wait-test-"));
-const endpoint = herdr ? process.env.HERDR_SOCKET_PATH! : path.join(dir, "tmux.sock");
+const endpoint = herdr ? process.env.HERDR_SOCKET_PATH! : path.join(dir, emacs ? "emacs.sock" : "tmux.sock");
 const agentDir = path.join(dir, "agent");
 const envKeys = ["PI_ORCHESTRATION_HOST", "PI_ORCHESTRATION_ENDPOINT", "TMUX_PANE", "TMUX", "PI_CODING_AGENT_DIR", "HERDR_ENV"];
 const previous = envKeys.map((key) => process.env[key]);
@@ -59,6 +64,16 @@ before(async () => {
     waitExtension(pi);
     return;
   }
+  if (emacs) {
+    await run("emacs", ["-Q", `--daemon=${endpoint}`, "-l", emacsFixture], { timeout: 60_000 });
+    Object.assign(process.env, { PI_ORCHESTRATION_HOST: "emacs", PI_ORCHESTRATION_ENDPOINT: endpoint, PI_CODING_AGENT_DIR: agentDir });
+    delete process.env.TMUX;
+    delete process.env.TMUX_PANE;
+    delete process.env.HERDR_ENV;
+    panelsExtension(pi, GRACE_MS);
+    waitExtension(pi);
+    return;
+  }
   await run("tmux", ["-S", endpoint, "-f", "/dev/null", "new-session", "-d", "-s", "wait", "-x", "120", "-y", "30"]);
   const pane = (await run("tmux", ["-S", endpoint, "display-message", "-p", "-t", "wait", "#{pane_id}"])).stdout.trim();
   Object.assign(process.env, { PI_ORCHESTRATION_HOST: "tmux", PI_ORCHESTRATION_ENDPOINT: endpoint, TMUX_PANE: pane, PI_CODING_AGENT_DIR: agentDir });
@@ -69,7 +84,8 @@ before(async () => {
 });
 after(async () => {
   for (const name of names) await call("panel-close", { name }).catch(() => removeTarget(name));
-  if (!skip && !herdr) await run("tmux", ["-S", endpoint, "kill-server"]).catch(() => undefined);
+  if (!skip && emacs) await run("emacsclient", ["--socket-name", endpoint, "--eval", "(kill-emacs)"]).catch(() => undefined);
+  else if (!skip && !herdr) await run("tmux", ["-S", endpoint, "kill-server"]).catch(() => undefined);
   envKeys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index]; });
   fs.rmSync(dir, { recursive: true, force: true });
 });

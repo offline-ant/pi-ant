@@ -20,7 +20,7 @@ const enabled = process.env.PI_FORK_SMOKE === "1";
 const orchestration = fileURLToPath(new URL("../", import.meta.url));
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const fixture = fileURLToPath(new URL("../test/lifecycle-fixture.ts", import.meta.url));
-const emacsFixture = fileURLToPath(new URL("../test/lifecycle-emacs.el", import.meta.url));
+const emacsFixture = fileURLToPath(new URL("../test/emacs-host.el", import.meta.url));
 const pi = {
   async exec(command: string, args: string[], options: ExecOptions = {}) {
     try { return { ...await exec(command, args, { timeout: options.timeout, signal: options.signal }), code: 0, killed: false }; }

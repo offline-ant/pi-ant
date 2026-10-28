@@ -1,4 +1,4 @@
-;;; pi-orchestration.el --- Native Pilish and EAT host operations -*- lexical-binding: t; -*-
+;;; pi-orchestration.el --- Native Pilish and ghostel host operations -*- lexical-binding: t; -*-
 
 ;; SPDX-License-Identifier: MIT
 
@@ -13,8 +13,15 @@
 (require 'cl-lib)
 (require 'json)
 (require 'pilish)
-(require 'eat)
+(require 'ghostel)
 (require 'server)
+
+;; Ghostel exposes no public accessors for these; they are the terminal's own
+;; child process ID and its full plain-text contents (scrollback and the
+;; active screen), which are also current for buffers never displayed.
+(defvar ghostel--pid)
+(defvar ghostel--term)
+(declare-function ghostel--copy-all-text "ghostel-module" (term))
 
 (defun pi-orchestration--session-environment (chat-buffer directory)
   "Return local host identity for CHAT-BUFFER in DIRECTORY before Pi spawns.
@@ -127,7 +134,7 @@ Workers name their parent by target ID; root sessions by chat buffer name."
          (target (list :kind kind :name name
                        :parent (plist-get (plist-get spec :parent) :id)
                        :responses (make-hash-table :test 'equal)
-                       :ready nil :error nil :buffer nil :process nil)))
+                       :ready nil :error nil :buffer nil :process nil :pid nil)))
     (when (file-remote-p directory)
       (error "Orchestration requires a local directory and shared filesystem"))
     (when (gethash id pi-orchestration--targets)
@@ -151,16 +158,21 @@ Workers name their parent by target ID; root sessions by chat buffer name."
           (unless (equal kind "shell") (error "Unknown target kind: %s" kind))
           (let ((default-directory directory)
                 (process-environment (copy-sequence process-environment))
-                (eat-kill-buffer-on-exit nil)
-                (eat-query-before-killing-running-terminal nil))
+                (argv (append (plist-get spec :argv) nil))
+                (buffer (generate-new-buffer (concat "pi-panel:" name ":" id))))
             (dolist (entry (reverse environment))
               (setenv (car entry) (cdr entry)))
-            (let* ((argv (append (plist-get spec :argv) nil))
-                   (buffer (apply #'eat-make (concat "pi-panel:" name ":" id)
-                                  (car argv) nil (cdr argv))))
-              (setf (plist-get target :buffer) buffer
-                    (plist-get target :process) (get-buffer-process buffer)
-                    (plist-get target :ready) t))))
+            (setf (plist-get target :buffer) buffer)
+            (with-current-buffer buffer (setq default-directory directory))
+            (let ((process (ghostel-exec buffer (car argv) (cdr argv))))
+              (with-current-buffer buffer
+                ;; Exited panels stay readable until closed, and closing
+                ;; never asks about a running command.
+                (setq-local ghostel-kill-buffer-on-exit nil
+                            ghostel-query-before-killing nil)
+                (setf (plist-get target :process) process
+                      (plist-get target :pid) ghostel--pid
+                      (plist-get target :ready) t)))))
       (error
        (pi-orchestration--close id)
        (signal (car err) (cdr err))))
@@ -169,31 +181,39 @@ Workers name their parent by target ID; root sessions by chat buffer name."
                         :kind kind :name name
                         :sessionFile (plist-get spec :sessionFile)))))
 
-(defun pi-orchestration--key-event (key)
-  "Translate one neutral terminal KEY name to an EAT input event."
+(defun pi-orchestration--key (key)
+  "Translate one neutral terminal KEY name to ghostel (NAME MODIFIERS).
+NAME is a key for `ghostel-send-key'; MODIFIERS a comma-separated string."
   (let* ((parts (split-string key "+"))
          (literal (car (last parts)))
          (base (downcase literal))
          (modifiers (mapcar
                      (lambda (modifier)
                        (pcase (downcase modifier)
-                         ("ctrl" 'control) ("alt" 'meta) ("shift" 'shift)
+                         ("ctrl" "ctrl") ("alt" "alt") ("shift" "shift")
                          (_ (error "Unsupported key modifier: %s" modifier))))
                      (butlast parts)))
-         (event (cond
-                 ((= (length base) 1) (aref literal 0))
-                 ((equal base "enter") ?\r)
-                 ((equal base "tab") ?\t)
-                 ((equal base "space") ?\s)
-                 ((equal base "escape") ?\e)
-                 ((equal base "backspace") ?\x7f)
-                 ((equal base "pageup") 'prior)
-                 ((equal base "pagedown") 'next)
-                 ((member base '("up" "down" "left" "right" "home" "end"
-                                 "insert" "delete")) (intern base))
-                 ((string-match-p "\\`f[1-9][0-9]?\\'" base) (intern base))
-                 (t (error "Unsupported terminal key: %s" key)))))
-    (event-convert-list (append modifiers (list event)))))
+         (name (cond
+                ((= (length base) 1) literal)
+                ((equal base "enter") "return")
+                ((equal base "pageup") "prior")
+                ((equal base "pagedown") "next")
+                ((member base '("tab" "space" "escape" "backspace"
+                                "up" "down" "left" "right" "home" "end"
+                                "insert" "delete"))
+                 base)
+                ((string-match-p "\\`f[1-9][0-9]?\\'" base) base)
+                (t (error "Unsupported terminal key: %s" key)))))
+    (list name (string-join modifiers ","))))
+
+(defun pi-orchestration--send-key (name modifiers)
+  "Send key NAME with MODIFIERS to the current ghostel terminal.
+Printable characters without Ctrl or Alt are typed as text, so their case
+is exact; everything else goes through the terminal's key encoder."
+  (if (and (= (length name) 1)
+           (not (string-match-p "ctrl\\|alt" modifiers)))
+      (ghostel-send-string (if (string-search "shift" modifiers) (upcase name) name))
+    (ghostel-send-key name modifiers)))
 
 (defun pi-orchestration--send (data)
   "Submit typed input from DATA without reading or modifying a Pi draft."
@@ -222,14 +242,15 @@ Workers name their parent by target ID; root sessions by chat buffer name."
       (with-current-buffer buffer
         (pcase kind
           ("text"
-           (eat-term-send-string eat-terminal (plist-get input :text))
+           (ghostel-send-string
+            (encode-coding-string (plist-get input :text) 'utf-8))
            (when (eq (plist-get input :enter) t)
-             (eat-term-input-event eat-terminal 1 ?\r)))
+             (ghostel-send-key "return")))
           ("keys"
-           (let ((events (mapcar #'pi-orchestration--key-event
-                                 (append (plist-get input :keys) nil))))
-             (dolist (event events)
-               (eat-term-input-event eat-terminal 1 event))))
+           (let ((keys (mapcar #'pi-orchestration--key
+                               (append (plist-get input :keys) nil))))
+             (dolist (key keys)
+               (apply #'pi-orchestration--send-key key))))
           (_ (error "Shell targets accept only terminal text or keys"))))
       (list :success t))))
 
@@ -247,20 +268,32 @@ Workers name their parent by target ID; root sessions by chat buffer name."
             :error (plist-get response :error)))
      (t (error "Missing prompt receipt: %s" request)))))
 
+(defun pi-orchestration--tail (lines)
+  "Return the last LINES lines of the current buffer, at most 50 KiB."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-max))
+      (forward-line (- lines))
+      (buffer-substring-no-properties
+       (max (point) (- (point-max) 51200)) (point-max)))))
+
 (defun pi-orchestration--read (data)
-  "Read a bounded rendered snapshot for the target in DATA."
+  "Read a bounded rendered snapshot for the target in DATA.
+Ghostel renders a terminal into its buffer only while displayed, so
+terminal text comes from the terminal itself, including hidden panels."
   (let* ((target (pi-orchestration--target (plist-get data :id)))
          (buffer (plist-get target :buffer))
          (lines (min 2000 (max 1 (or (plist-get data :lines) 80)))))
     (unless (buffer-live-p buffer) (error "Target buffer is missing"))
-    (with-current-buffer buffer
-      (save-excursion
-        (save-restriction
-          (widen)
-          (goto-char (point-max))
-          (forward-line (- lines))
-          (list :output (buffer-substring-no-properties
-                         (max (point) (- (point-max) 51200)) (point-max))))))))
+    (list :output
+          (with-current-buffer buffer
+            (if (and (derived-mode-p 'ghostel-mode) ghostel--term)
+                (let ((text (or (ghostel--copy-all-text ghostel--term) "")))
+                  (with-temp-buffer
+                    (insert (string-trim-right text))
+                    (pi-orchestration--tail lines)))
+              (pi-orchestration--tail lines))))))
 
 (defun pi-orchestration--close (id &optional force)
   "Stop target ID and close only its owned buffers.
@@ -278,7 +311,8 @@ finishes cleanup when graceful shutdown exceeds the caller's deadline."
           (list :pending t))
       (when target
         (when (and process (process-live-p process))
-          (ignore-errors (signal-process (- (process-id process)) 'SIGKILL))
+          (let ((pid (if pi-target (process-id process) (plist-get target :pid))))
+            (when pid (ignore-errors (signal-process (- pid) 'SIGKILL))))
           (delete-process process))
         (let ((buffer (plist-get target :buffer)))
           (if pi-target

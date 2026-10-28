@@ -5,11 +5,11 @@
 
 (ert-deftest pi-orchestration-native-shell-keys-output-exit-and-close ()
   (let* ((pi-orchestration--targets (make-hash-table :test 'equal))
-         (id "eat-native-test")
+         (id "ghostel-native-test")
          (window (selected-window)) (before (window-buffer))
          (response (pi-orchestration--start
                     (list :id id :endpoint "test"
-                          :spec '(:kind "shell" :name "eat-test" :cwd "/tmp/"
+                          :spec '(:kind "shell" :name "ghostel-test" :cwd "/tmp/"
                                         :argv ["/bin/bash" "-c" "stty -echo; false | true; printf 'READY:%s\\n' \"${PIPESTATUS[0]}\"; read line; printf 'RECEIVED:%s\\n' \"$line\""])))))
     (unwind-protect
         (progn
@@ -28,15 +28,30 @@
       (pi-orchestration--close id))
     (should (equal (plist-get (pi-orchestration--state id) :state) "missing"))))
 
-(ert-deftest pi-orchestration-terminal-key-encoding-through-eat ()
-  (with-temp-buffer
-    (let ((terminal (eat-term-make (current-buffer) (point-min))) output)
-      (setf (eat-term-parameter terminal 'input-function)
-            (lambda (_ text) (push text output)))
-      (dolist (key '("ctrl+c" "Escape" "Up" "alt+x" "Tab" "F5" "A" "Alt+X"))
-        (eat-term-input-event terminal 1 (pi-orchestration--key-event key)))
-      (should (equal (apply #'concat (nreverse output)) "\3\e\e[A\ex\t\e[15~A\eX"))
-      (should-error (pi-orchestration--key-event "not-a-key")))))
+(ert-deftest pi-orchestration-terminal-keys-reach-the-program-as-bytes ()
+  (let* ((pi-orchestration--targets (make-hash-table :test 'equal))
+         (id "ghostel-keys-test")
+         (keys ["ctrl+c" "Escape" "Up" "alt+x" "Tab" "F5" "A" "Alt+X" "shift+b" "PageDown" "Enter"])
+         (expected "\3\e\e[A\ex\t\e[15~A\eXB\e[6~\r"))
+    (pi-orchestration--start
+     (list :id id :endpoint "test"
+           :spec (list :kind "shell" :name "keys" :cwd "/tmp/"
+                       :argv (vector "/bin/sh" "-c"
+                                     (format "stty raw -echo; printf 'READY\\n'; dd bs=1 count=%d 2>/dev/null | od -An -tx1 | tr -d ' \\n'; printf '\\nEND\\n'; read line"
+                                             (length expected))))))
+    (unwind-protect
+        (progn
+          (should (pilish-test-wait-until
+                   (lambda () (string-match-p "READY" (plist-get (pi-orchestration--read (list :id id)) :output))) 5))
+          (pi-orchestration--send (list :id id :input (list :kind "keys" :keys keys)))
+          (should (pilish-test-wait-until
+                   (lambda () (string-match-p "END" (plist-get (pi-orchestration--read (list :id id)) :output))) 5))
+          (should (string-match-p
+                   (regexp-quote (mapconcat (lambda (byte) (format "%02x" byte)) expected ""))
+                   (plist-get (pi-orchestration--read (list :id id)) :output)))
+          (should-error (pi-orchestration--key "not-a-key"))
+          (should-error (pi-orchestration--key "hyper+x")))
+      (pi-orchestration--close id))))
 
 (ert-deftest pi-orchestration-pilish-start-receipt-draft-and-process-ownership ()
   (let* ((pi-orchestration--targets (make-hash-table :test 'equal))
@@ -119,9 +134,9 @@
                     :object-type 'plist)))
     (should (equal (plist-get response :error) "Unknown orchestration operation"))))
 
-(ert-deftest pi-orchestration-eat-fullscreen-snapshot-and-owned-close ()
+(ert-deftest pi-orchestration-ghostel-fullscreen-snapshot-and-owned-close ()
   (let* ((pi-orchestration--targets (make-hash-table :test 'equal))
-         (id "eat-fullscreen-test") process)
+         (id "ghostel-fullscreen-test") process)
     (unwind-protect
         (progn
           (pi-orchestration--start

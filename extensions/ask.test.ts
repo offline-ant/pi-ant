@@ -98,7 +98,15 @@ test("RPC ask cancellation, edited answers, and unavailable UI are explicit", as
     assert.equal(unavailable.details.cancelled, true);
     const edited = await fixture.execute("edit", { questions: [{ ...questions[0], multi: false }] }, undefined, undefined, {
       hasUI: true, mode: "rpc", ui: {
-        select: async (_title: string, choices: string[]) => choices.find((choice) => choice.includes("Edit: A")),
+        select: async (title: string, choices: string[]) => {
+          if (title === "Edit which option?") {
+            assert.deepEqual(choices, ["A", "B"]);
+            return "A";
+          }
+          // One edit entry for all options, before the fork entry; no per-option edit duplicates.
+          assert.deepEqual(choices, ["A", "B", "Other (type your own)", "Edit an option as your answer…", "Fork (discuss separately)"]);
+          return "Edit an option as your answer…";
+        },
         editor: async (_title: string, prefill: string) => `${prefill} with changes`,
       },
     });
@@ -116,12 +124,44 @@ test("cancelled discussion editor returns to the same RPC question without spawn
       hasUI: true, mode: "rpc", ui: {
         select: async (_title: string, choices: string[]) => {
           count++;
-          return choices.find((choice) => choice.includes(count === 1 ? "Fork (discuss separately)" : ". A"));
+          return choices.find((choice) => choice === (count === 1 ? "Fork (discuss separately)" : "A"));
         },
         editor: async () => undefined,
       },
     });
     assert.deepEqual(result.details.results[0].selectedOptions, ["A"]);
     assert.equal(fixture.commands.length, 0);
+  } finally { await fixture.cleanup(); }
+});
+
+test("RPC ask lists earlier answers, returns from an edit picker, and keeps duplicate labels distinct", async () => {
+  const fixture = askFixture();
+  const titles: string[] = [];
+  let edits = 0;
+  try {
+    const result = await fixture.execute("multi", {
+      questions: [
+        { id: "first", question: "First?", options: [{ label: "Same" }, { label: "Same" }] },
+        { id: "second", question: "Second?", options: [{ label: "Y" }], allowOther: false },
+      ],
+    }, undefined, undefined, {
+      hasUI: true, mode: "rpc", ui: {
+        select: async (title: string, choices: string[]) => {
+          titles.push(title);
+          if (title === "Edit which option?") { edits++; return undefined; }
+          if (title.startsWith("(1/2)")) {
+            if (edits === 0) return "Edit an option as your answer…";
+            assert.deepEqual(choices.slice(0, 2), ["Same", "Same (2)"]);
+            return "Same (2)";
+          }
+          return "Y";
+        },
+      },
+    });
+    assert.equal(result.details.cancelled, false);
+    assert.deepEqual(result.details.results.map((entry) => entry.selectedOptions), [["Same"], ["Y"]]);
+    // Cancelling the edit picker returns to the same question.
+    assert.deepEqual(titles.slice(0, 3), ["(1/2) First?", "Edit which option?", "(1/2) First?"]);
+    assert.equal(titles[3], "(2/2) Second?\n✓ First? → Same");
   } finally { await fixture.cleanup(); }
 });

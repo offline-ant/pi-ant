@@ -33,6 +33,7 @@ test("inherited sessions fork before sibling calls without changing parent branc
       const child = prepareDelegateSession({ tool: "do", task: `Task ${id}` }, ctx, { toolName: "do", toolCallId: id }, runtime);
       childFiles.push(child.sessionFile);
       const fork = SessionManager.open(child.sessionFile);
+      assert.equal(child.sessionId, fork.getHeader()!.id);
       assert.equal(fork.getBranch().filter((entry) => entry.type === "message").length, 1);
       assert.deepEqual(child.args, ["--provider", "other", "--model", "alternate", "--thinking", "high"]);
     }
@@ -48,6 +49,7 @@ test("inherited sessions fork before sibling calls without changing parent branc
     childFiles.push(project.sessionFile);
     assert.equal(SessionManager.open(project.sessionFile).getBranch().filter((entry) => entry.type === "message").length, 0);
     assert.equal(project.cwd, otherFolder);
+    assert.equal(project.sessionId, SessionManager.open(project.sessionFile).getHeader()!.id);
     assert.equal(SessionManager.open(project.sessionFile).getCwd(), otherFolder);
     const clean = prepareDelegateSession({ tool: "fresh_look", task: "Task", folder: otherFolder }, ctx, { toolName: "fresh_look", toolCallId: "a" }, runtime);
     childFiles.push(clean.sessionFile);

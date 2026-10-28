@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { REMOTE_ENV } from "./remote-session.ts";
 
@@ -15,6 +15,18 @@ export function workerResumeCommand(sessionFile: string, remote?: string): strin
   if (process.env.PI_CODING_AGENT_DIR) args.push(quote(`PI_CODING_AGENT_DIR=${resolve(getAgentDir())}`));
   args.push("pi", "--session", quote(sessionFile));
   return args.join(" ");
+}
+
+/** Pilish's `details.savedConversations` declaration: a read-only link to the worker's transcript. */
+export interface SavedConversations {
+  version: 1;
+  root: string;
+  items: { sessionId: string; file: string; label: string }[];
+}
+
+export function workerSavedConversations(sessionFile: string, sessionId: string, label: string): SavedConversations {
+  const file = resolve(sessionFile);
+  return { version: 1, root: dirname(file), items: [{ sessionId, file: basename(file), label }] };
 }
 
 export function workerResumeHint(command: string): string {

@@ -10,7 +10,7 @@ import { createCodemodeDelegateController } from "../codemode-delegate.ts";
 import { createWorkerArtifacts, formatWorkerResult, makeWorkerId, writeWorkerRequest } from "../worker-frame.ts";
 import { runEphemeralWorker } from "../workers.ts";
 import { WORKER_SCOPE_RULE } from "../worker-scope.ts";
-import { workerResumeCommand, workerResumeHint } from "../worker-resume.ts";
+import { workerResumeCommand, workerResumeHint, workerSavedConversations } from "../worker-resume.ts";
 import { formatRemoteLocation, parseRemoteTarget, remoteChildEnvironment, resolveRemoteLocation, sessionRemote, type RemoteLocation } from "../remote-session.ts";
 
 const remoteParam = Type.Optional(Type.String({
@@ -173,13 +173,15 @@ export default function delegateExtension(pi: ExtensionAPI): void {
           const prepared = prepareDelegateSession({ ...params, tool, remote }, ctx, origin, { model, thinkingLevel });
           const sessionCommand = workerResumeCommand(prepared.sessionFile, remote);
           const resumeHint = workerResumeHint(sessionCommand);
+          const id = makeWorkerId();
+          // Lets frontends such as Pilish open the transcript read-only; details only, never content.
+          const savedConversations = workerSavedConversations(prepared.sessionFile, prepared.sessionId, `${tool}-${id}`);
           // Publish before native startup or its first output capture can block.
           onUpdate?.({
             content: [{ type: "text", text: `${workerInfo}\nStarting worker.` }],
-            details: { sessionFile: prepared.sessionFile, sessionCommand, cwd: prepared.cwd, ...remote && { remote }, status: "starting" },
+            details: { sessionFile: prepared.sessionFile, sessionCommand, savedConversations, cwd: prepared.cwd, ...remote && { remote }, status: "starting" },
           });
           try {
-            const id = makeWorkerId();
             const paths = createWorkerArtifacts();
             const tools = [...new Set([...pi.getActiveTools(), "do"])];
             writeWorkerRequest(paths, {
@@ -200,14 +202,14 @@ export default function delegateExtension(pi: ExtensionAPI): void {
               ...location && { env: remoteChildEnvironment(location) },
               onUpdate: onUpdate ? (update) => onUpdate({
                 ...update, content: [{ type: "text", text: workerInfo }, ...update.content],
-                details: { ...update.details, sessionCommand },
+                details: { ...update.details, sessionCommand, savedConversations },
               }) : undefined,
             });
             return {
               content: [{ type: "text", text: `${workerInfo}\n\n${formatWorkerResult(output.result)}` }],
               details: { ...output.details, context, cwd: prepared.cwd, ...remote && { remote }, result: output.result,
                 model: { provider: model.provider, id: model.id }, thinkingLevel, alt: params.alt === true,
-                args: prepared.args, sessionCommand },
+                args: prepared.args, sessionCommand, savedConversations },
             };
           } catch (error) {
             // Throwing preserves Pi's isError flag, including parent Escape.
