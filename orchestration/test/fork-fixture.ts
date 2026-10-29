@@ -28,6 +28,7 @@ export function forkFixture() {
   const pi = {
     getActiveTools: () => ["read", "ask", "do", "delegate", "fresh_look", "unknown-in-child"],
     getThinkingLevel: () => "high",
+    getSessionName: (): string | undefined => undefined,
     exec: async (_command: string, args: string[]) => {
       commands.push(args);
       let stdout = "";

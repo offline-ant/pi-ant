@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { TOOL_SELECTION_ENTRY } from "../../extensions/tool-selection.ts";
 import { flushSessionFile, modelCliArgs, resolveCwd } from "../context.ts";
@@ -59,6 +60,14 @@ export function parseForkArgs(args: string): ForkInput {
   return { name, folder, prompt };
 }
 
+/** Base of automatic fork names: the session name, else the cwd's basename, as a valid name. */
+export function forkNameBase(sessionName: string | undefined, cwd: string): string {
+  // Room for "-fork-NN" within the 32-character name limit.
+  const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^[^a-z]+/, "").replace(/-+$/, "").slice(0, 24).replace(/-+$/, "");
+  return slug(sessionName ?? "") || slug(path.basename(cwd)) || "session";
+}
+
 /** Create an independent child; never navigate, submit, or edit the parent. */
 export async function forkHere(
   pi: ExtensionAPI,
@@ -82,8 +91,9 @@ export async function forkHere(
   if (name) {
     release = claimName(name);
   } else {
+    const base = `${forkNameBase(pi.getSessionName(), cwd)}-fork`;
     for (let number = 1; ; number++) {
-      const candidate = `fork-${number}`;
+      const candidate = number === 1 ? base : `${base}-${number}`;
       const claimed = tryClaimName(candidate);
       if (!claimed) continue;
       if (readTarget(candidate)) {

@@ -492,7 +492,8 @@ reuse, draft preservation, managed-source races, failed receiver readiness and
 source-only exit. It makes no inference requests.
 
 `/fork-here [name] [folder] [-- <prompt>]` opens an independent conversation on
-the same host, defaulting to the parent's cwd and the next available `fork-N`.
+the same host, defaulting to the parent's cwd and the name `<session>-fork` (the
+session name, else the cwd's basename; `-fork-2`, … when taken).
 No prompt means idle. The parent branch, session, and editor draft are unchanged.
 Forks inherit the active branch, provider/model/thinking, and exact applicable
 active tools. They have no result wait, retrospective, or automatic close.

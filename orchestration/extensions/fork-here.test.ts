@@ -8,7 +8,7 @@ import { flushSessionFile } from "../context.ts";
 import { forkFixture } from "../test/fork-fixture.ts";
 import { claimName, readTarget, saveTarget, tryClaimName } from "../workers.ts";
 import type { HostTarget } from "../host-types.ts";
-import forkHereExtension, { forkHere, parseForkArgs } from "./fork-here.ts";
+import forkHereExtension, { forkHere, forkNameBase, parseForkArgs } from "./fork-here.ts";
 
 const args = ["--provider", "fixture", "--model", "fake", "--thinking", "high"];
 
@@ -66,6 +66,14 @@ test("idle and prompted forks use explicit parent, actual branch and exact tools
   } finally { await fixture.cleanup(); }
 });
 
+test("automatic fork names follow the session name, else the folder", () => {
+  assert.equal(forkNameBase("Fix Mode Line!", "/x/pi"), "fix-mode-line");
+  assert.equal(forkNameBase(undefined, "/home/user/Projects/pi"), "pi");
+  assert.equal(forkNameBase("  ", "/tmp/2026 Notes"), "notes");
+  assert.equal(forkNameBase(undefined, "/"), "session");
+  assert.ok(`${forkNameBase("a".repeat(60), "/")}-fork-99`.length <= 32);
+});
+
 test("concurrent unnamed forks reserve different names without changing the parent", async () => {
   const fixture = forkFixture();
   try {
@@ -77,6 +85,8 @@ test("concurrent unnamed forks reserve different names without changing the pare
       return result;
     }));
     assert.equal(new Set(forks.map((fork) => fork.name)).size, 3);
+    const base = `${forkNameBase(undefined, fixture.directory)}-fork`;
+    for (const fork of forks) assert.match(fork.name, new RegExp(`^${base}(?:-\\d+)?$`));
     assert.equal(new Set(forks.map((fork) => fork.target.id)).size, 3);
     for (const fork of forks) {
       assert.deepEqual(readTarget(fork.name), fork.target);
