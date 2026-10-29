@@ -8,6 +8,12 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 export default function lifecycleFixture(pi: ExtensionAPI): void {
   const directory = process.cwd();
   let sessionFile: string | undefined;
+  let sessionId: string | undefined;
+  let recoveryAllowed = true;
+  const unsubscribeRecovery = pi.events.on("pi-claude-agent:recovery-policy", (data) => {
+    if (typeof data === "object" && data !== null && "allowed" in data && typeof data.allowed === "boolean") recoveryAllowed = data.allowed;
+  });
+  pi.on("session_shutdown", unsubscribeRecovery);
   const trace = (event: object): void => fs.appendFileSync(path.join(directory, "lifecycle-trace.jsonl"), `${JSON.stringify({ pid: process.pid, session: sessionFile, ...event })}\n`);
   const report = (event: string, ctx: ExtensionContext): void => trace({ event, draft: ctx.ui.getEditorText(), idle: ctx.isIdle(),
     tools: pi.getActiveTools(), provider: ctx.model?.provider, model: ctx.model?.id, thinking: pi.getThinkingLevel(),
@@ -30,8 +36,20 @@ export default function lifecycleFixture(pi: ExtensionAPI): void {
     const prompt = text(context);
     const retrospective = prompt.startsWith("The main result has already been saved");
     const summary = prompt.startsWith("<conversation>\n");
-    trace({ event: "request", prompt, retrospective, summary, model: model.id, reasoning: options?.reasoning,
+    trace({ event: "request", prompt, retrospective, summary, model: model.id, reasoning: options?.reasoning, recoveryAllowed,
       tools: getCurrentTools(context.messages).map((tool) => tool.name) });
+    if (prompt.startsWith("[quota-after-submit]")) {
+      while (!fs.existsSync(path.join(directory, "release-submit-quota"))) await delay(25, undefined, { signal: options?.signal });
+    }
+    if (prompt.startsWith("[quota-wait]") || prompt.startsWith("[quota-after-submit]")) {
+      if (!recoveryAllowed) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "fixture quota recovery disabled" });
+      pi.events.emit("pi-claude-agent:recovery-status", { sessionId, retryAt: Date.now() + 60_000 });
+      try {
+        while (!fs.existsSync(path.join(directory, "release-quota"))) await delay(25, undefined, { signal: options?.signal });
+      } finally {
+        pi.events.emit("pi-claude-agent:recovery-status", { sessionId });
+      }
+    }
     if (summary) {
       while (!fs.existsSync(path.join(directory, "release-compaction"))) await delay(25, undefined, { signal: options?.signal });
       return fauxAssistantMessage("## Goal\nContinue the active fixture task after overflow recovery.");
@@ -60,6 +78,7 @@ export default function lifecycleFixture(pi: ExtensionAPI): void {
   pi.registerProvider(provider.provider);
   pi.on("session_start", (_event, ctx) => {
     sessionFile = ctx.sessionManager.getSessionFile();
+    sessionId = ctx.sessionManager.getSessionId();
     report("startup", ctx);
   });
   pi.on("before_agent_start", (_event, ctx) => {
@@ -72,6 +91,7 @@ export default function lifecycleFixture(pi: ExtensionAPI): void {
   pi.on("session_compact_failed", (event) => { trace({ event: "compaction-failed", reason: event.reason, error: event.errorMessage }); });
   pi.on("agent_settled", () => { trace({ event: "settled" }); });
   pi.registerCommand("lifecycle-report", { handler: async (_args, ctx) => { report("report", ctx); } });
+  pi.registerCommand("lifecycle-abort", { handler: async (_args, ctx) => { await ctx.abort(); } });
   pi.registerCommand("lifecycle-tools", { handler: async (args) => {
     pi.setActiveTools(args.split(",").filter(Boolean));
   } });

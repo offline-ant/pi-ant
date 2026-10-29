@@ -301,7 +301,8 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
 
   function publishRecoveryPolicy(): void {
     const request = activeRequest;
-    const allowed = request?.capture === "automatic" && request.phase === "result" && !request.submitting;
+    // Capture decides where replies go, not how the provider handles quota.
+    const allowed = request?.phase !== "retrospective";
     if (request && !allowed) request.retryAt = undefined;
     pi.events.emit(RECOVERY_POLICY_EVENT, { allowed });
   }
@@ -321,9 +322,13 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
 
     if (request.capture === "supervised") {
       const phase = request.phase === "result" ? "result" : "retrospective";
-      ctx.ui.setStatus("worker-frame", ctx.ui.theme.fg("warning", "worker:supervised"));
+      ctx.ui.setStatus("worker-frame", ctx.ui.theme.fg("warning", request.retryAt === undefined ? "worker:supervised" : "worker:supervised · quota-wait"));
       ctx.ui.setWidget("worker-frame", [
         `Worker supervision (${phase})`,
+        ...(request.retryAt === undefined ? [] : [
+          `Waiting for Claude five-hour quota; retry scheduled at ${formatWorkerRetryTime(request.retryAt)}.`,
+          "Escape cancels this request's recovery. No tools are replayed; replies remain supervised.",
+        ]),
         request.supervisionReason ?? (request.candidate ? "Latest assistant reply is ready to submit." : "Assistant replies stay in this worker."),
         request.candidate
           ? "Use /worker-submit to send the latest reply to the parent."
@@ -365,7 +370,6 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
   function superviseWorker(ctx: ExtensionContext, request: ActiveWorkerRequest, reason?: string): void {
     const wasSupervised = request.capture === "supervised";
     request.capture = "supervised";
-    publishRecoveryPolicy();
     if (reason !== undefined || !wasSupervised) request.supervisionReason = reason;
     writeActiveWorkerStatus(ctx, request);
     refreshWorkerUi(ctx);
@@ -398,7 +402,6 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     request.pendingContinuePrompt = prompt;
     request.pendingFailure = undefined;
     request.supervisionReason = undefined;
-    publishRecoveryPolicy();
     writeActiveWorkerStatus(ctx, request);
     refreshWorkerUi(ctx);
   }
@@ -422,9 +425,9 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     isError = false,
     retrospective?: string,
   ): void {
-    pi.events.emit(RECOVERY_POLICY_EVENT, { allowed: false });
     writeFinalResult(ctx, request, result, isError, retrospective);
     activeRequest = undefined;
+    publishRecoveryPolicy();
     refreshWorkerUi(ctx);
     ctx.shutdown();
   }
@@ -591,9 +594,20 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
       }
 
       request.submitting = true;
+      let quotaWaitStarted = () => {};
+      const quotaWait = new Promise<void>((resolve) => { quotaWaitStarted = resolve; });
+      const unsubscribeQuotaWait = pi.events.on(RECOVERY_STATUS_EVENT, (data) => {
+        if (activeRequest === request && isRecord(data) && data.sessionId === ctx.sessionManager.getSessionId()
+          && typeof data.retryAt === "number" && Number.isSafeInteger(data.retryAt) && data.retryAt > 0) quotaWaitStarted();
+      });
       try {
         superviseWorker(ctx, request);
-        await ctx.waitForIdle();
+        const idle = ctx.waitForIdle();
+        if (request.retryAt !== undefined) quotaWaitStarted();
+        // A request can enter quota recovery after submission starts. Wake on
+        // either idle or a quota deadline; cancellation stays in this command,
+        // never in an asynchronous event callback or a mode-based policy.
+        await Promise.race([idle, quotaWait]);
         if (activeRequest !== request || fs.existsSync(request.request.resultPath)) {
           ctx.ui.notify("Worker request is no longer active.", "warning");
           return;
@@ -602,6 +616,13 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
         const submitted = parseCommandText(args) || request.candidate;
         if (!submitted) {
           ctx.ui.notify("No assistant reply is ready. Wait for a reply or pass a message to /worker-submit.", "warning");
+          return;
+        }
+
+        if (request.retryAt !== undefined && !ctx.isIdle()) await ctx.abort();
+        await idle;
+        if (activeRequest !== request || fs.existsSync(request.request.resultPath)) {
+          ctx.ui.notify("Worker request is no longer active.", "warning");
           return;
         }
 
@@ -614,6 +635,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
         completeWorkerRequest(ctx, request, request.mainResult ?? "", false, submitted);
         ctx.ui.notify("Submitted worker retrospective.", "info");
       } finally {
+        unsubscribeQuotaWait();
         request.submitting = false;
       }
     },
@@ -769,7 +791,7 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
 
   const unsubscribeRecovery = pi.events.on(RECOVERY_STATUS_EVENT, (data) => {
     const request = activeRequest;
-    if (!request || request.capture !== "automatic" || request.phase !== "result" || request.submitting
+    if (!request || request.phase !== "result"
       || !isRecord(data) || data.sessionId !== request.context.sessionManager.getSessionId()) return;
     const retryAt = data.retryAt;
     if (retryAt !== undefined && (typeof retryAt !== "number" || !Number.isSafeInteger(retryAt) || retryAt <= 0)) return;
@@ -786,7 +808,6 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
     unsubscribeSwitchCheck();
     unsubscribeHandoff();
     unsubscribeRecovery();
-    pi.events.emit(RECOVERY_POLICY_EVENT, { allowed: false });
     if (activeRequest) {
       activeRequest.retryAt = undefined;
       writeActiveWorkerStatus(activeRequest.context, activeRequest);
@@ -794,6 +815,9 @@ export default function workerFrameExtension(pi: ExtensionAPI): void {
       activeRequest = undefined;
       refreshWorkerUi(ctx);
     }
+    // Provider shutdown cancels its active request; do not leave a mode-based
+    // disable behind for another session or a subsequent extension reload.
+    publishRecoveryPolicy();
   });
 
   pi.on("agent_settled", (_event, ctx) => {

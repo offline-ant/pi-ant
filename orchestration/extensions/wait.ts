@@ -8,7 +8,7 @@ import { hostForTarget } from "../host.ts";
 import type { HostTarget } from "../host-types.ts";
 import { capturedExitStatus, lastPromptMark, promptReporting, promptWarning, readCursor, scanOutput, PROMPT_INTEGRATION_HINT, writeCursor, type PromptMark, type ScanOutcome } from "../panel-output.ts";
 import { renderToolCall } from "../tool-call.ts";
-import { readTarget, validateName } from "../workers.ts";
+import { settledTarget, validateName } from "../workers.ts";
 
 const POLL_MS = 500;
 const STATE_POLL_MS = 2000;
@@ -134,7 +134,8 @@ export default function waitExtension(pi: ExtensionAPI): void {
         offset = fileSize(log);
       } else {
         const name = validateName(params.panel!);
-        target = readTarget(name);
+        // A panel started earlier in the same tool batch may still be registering.
+        target = await settledTarget(name, signal);
         if (!target) throw new Error(`No panel named '${name}'. Use /panels to list panels.`);
         if (target.kind !== "shell" || !target.outputPath) throw new Error(`'${name}' has no captured output to wait on${target.kind === "shell" ? "; it was started before output capture existed. Close and restart it." : ": it is not a shell panel."}`);
         log = target.outputPath;

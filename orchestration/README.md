@@ -183,8 +183,16 @@ half-created targets, so a failed or cancelled start leaves nothing registered.
 All logical names share one registry and must match `^[a-z][a-z0-9_-]{0,31}$`.
 Registered names, including exited panels and forks, remain reserved until
 explicit close; a panel whose native surface was destroyed elsewhere reports
-that on read and releases its name to the next `panel-start`. Native IDs are
-diagnostic details, not public lookup names.
+that on read and releases its name to the next `panel-start`. A target whose
+host server no longer listens (its tmux/Herdr/Emacs socket is absent or refuses
+connections) counts as destroyed, since a server owns its panes' and buffers'
+processes; any other failure (timeout, permission, a bare Emacs server name)
+is reported unchanged. Native IDs are diagnostic details, not public lookup names.
+Tools of one assistant batch run concurrently, so panel starts and closes take a
+short `operation` claim and wait for one another, and `panel-read`, `panel-send`
+and `wait` look a name up only after such an operation finished: a batch acts on
+one name in call order. A worker's `request` claim lasts its run; operations on
+that name fail at once.
 
 Independent sibling `do`/`delegate`/`fresh_look` calls run concurrently and
 join before the parent continues. Pi startup alone is serialized to avoid
@@ -534,41 +542,50 @@ abort enters `worker:supervised`, including provider quota, authentication, and
 context errors. Provider failover and Pi recovery run first; successful recovery
 continues automatically. The worker stays open with its history and actual error
 reason, and the parent tool remains pending until completion or cancellation.
-There is no automatic resume or timed retry in supervision. Resolve the blocker
-and use `/worker-continue <prompt>` to restore automatic completion; ordinary
-messages stay local until `/worker-submit`. `/finish-worker-now <text>` returns
+Entering supervision does not itself resume an already-failed request. Resolve
+the blocker and submit an ordinary message to continue under supervision, or use
+`/worker-continue <prompt>` to restore automatic completion. Supervised main-task
+requests retain the provider's normal quota recovery; replies stay local until
+`/worker-submit`. `/finish-worker-now <text>` returns
 without another model request. Parent cancellation still stops the worker.
 Startup, process, and protocol failures remain terminal. A failed retrospective
 returns the successful main result with an unavailable-retrospective note.
 
 Claude Agent five-hour recovery stays inside the provider's original request.
-After immediate account failover, eligible automatic main work waits until the
-reported reset plus 20 seconds, then retries inference from the exact native
+After immediate account failover, eligible main work, automatic or supervised,
+waits until the reported reset plus 20 seconds, then retries inference from the exact native
 input/tool-result checkpoint. A repeated confirmed five-hour rejection retries
 20 seconds later unless Claude supplies a new future reset. Completed tools are
 not replayed and no `/worker-continue` or extra user message is injected. The
-worker remains automatic and the parent remains pending; local UI and parent
+worker keeps its capture mode and the parent remains pending; local UI and parent
 progress show the scheduled retry time in the process's local timezone with its
-UTC offset. Parent cancellation or Escape cancels the provider wait.
+UTC offset. A supervised reply still needs explicit submission. Parent cancellation
+or Escape cancels the current provider request, not recovery for later prompts.
+Submitting a result during a quota wait explicitly aborts that pending request
+before starting the optional retrospective; explicit finish also aborts active work.
 
 The private extension event contract is:
 
 - Worker → provider: `pi-claude-agent:recovery-policy` with `{allowed:boolean}`.
-  Automatic main start/resume publishes `true` before its prompt; retrospective,
-  human takeover/submission, explicit finish, and shutdown publish `false`.
-  Retrospective failure therefore returns the saved main result without waiting
-  for quota, and supervision is never restarted automatically.
+  Main start publishes `true` before its prompt; only the optional retrospective
+  phase publishes `false`. Capture changes, human input, self-compaction and
+  `/worker-continue` do not disable recovery. Completion and shutdown restore the
+  default `true`; actual request cancellation belongs to abort/shutdown, not this
+  policy. Retrospective failure therefore returns the saved main result without
+  waiting for quota.
 - Provider → worker: `pi-claude-agent:recovery-status` with
   `{sessionId:string,retryAt?:number}`. `retryAt` is absolute epoch milliseconds;
-  omission clears it. Only the current session's automatic main work accepts it.
+  omission clears it. Only the current session's main work accepts it, regardless
+  of capture mode. Supervised waits retain `state: "supervised"` in `status.json`
+  and show supervision alongside the quota deadline locally and to the parent.
   `status.json` and parent progress details carry `retryAt` while waiting;
   progress details use `status: "quota-wait"`. The worker owns no retry timer.
 
 Unsent draft edits do not change policy. Ordinary submitted human input takes
-supervision and disables delayed recovery before it is queued; normal Pi steering
-semantics still apply. Other errors, unsafe checkpoints, and partial responses
-retain normal failure/supervision handling. Already-supervised workers need an
-explicit `/worker-continue <prompt>`; loading this integration does not revive them.
+supervision before it is queued, without interrupting quota recovery; normal Pi
+steering semantics still apply. Other errors, unsafe checkpoints, and partial
+responses retain normal failure/supervision handling. Loading this integration
+does not revive failed requests or change their supervised capture mode.
 
 When `self_compact` is enabled, its private `pi-ant:self-compact-handoff` events
 identify the terminating tool call and its resumed or failed handoff. Only a
@@ -646,9 +663,11 @@ or rewritten by orchestration cleanup; only already-persisted progress is recove
 - `/tmp/pi-panel-output-*`: raw panel capture logs (`output.log`, unbounded
   while the panel lives) and `wait.json` cursors, removed on `panel-close`.
 
-Abruptly killed parent processes can leave claim files. Their contents identify
-the owning PID; verify that process is gone before manually removing its exact
-claim. There is no global stale-cleanup command. Old state is not migrated or
+Claim files contain the holder's PID and purpose. A claim whose process no
+longer exists is stale and removed by the next claim or lookup of that name
+(only that exact file). Registry entries of targets whose host reports them
+missing remain until the name is read, started or closed again; there is no
+global stale-cleanup command. Old state is not migrated or
 read; legacy tmux semaphore/Claude bridge tools and backend-specific package
 aliases have been removed. Existing running sessions are not restarted at cutover.
 

@@ -91,6 +91,8 @@ export function createTmuxHost(pi: ExtensionAPI, endpoint: string): Host {
     async state(target, signal) {
       const result = await run(["display-message", "-p", "-t", target.id, "#{pane_dead}"], signal);
       signal?.throwIfAborted();
+      // A timed-out query proves nothing; every tmux failure names a pane or server that is gone.
+      if (result.killed) throw new Error(`tmux display-message timed out for ${target.id}`);
       if (result.code !== 0 || result.stdout.trim() === "") return "missing";
       return result.stdout.trim() === "1" ? "exited" : "running";
     },

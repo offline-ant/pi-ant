@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as net from "node:net";
+import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { HostTarget } from "./host-types.ts";
 import { createWorkerArtifacts, formatWorkerRetryTime, writeWorkerRequest, writeWorkerStatus, type WorkerRequestFile } from "./worker-frame.ts";
-import { claimName, listTargets, readTarget, removeTarget, runEphemeralWorker, saveTarget, validateName, waitForWorkerResult } from "./workers.ts";
+import { claimName, claimNameForOperation, listTargets, readTarget, removeTarget, runEphemeralWorker, saveTarget, settledTarget, validateName, waitForWorkerResult } from "./workers.ts";
 
 const target = (name: string): HostTarget => ({ host: "tmux", endpoint: "/tmp/fake-orchestration", id: "%2", kind: "pi", name });
 
@@ -22,6 +24,40 @@ test("logical names are exclusively claimed and all target kinds share one regis
   } finally { removeTarget(name); release(); }
   release();
   claimName(name)();
+});
+
+test("operations on a name wait for each other; request claims fail at once; dead holders' claims are stale", async () => {
+  const name = `claims-${process.pid}`;
+  const claimFile = path.join(os.tmpdir(), "pi-orchestration-targets", `${name}.json.claim`);
+  // A start in progress: a lookup sees its result, and a later close waits for it.
+  const start = await claimNameForOperation(name);
+  const order: string[] = [];
+  const lookup = settledTarget(name).then((found) => { order.push(`lookup ${found?.name}`); });
+  saveTarget(target(name));
+  order.push("start");
+  start();
+  await lookup;
+  assert.deepEqual(order, ["start", `lookup ${name}`]);
+  const close = await claimNameForOperation(name);
+  let started = false;
+  const next = claimNameForOperation(name).then((release) => { started = true; return release; });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(started, false, "a start waits while a close of the same name runs");
+  removeTarget(name);
+  close();
+  (await next)();
+  // A worker's request lasts its whole run: operations fail instead of waiting.
+  const request = claimName(name);
+  try { await assert.rejects(claimNameForOperation(name), /already being used/); }
+  finally { request(); }
+  // A claim whose process no longer exists blocks nothing.
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid!;
+  for (const purpose of ["operation", "request", ""]) {
+    fs.writeFileSync(claimFile, `${dead} ${purpose}\n`);
+    assert.equal(await settledTarget(name), undefined);
+    claimName(name)();
+  }
+  assert.equal(fs.existsSync(claimFile), false);
 });
 
 test("matching result is completion even when the process exits during native state I/O", async () => {
@@ -237,18 +273,19 @@ for (const outcome of ["completion", "cancellation"] as const) {
   });
 }
 
+for (const state of ["running", "supervised"] as const) {
 for (const outcome of ["completion", "cancellation"] as const) {
-  test(`quota recovery remains owned and publishes its deadline until ${outcome}`, async () => {
+  test(`${state} quota recovery remains owned and publishes its deadline until ${outcome}`, async () => {
     const restore = selectFakeTmux();
     const paths = createWorkerArtifacts();
-    const name = `quota-${process.pid}-${outcome}`;
+    const name = `quota-${state[0]}-${process.pid}-${outcome}`;
     const abort = new AbortController();
     const retryAt = Date.now() + 60_000;
     let request: WorkerRequestFile | undefined;
     let observed = false;
     const fake = fakeTmux((received) => {
       request = received;
-      writeWorkerStatus(received.statusPath, { id: received.id, state: "running", retryAt });
+      writeWorkerStatus(received.statusPath, { id: received.id, state, retryAt });
     });
     try {
       writeWorkerRequest(paths, { id: name, task: "Recover after reset", tools: ["read"], model: { provider: "fake", id: "fake" }, thinkingLevel: "high", resultPath: paths.resultPath, statusPath: paths.statusPath });
@@ -260,6 +297,7 @@ for (const outcome of ["completion", "cancellation"] as const) {
           assert.match(text, /waiting for Claude five-hour quota/);
           assert.ok(text.includes(formatWorkerRetryTime(retryAt)));
           assert.doesNotMatch(text, /worker-continue/);
+          if (state === "supervised") assert.match(text, /remains supervised; its reply stays local/);
           assert.equal((update.details as { status: string; retryAt: number }).status, "quota-wait");
           assert.equal((update.details as { retryAt: number }).retryAt, retryAt);
           assert.equal(fake.closes.length, 0);
@@ -289,8 +327,10 @@ for (const outcome of ["completion", "cancellation"] as const) {
   });
 }
 
-for (const state of ["running", "supervised"] as const) {
-  test(`parent ignores quota deadline on ${state === "running" ? "another request" : "supervised work"}`, async () => {
+}
+
+for (const state of ["running", "retrospective"] as const) {
+  test(`parent ignores quota deadline on ${state === "running" ? "another request" : "retrospective work"}`, async () => {
     const paths = createWorkerArtifacts();
     const abort = new AbortController();
     const pi = { exec: async () => ({ code: 0, stdout: "0", stderr: "", killed: false }) } as unknown as ExtensionAPI;

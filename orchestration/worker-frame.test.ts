@@ -497,7 +497,7 @@ test("extension messages preserve automatic result capture", async () => {
     assert.equal(result.retrospective, "everything was ok");
     assert.equal(harness.shutdowns, 1);
     assert.deepEqual(harness.sentRecoveryPolicies, [true, false], "publish the policy before each internal prompt");
-    assert.equal(harness.recoveryPolicies.at(-1), false);
+    assert.equal(harness.recoveryPolicies.at(-1), true, "completed work leaves provider recovery at its default");
   } finally {
     fs.rmSync(paths.artifactDir, { recursive: true, force: true });
   }
@@ -840,7 +840,7 @@ test("finishing during asynchronous model selection cannot restart a completed r
     assert.equal(result.result, "Recovered during startup");
     assert.deepEqual(harness.sentMessages, []);
     assert.equal(readWorkerStatus(paths.statusPath)?.state, "closed");
-    assert.ok(harness.recoveryPolicies.every((allowed) => !allowed), "completed setup cannot re-enable recovery");
+    assert.deepEqual(harness.recoveryPolicies, [true], "finishing main work does not disable later provider recovery");
   } finally { releaseModel(); fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
 });
 
@@ -918,6 +918,11 @@ for (const outcome of ["resumed", "failed", "human", "unmatched", "errored-resul
       await emit(harness, "agent_end", assistantEvent("Final result"));
       if (outcome === "human") {
         assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
+        assert.equal(harness.recoveryPolicies.at(-1), true, "compaction preserves supervised main-task recovery");
+        harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "worker-frame-test", retryAt: Date.now() + 60_000 });
+        assert.notEqual(readWorkerStatus(paths.statusPath)?.retryAt, undefined);
+        assert.match(harness.statuses.get("worker-frame") ?? "", /supervised.*quota-wait/);
+        harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "worker-frame-test" });
         assert.equal(fs.existsSync(paths.resultPath), false);
         await runCommand(harness, "worker-submit");
       }
@@ -985,37 +990,233 @@ test("provider recovery status preserves automatic work, follows only this sessi
   } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
 });
 
-for (const takeover of ["interactive", "rpc", "submit", "finish", "failure", "shutdown"] as const) {
-  test(`worker recovery policy and deadline are cleared by ${takeover} without reviving automatic work`, async () => {
+for (const source of ["interactive", "rpc"] as const) {
+  test(`${source} supervision preserves an active quota wait and later main-request recovery`, async () => {
     const harness = createHarness();
     const paths = createWorkerArtifacts();
-    const report = () => harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "worker-frame-test", retryAt: Date.now() + 60_000 });
+    const retryAt = Date.now() + 60_000;
+    const report = (deadline?: number) => harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "worker-frame-test", retryAt: deadline });
     try {
-      writeWorkerRequest(paths, { id: "takeover", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
+      writeWorkerRequest(paths, { id: "supervised-quota", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
       await runCommand(harness, "worker-run", paths.requestPath);
+      report(retryAt);
+      await emit(harness, "input", { source, text: "Keep stricter timeouts" });
+      assert.equal(harness.recoveryPolicies.at(-1), true);
+      assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
+      assert.equal(readWorkerStatus(paths.statusPath)?.retryAt, retryAt, "human input does not cancel provider waiting");
+      assert.match(harness.statuses.get("worker-frame") ?? "", /supervised.*quota-wait/);
+      assert.ok(harness.widgets.get("worker-frame")?.join("\n").includes(formatWorkerRetryTime(retryAt)));
+
+      // Escape clears only this provider request. Plain human input afterwards
+      // must remain supervised while retaining quota recovery (the incident).
       report();
-      assert.notEqual(readWorkerStatus(paths.statusPath)?.retryAt, undefined);
-      if (takeover === "submit") await runCommand(harness, "worker-submit", "Human result");
-      else if (takeover === "finish") await runCommand(harness, "finish-worker-now", "Human result");
-      else if (takeover === "shutdown") await emit(harness, "session_shutdown", {});
-      else if (takeover === "failure") {
-        await emit(harness, "agent_end", assistantErrorEvent("An unrelated transport failure"));
-        await emit(harness, "agent_settled", {});
-      } else await emit(harness, "input", { source: takeover, text: "Wait for me" });
-      assert.equal(harness.recoveryPolicies.at(-1), false);
+      await emit(harness, "agent_end", assistantAbortEvent());
+      await emit(harness, "agent_settled", {});
       assert.equal(readWorkerStatus(paths.statusPath)?.retryAt, undefined);
-      assert.doesNotMatch(harness.statuses.get("worker-frame") ?? "", /quota-wait/);
-      const after = fs.readFileSync(paths.statusPath, "utf8");
+      assert.equal(harness.recoveryPolicies.at(-1), true);
+      await emit(harness, "input", { source, text: "Go" });
+      report(retryAt + 20_000);
+      assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
+      assert.equal(readWorkerStatus(paths.statusPath)?.retryAt, retryAt + 20_000);
+      assert.equal(harness.recoveryPolicies.at(-1), true);
       report();
-      assert.equal(fs.readFileSync(paths.statusPath, "utf8"), after, "late status cannot re-enable recovery");
-      if (["interactive", "rpc", "failure"].includes(takeover)) {
-        assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
-        assert.equal(harness.sentMessages.length, 1);
-        assert.equal(fs.existsSync(paths.resultPath), false);
-      }
+      await emit(harness, "agent_end", assistantEvent("Recovered supervised reply"));
+      assert.equal(fs.existsSync(paths.resultPath), false, "provider recovery does not restore automatic completion");
+      assert.match(harness.widgets.get("worker-frame")?.join("\n") ?? "", /ready to submit/);
+      assert.equal(harness.sentMessages.length, 1, "quota recovery does not inject guidance");
+      await runCommand(harness, "worker-submit");
+      assert.equal(harness.sentRecoveryPolicies.at(-1), false, "only the retrospective disables waiting");
+      await emit(harness, "agent_end", assistantErrorEvent("Claude five-hour subscription limit reached"));
+      await emit(harness, "agent_settled", {});
+      const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "supervised-quota");
+      assert.equal(result.result, "Recovered supervised reply");
+      assert.match(result.retrospective ?? "", /retrospective unavailable/);
     } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
   });
 }
+
+test("worker-continue changes capture without interrupting a supervised quota wait", async () => {
+  const harness = createHarness();
+  const paths = createWorkerArtifacts();
+  const retryAt = Date.now() + 60_000;
+  try {
+    writeWorkerRequest(paths, { id: "continue-quota", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
+    await runCommand(harness, "worker-run", paths.requestPath);
+    await emit(harness, "input", { source: "rpc", text: "Discuss first" });
+    harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "worker-frame-test", retryAt });
+    await runCommand(harness, "worker-continue", "Finish automatically");
+    assert.equal(readWorkerStatus(paths.statusPath)?.state, "running");
+    assert.equal(readWorkerStatus(paths.statusPath)?.retryAt, retryAt);
+    assert.equal(harness.statuses.get("worker-frame"), "worker:quota-wait");
+    assert.equal(harness.sentRecoveryPolicies.at(-1), true);
+    assert.deepEqual(harness.recoveryPolicies, [true], "capture changes publish no quota policy changes");
+  } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
+});
+
+for (const action of ["submit", "finish", "shutdown"] as const) {
+  test(`${action} ends quota reporting without disabling later main-request recovery`, async () => {
+    const harness = createHarness();
+    const paths = createWorkerArtifacts();
+    const report = (retryAt?: number) => harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "worker-frame-test", retryAt });
+    const context = harness.context as { isIdle(): boolean; abort(): Promise<void> };
+    let aborts = 0;
+    try {
+      writeWorkerRequest(paths, { id: "quota-end", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
+      await runCommand(harness, "worker-run", paths.requestPath);
+      report(Date.now() + 60_000);
+      context.isIdle = () => false;
+      context.abort = async () => {
+        aborts++;
+        assert.equal(harness.recoveryPolicies.at(-1), true, "explicit abort, not supervision, cancels the request");
+        report();
+        await emit(harness, "agent_end", assistantAbortEvent());
+        await emit(harness, "agent_settled", {});
+      };
+      if (action === "shutdown") await emit(harness, "session_shutdown", {});
+      else await runCommand(harness, action === "submit" ? "worker-submit" : "finish-worker-now", "Human result");
+      assert.equal(aborts, action === "shutdown" ? 0 : 1);
+      assert.equal(harness.recoveryPolicies.at(-1), action !== "submit");
+      assert.equal(readWorkerStatus(paths.statusPath)?.retryAt, undefined);
+      const after = fs.readFileSync(paths.statusPath, "utf8");
+      report(Date.now() + 60_000);
+      assert.equal(fs.readFileSync(paths.statusPath, "utf8"), after, "retired or retrospective requests ignore late status");
+    } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
+  });
+}
+
+test("submission cancels quota waiting that begins after it started and waits for settlement", async () => {
+  const harness = createHarness();
+  const paths = createWorkerArtifacts();
+  const context = harness.context as { isIdle(): boolean; abort(): Promise<void> };
+  let releaseIdle: (() => void) | undefined;
+  let releaseAbort: (() => void) | undefined;
+  let aborts = 0;
+  try {
+    writeWorkerRequest(paths, { id: "submit-before-quota", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
+    await runCommand(harness, "worker-run", paths.requestPath);
+    context.isIdle = () => false;
+    harness.waitForIdle = () => new Promise<void>((resolve) => { releaseIdle = resolve; });
+    context.abort = async () => {
+      aborts++;
+      assert.equal(harness.recoveryPolicies.at(-1), true);
+      await new Promise<void>((resolve) => { releaseAbort = resolve; });
+      harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "worker-frame-test" });
+      await emit(harness, "agent_end", assistantAbortEvent());
+      await emit(harness, "agent_settled", {});
+      context.isIdle = () => true;
+      releaseIdle?.();
+    };
+    const submission = runCommand(harness, "worker-submit", "Submitted while busy");
+    const retryAt = Date.now() + 60_000;
+    harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "another-session", retryAt });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(aborts, 0, "unrelated quota reports cannot cancel this request");
+    harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "worker-frame-test", retryAt });
+    harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "worker-frame-test", retryAt });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(aborts, 1, "a pending submission cancels a later quota wait exactly once");
+    assert.equal(fs.existsSync(paths.resultMarkdownPath), false, "abort must settle before saving the submitted result");
+    releaseAbort?.();
+    await submission;
+    assert.equal(fs.readFileSync(paths.resultMarkdownPath, "utf8"), "Submitted while busy");
+    assert.equal(harness.sentRecoveryPolicies.at(-1), false, "retrospective cannot start quota waiting");
+    await emit(harness, "agent_end", assistantErrorEvent("fixture retrospective quota unavailable"));
+    await emit(harness, "agent_settled", {});
+    const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "submit-before-quota");
+    assert.equal(result.result, "Submitted while busy");
+    assert.match(result.retrospective ?? "", /retrospective unavailable/);
+    assert.equal(result.isError, false);
+  } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
+});
+
+for (const waitingBeforeSubmit of [true, false]) {
+  test(`empty submission does not cancel quota waiting (${waitingBeforeSubmit ? "already waiting" : "wait begins later"})`, async () => {
+    const harness = createHarness();
+    const paths = createWorkerArtifacts();
+    const context = harness.context as { isIdle(): boolean; abort(): Promise<void> };
+    let aborts = 0;
+    try {
+      writeWorkerRequest(paths, { id: "empty-submit-quota", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
+      await runCommand(harness, "worker-run", paths.requestPath);
+      context.isIdle = () => false;
+      harness.waitForIdle = () => new Promise<void>(() => undefined);
+      context.abort = async () => { aborts++; };
+      const report = () => harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "worker-frame-test", retryAt: Date.now() + 60_000 });
+      if (waitingBeforeSubmit) report();
+      let completed = false;
+      const submission = runCommand(harness, "worker-submit").then(() => { completed = true; });
+      if (!waitingBeforeSubmit) report();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(aborts, 0);
+      assert.equal(completed, true, "no-result submission reports promptly instead of waiting for quota reset");
+      await submission;
+      assert.match(harness.notifications.at(-1) ?? "", /No assistant reply is ready/);
+      assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
+      assert.ok(readWorkerStatus(paths.statusPath)?.retryAt);
+      assert.deepEqual(harness.recoveryPolicies, [true]);
+      assert.equal(fs.existsSync(paths.resultMarkdownPath), false);
+      await runCommand(harness, "worker-continue", "Continue normally");
+      assert.doesNotMatch(harness.notifications.at(-1) ?? "", /submission is already waiting/);
+    } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
+  });
+}
+
+for (const abortFailure of ["sync", "async"] as const) {
+  test(`submission releases ownership when quota cancellation fails (${abortFailure})`, async () => {
+    const harness = createHarness();
+    const paths = createWorkerArtifacts();
+    const context = harness.context as { isIdle(): boolean; abort(): Promise<void> };
+    let releaseIdle: (() => void) | undefined;
+    let aborts = 0;
+    try {
+      writeWorkerRequest(paths, { id: "submit-abort-failure", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
+      await runCommand(harness, "worker-run", paths.requestPath);
+      context.isIdle = () => false;
+      harness.waitForIdle = () => new Promise<void>((resolve) => { releaseIdle = resolve; });
+      context.abort = () => {
+        aborts++;
+        if (abortFailure === "sync") throw new Error("fixture cancellation failed");
+        return Promise.reject(new Error("fixture cancellation failed"));
+      };
+      const submission = runCommand(harness, "worker-submit", "Manual result");
+      const rejected = assert.rejects(submission, /fixture cancellation failed/);
+      harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "worker-frame-test", retryAt: Date.now() + 60_000 });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(aborts, 1);
+      await rejected;
+      harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "worker-frame-test", retryAt: Date.now() + 60_000 });
+      assert.equal(aborts, 1, "failed submission removes its quota listener");
+      assert.equal(fs.existsSync(paths.resultMarkdownPath), false);
+      releaseIdle?.();
+      await runCommand(harness, "worker-continue", "Continue after cancellation failure");
+      assert.doesNotMatch(harness.notifications.at(-1) ?? "", /submission is already waiting/);
+      assert.deepEqual(harness.recoveryPolicies, [true]);
+    } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
+  });
+}
+
+test("retired submission cannot cancel a later quota request", async () => {
+  const harness = createHarness();
+  const paths = createWorkerArtifacts();
+  const context = harness.context as { isIdle(): boolean; abort(): Promise<void> };
+  let releaseIdle: (() => void) | undefined;
+  let aborts = 0;
+  try {
+    writeWorkerRequest(paths, { id: "retired-submit", task: "Work", tools: ["read"], resultPath: paths.resultPath, statusPath: paths.statusPath });
+    await runCommand(harness, "worker-run", paths.requestPath);
+    context.isIdle = () => false;
+    harness.waitForIdle = () => new Promise<void>((resolve) => { releaseIdle = resolve; });
+    context.abort = async () => { aborts++; };
+    const submission = runCommand(harness, "worker-submit", "Manual result");
+    await emit(harness, "session_shutdown", {});
+    harness.events.emit("pi-claude-agent:recovery-status", { sessionId: "worker-frame-test", retryAt: Date.now() + 60_000 });
+    releaseIdle?.();
+    await submission;
+    assert.equal(aborts, 0);
+    assert.equal(fs.existsSync(paths.resultMarkdownPath), false);
+    assert.match(harness.notifications.at(-1) ?? "", /no longer active/);
+  } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
+});
 
 test("result parsing rejects mismatched late requests and malformed artifacts", () => {
   const valid = { id: "late", result: "Stale", timestamp: new Date().toISOString() };

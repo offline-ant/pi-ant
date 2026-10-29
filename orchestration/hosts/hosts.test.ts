@@ -141,17 +141,51 @@ test("Herdr native readiness retry is separate from result completion", async ()
   assert.deepEqual(calls[2], calls[3]);
 });
 
+/** A Unix socket something listens on, standing in for a running Herdr server. */
+async function listeningSocket(): Promise<{ endpoint: string; stop: () => Promise<void> }> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-herdr-socket-"));
+  const endpoint = path.join(dir, "herdr.sock");
+  const server = net.createServer((client) => client.destroy());
+  await new Promise<void>((resolve) => server.listen(endpoint, resolve));
+  return { endpoint, stop: async () => {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    fs.rmSync(dir, { recursive: true, force: true });
+  } };
+}
+
 test("Herdr surviving shell does not prove its Pi is alive; transport failures propagate", async () => {
   const { pi } = fake([
     reply({ result: { pane: {} } }), reply({ error: { code: "agent_not_found" } }, 1),
     reply({ error: { code: "pane_not_found" } }, 1), reply({ error: { code: "protocol_mismatch" } }, 1),
     reply({ result: { pane: {} } }), reply({ result: { process_info: { foreground_processes: [] } } }),
   ]);
-  const host = createHerdrHost(pi, herdrParent.endpoint);
-  assert.equal(await host.state(herdrParent), "exited");
-  assert.equal(await host.state(herdrParent), "missing");
-  await assert.rejects(host.state(herdrParent), /protocol_mismatch/);
-  assert.equal(await host.state({ ...herdrParent, kind: "shell" }), "exited");
+  const server = await listeningSocket();
+  try {
+    const host = createHerdrHost(pi, server.endpoint);
+    const target = { ...herdrParent, endpoint: server.endpoint };
+    assert.equal(await host.state(target), "exited");
+    assert.equal(await host.state(target), "missing");
+    await assert.rejects(host.state(target), /protocol_mismatch/);
+    assert.equal(await host.state({ ...target, kind: "shell" }), "exited");
+  } finally { await server.stop(); }
+});
+
+test("a Herdr server that no longer listens took its panes with it; a live one's failures propagate", async () => {
+  const notRunning = () => reply({ error: { code: "server_not_running" } }, 1);
+  const server = await listeningSocket();
+  const target = { ...herdrParent, endpoint: server.endpoint, kind: "shell" as const };
+  try {
+    const { pi } = fake([notRunning(), notRunning()]);
+    const host = createHerdrHost(pi, server.endpoint);
+    await assert.rejects(host.state(target), /server_not_running/);
+    await assert.rejects(host.close(target), /server_not_running/);
+  } finally { await server.stop(); }
+  // The socket is gone now: refused or absent connections prove no server runs there.
+  const { pi, calls } = fake([notRunning(), notRunning()]);
+  const host = createHerdrHost(pi, server.endpoint);
+  assert.equal(await host.state(target), "missing");
+  await host.close(target);
+  assert.deepEqual(calls.at(-1)?.slice(3), ["pane", "close", "w1:p4"]);
 });
 
 test("Herdr failed startup closes only the newly created target", async () => {

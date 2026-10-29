@@ -179,6 +179,20 @@ test("vanished native surfaces report clearly and release their name to the next
   assert.equal(f.calls.some((args) => args.includes("kill-pane")), false, "a vanished panel needs no native close");
 });
 
+test("tools of one batch on the same name act in call order", async (t) => {
+  const f = fixture(t);
+  // Pi runs a batch's tools concurrently: a read right after a start sees the new panel.
+  const [started, read] = await Promise.all([f.run("panel-start", { command: "server" }), f.run("panel-read")]);
+  assert.match(started.content[0].text, /^Started:/);
+  assert.equal(read.details.target.id, "%9");
+  // A start right after a close of the same name reuses the name once the close finished.
+  const [closed, restarted] = await Promise.all([f.run("panel-close"), f.run("panel-start", { command: "server" })]);
+  assert.match(closed.content[0].text, /^Closed/);
+  assert.match(restarted.content[0].text, /^Started:/);
+  assert.equal(f.calls.filter((args) => args.includes("kill-pane")).length, 1);
+  assert.equal(readTarget(f.name)?.id, "%9");
+});
+
 test("cancellation during creation and pre-aborted calls do not orphan or touch existing work", async (t) => {
   const f = fixture(t);
   const abort = new AbortController();

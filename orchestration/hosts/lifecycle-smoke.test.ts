@@ -46,6 +46,7 @@ interface Trace {
   draft?: string;
   idle?: boolean;
   source?: string;
+  recoveryAllowed?: boolean;
 }
 function traces(directory: string): Trace[] {
   const file = path.join(directory, "lifecycle-trace.jsonl");
@@ -156,19 +157,54 @@ for (const kind of ["tmux", "herdr", "emacs"] as const) {
       // Takeover must happen at submission, while the slow automatic run is open.
       const supervised = request("[hold] supervised");
       const supervisedWorker = await run(supervised);
+      const humanGuidance = (text: string) => nativeHost.send(supervisedWorker, kind === "emacs"
+        ? { kind: "prompt", text } : { kind: "text", text, enter: true });
       await until(() => traces(directory).some((entry) => entry.prompt?.endsWith("[hold] supervised")), "slow worker start");
-      if (kind === "emacs") await host.send(supervisedWorker, { kind: "prompt", text: "human takeover" });
-      else await host.send(supervisedWorker, { kind: "text", text: "human takeover", enter: true });
+      await humanGuidance("human takeover");
       await until(() => readWorkerStatus(supervised.paths.statusPath)?.state === "supervised", "human takeover before completion");
       assert.equal(fs.existsSync(supervised.paths.resultPath), false);
       fs.writeFileSync(path.join(directory, "release"), "release");
       await until(() => traces(directory).some((entry) => entry.event === "request" && entry.prompt === "human takeover"), "human follow-up runs");
       await delay(300);
       assert.equal(fs.existsSync(supervised.paths.resultPath), false);
-      await host.send(supervisedWorker, { kind: "prompt", text: "/worker-submit supervised main" });
+      // Ordinary human guidance preserves supervision, not a provider-level
+      // recovery disable. Abort this request, then prove the next can wait too.
+      const quotaGuidance = "[quota-wait] supervised guidance";
+      await humanGuidance(quotaGuidance);
+      await until(() => readWorkerStatus(supervised.paths.statusPath)?.retryAt !== undefined, "supervised main request waits for quota");
+      assert.equal(readWorkerStatus(supervised.paths.statusPath)?.state, "supervised");
+      assert.equal(traces(directory).findLast((entry) => entry.prompt === quotaGuidance)?.recoveryAllowed, true);
+      await host.send(supervisedWorker, { kind: "prompt", text: "/lifecycle-abort" });
+      await until(() => readWorkerStatus(supervised.paths.statusPath)?.retryAt === undefined
+        && /abort/i.test(readWorkerStatus(supervised.paths.statusPath)?.supervisionReason ?? ""), "Escape-equivalent cancellation settles without disabling recovery");
+      await humanGuidance(quotaGuidance);
+      await until(() => readWorkerStatus(supervised.paths.statusPath)?.retryAt !== undefined, "next supervised main request still waits");
+      assert.equal(readWorkerStatus(supervised.paths.statusPath)?.state, "supervised");
+      assert.equal(fs.existsSync(supervised.paths.resultPath), false);
+      // An empty submission cannot discard the request that is waiting for quota.
+      await host.send(supervisedWorker, { kind: "prompt", text: "/worker-submit" });
+      await delay(100);
+      assert.ok(readWorkerStatus(supervised.paths.statusPath)?.retryAt);
+      assert.equal(fs.existsSync(supervised.paths.resultMarkdownPath), false);
+      await host.send(supervisedWorker, { kind: "prompt", text: "/lifecycle-abort" });
+      await until(() => readWorkerStatus(supervised.paths.statusPath)?.retryAt === undefined
+        && /abort/i.test(readWorkerStatus(supervised.paths.statusPath)?.supervisionReason ?? ""), "second quota request cancellation settles");
+
+      // Reverse ordering: submit while inference is busy, then enter quota waiting.
+      const delayedQuotaGuidance = "[quota-after-submit] supervised submission";
+      await humanGuidance(delayedQuotaGuidance);
+      await until(() => traces(directory).some((entry) => entry.prompt === delayedQuotaGuidance), "busy request before quota recovery");
+      assert.equal(readWorkerStatus(supervised.paths.statusPath)?.retryAt, undefined);
+      const beforeSubmission = readWorkerStatus(supervised.paths.statusPath)?.updatedAt;
+      const submission = host.send(supervisedWorker, { kind: "prompt", text: "/worker-submit supervised main" });
+      void submission.catch(() => undefined);
+      await until(() => readWorkerStatus(supervised.paths.statusPath)?.updatedAt !== beforeSubmission, "submission waits for busy request");
+      fs.writeFileSync(path.join(directory, "release-submit-quota"), "release");
+      await submission;
       const submitted = (await wait(supervised, supervisedWorker)).result;
       assert.equal(submitted.result, "supervised main");
       assert.equal(submitted.retrospective, "fixture retrospective");
+      assert.ok(traces(directory).filter((entry) => entry.retrospective).every((entry) => entry.recoveryAllowed === false), "optional retrospectives never wait for quota");
 
       // Guidance dispatched during streaming keeps automatic capture and waits for guidance.
       fs.rmSync(path.join(directory, "release"));

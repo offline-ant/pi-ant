@@ -8,7 +8,7 @@ import { getHost, hostForTarget } from "../host.ts";
 import type { Host, HostTarget } from "../host-types.ts";
 import { capturedArgv, capturedExitStatus, commandOutput, createPanelOutput, promptReporting, promptWarning, readCursor, recordInput, removePanelOutput, scanOutput, GDB_COMMAND, PROMPT_INTEGRATION, writeCursor } from "../panel-output.ts";
 import { renderToolCall } from "../tool-call.ts";
-import { claimName, listTargets, readTarget, removeTarget, saveTarget, validateName } from "../workers.ts";
+import { claimNameForOperation, listTargets, readTarget, removeTarget, saveTarget, settledTarget, validateName } from "../workers.ts";
 import { formatRemoteLocation, resolveRemoteLocation, sessionRemote } from "../remote-session.ts";
 import { remoteTerminalArgv } from "../ssh.ts";
 
@@ -56,8 +56,9 @@ export function panelArgv(command: string, ctx: Pick<ExtensionContext, "cwd" | "
   return [config.shell, ...(path.basename(config.shell) === "bash" ? ["-l"] : []), ...config.args, command];
 }
 
-function requirePanel(name: string): HostTarget {
-  const target = readTarget(validateName(name));
+/** A panel started earlier in the same tool batch may still be registering. */
+async function requirePanel(name: string, signal?: AbortSignal): Promise<HostTarget> {
+  const target = await settledTarget(validateName(name), signal);
   if (!target) throw new Error(`No panel named '${name}'. Use /panels to list panels.`);
   return target;
 }
@@ -140,9 +141,10 @@ export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMA
     async execute(_id, params, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
       const name = validateName(params.name);
-      const { cwd, argv, label } = await panelLaunch(params.command, params.folder, ctx, signal);
-      const release = claimName(name);
+      // Claim before any await, so later tools of the same batch see this start in progress.
+      const release = await claimNameForOperation(name, signal);
       try {
+        const { cwd, argv, label } = await panelLaunch(params.command, params.folder, ctx, signal);
         const existing = readTarget(name);
         if (existing) {
           // A panel whose native surface is gone holds no output; its name is free to reuse.
@@ -181,7 +183,7 @@ export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMA
     renderCall: (args) => renderToolCall("panel-read", args),
     async execute(_id, params, signal) {
       signal?.throwIfAborted();
-      const target = requirePanel(params.name);
+      const target = await requirePanel(params.name, signal);
       const lines = params.lines ?? DEFAULT_LINES;
       const host = hostForTarget(pi, target);
       const output = await readPanel(host, target, lines, signal);
@@ -209,7 +211,7 @@ export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMA
     async execute(_id, params, signal, _onUpdate, ctx) {
       signal?.throwIfAborted();
       if ((params.text === undefined) === (params.keys === undefined)) throw new Error("Supply exactly one of text or keys.");
-      const target = requirePanel(params.name);
+      const target = await requirePanel(params.name, signal);
       const host = hostForTarget(pi, target);
       await requireRunning(host, target, signal);
       const log = target.outputPath;
@@ -269,9 +271,10 @@ export default function panelsExtension(pi: ExtensionAPI, commandGraceMs = COMMA
     renderCall: (args) => renderToolCall("panel-close", args),
     async execute(_id, params, signal) {
       signal?.throwIfAborted();
-      const release = claimName(params.name);
+      const release = await claimNameForOperation(validateName(params.name), signal);
       try {
-        const target = requirePanel(params.name);
+        const target = readTarget(params.name);
+        if (!target) throw new Error(`No panel named '${params.name}'. Use /panels to list panels.`);
         // Once close starts, finish cleanup even if the tool is cancelled.
         await hostForTarget(pi, target).close(target);
         removePanelOutput(target.outputPath);

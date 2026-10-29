@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Host, HostTarget } from "../host-types.ts";
+import { serverGone } from "./server-socket.ts";
 
 const COMPANION = fileURLToPath(new URL("../emacs/pi-orchestration.el", import.meta.url));
 const STARTUP_TIMEOUT_MS = 120_000;
@@ -60,9 +61,19 @@ export function createEmacsHost(pi: ExtensionAPI, endpoint: string): Host {
     }
   }
 
+  /** The daemon owns every target's buffers and processes; none outlive it. */
+  async function goneWithServer(error: unknown): Promise<true> {
+    if (await serverGone(endpoint)) return true;
+    throw error;
+  }
+
   async function closeTarget(id: string): Promise<void> {
     const deadline = Date.now() + 5000;
-    while ((await call({ operation: "close", id, force: Date.now() >= deadline })).pending) {
+    for (;;) {
+      let reply: EmacsReply;
+      try { reply = await call({ operation: "close", id, force: Date.now() >= deadline }); }
+      catch (error) { await goneWithServer(error); return; }
+      if (!reply.pending) return;
       await delay(50);
     }
   }
@@ -110,7 +121,13 @@ export function createEmacsHost(pi: ExtensionAPI, endpoint: string): Host {
       return reply.output ?? "";
     },
     async state(target, signal) {
-      const reply = await call({ operation: "state", id: target.id }, signal);
+      let reply: EmacsReply;
+      try { reply = await call({ operation: "state", id: target.id }, signal); }
+      catch (error) {
+        signal?.throwIfAborted();
+        await goneWithServer(error);
+        return "missing";
+      }
       return reply.state ?? "missing";
     },
     async close(target, signal) {

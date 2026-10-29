@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as net from "node:net";
+import * as os from "node:os";
+import * as path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createEmacsHost } from "./emacs.ts";
@@ -95,4 +99,22 @@ test("Emacs canceled startup releases its target without abandoning owned work",
   });
   await assert.rejects(createEmacsHost(pi, "/test/socket").start({ kind: "pi", name: "worker", cwd: "/tmp", sessionFile: "/tmp/test.jsonl", args: [], placement: "worker" }, controller.signal), /abort/i);
   assert.equal(closed, true);
+});
+
+test("an Emacs daemon that no longer listens took its targets with it; a live one's failures propagate", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-emacs-socket-"));
+  const socket = path.join(dir, "server");
+  const unreachable = { async exec() { return { code: 1, stdout: "", stderr: "emacsclient: can't connect", killed: false }; } } as unknown as ExtensionAPI;
+  const target: HostTarget = { host: "emacs", endpoint: socket, id: "owned", kind: "shell", name: "logs" };
+  const server = net.createServer((client) => client.destroy());
+  await new Promise<void>((resolve) => server.listen(socket, resolve));
+  try {
+    await assert.rejects(createEmacsHost(unreachable, socket).state(target), /can't connect/);
+    await assert.rejects(createEmacsHost(unreachable, socket).close(target), /can't connect/);
+  } finally { await new Promise<void>((resolve) => server.close(() => resolve())); }
+  assert.equal(await createEmacsHost(unreachable, socket).state(target), "missing");
+  await createEmacsHost(unreachable, socket).close(target);
+  // A bare server name is no path to probe, so it never proves the daemon gone.
+  await assert.rejects(createEmacsHost(unreachable, "pi").state({ ...target, endpoint: "pi" }), /can't connect/);
+  fs.rmSync(dir, { recursive: true, force: true });
 });

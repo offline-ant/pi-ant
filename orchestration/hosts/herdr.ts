@@ -5,6 +5,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { ExtensionAPI, ExecResult } from "@earendil-works/pi-coding-agent";
 import type { Host, HostTarget } from "../host-types.ts";
 import { TERMINAL_INPUT_EXTENSION, terminalRequest } from "../terminal-input.ts";
+import { serverGone } from "./server-socket.ts";
 
 type JsonObject = Record<string, unknown>;
 function object(value: unknown): JsonObject {
@@ -25,6 +26,7 @@ function failure(response: ExecResult): Error {
   return new Error([response.stdout.trim(), response.stderr.trim()].filter(Boolean).join("\n") || "Herdr operation failed");
 }
 const quote = (text: string): string => `'${text.replaceAll("'", `'"'"'`)}'`;
+const PANE_GONE = ["pane_not_found", "terminal_not_found"];
 
 export function createHerdrHost(pi: ExtensionAPI, endpoint: string): Host {
   const parentPane = process.env.HERDR_PANE_ID;
@@ -141,7 +143,7 @@ export function createHerdrHost(pi: ExtensionAPI, endpoint: string): Host {
       const response = await run(["pane", "get", pane], signal);
       signal?.throwIfAborted();
       if (response.code !== 0) {
-        if (["pane_not_found", "terminal_not_found"].includes(errorCode(response) ?? "")) return "missing";
+        if (PANE_GONE.includes(errorCode(response) ?? "") || await serverGone(endpoint)) return "missing";
         throw failure(response);
       }
       if (target.kind === "pi") {
@@ -168,7 +170,7 @@ export function createHerdrHost(pi: ExtensionAPI, endpoint: string): Host {
     },
     async close(target, signal) {
       const response = await run(["pane", "close", target.paneId ?? target.id], signal);
-      if (response.code !== 0 && !["pane_not_found", "terminal_not_found"].includes(errorCode(response) ?? "")) throw failure(response);
+      if (response.code !== 0 && !PANE_GONE.includes(errorCode(response) ?? "") && !await serverGone(endpoint)) throw failure(response);
       if (target.controlPath) fs.rmSync(path.dirname(target.controlPath), { recursive: true, force: true });
     },
   };
