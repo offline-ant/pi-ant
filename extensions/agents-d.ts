@@ -7,7 +7,9 @@
  *   1. Sets the `agents_d` system prompt section to the top-level file
  *      contents and the full tree structure. Pi persists the section only
  *      when it changes.
- *   2. Prints a notification saying the context was injected.
+ *   2. Notifies that the context was injected when it differs from the
+ *      section the conversation already carries (Pi sends only changed
+ *      sections, so an unchanged run or a `do` worker injects nothing).
  *
  * File loading rules (following the lace context-files.ts pattern):
  *   - Only top-level entries (files and symlinks) in AGENTS.d/ are loaded.
@@ -32,7 +34,7 @@
  *     path parameter convention exactly.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { sessionRemote } from "../orchestration/remote-session.ts";
 import {
   readdirSync,
@@ -264,6 +266,16 @@ export function buildAgentsDContext(cwd: string): AgentsDContext | null {
   return { promptSection, loadedFiles, visibleDirs };
 }
 
+/** The `agents_d` section the conversation on this branch currently carries. */
+function currentSection(ctx: ExtensionContext): string | null | undefined {
+  for (const entry of ctx.sessionManager.getBranch().toReversed()) {
+    if (entry.type !== "message" || entry.message.role !== "system") continue;
+    const sections = entry.message.sections;
+    if (sections && AGENTS_D_SECTION in sections) return sections[AGENTS_D_SECTION];
+  }
+  return undefined;
+}
+
 export default function (pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     // Sessions whose tools run over SSH load the remote AGENTS.d (orchestration/remote-context.ts).
@@ -288,6 +300,7 @@ export default function (pi: ExtensionAPI) {
     if (dirsList) parts.push(`dirs: ${dirsList}`);
 
     event.systemPromptOptions.sections[AGENTS_D_SECTION] = promptSection;
+    if (promptSection === currentSection(ctx)) return;
     ctx.ui.notify(
       `AGENTS.d/ injected into system prompt: ${parts.join("; ")}`,
       "info",

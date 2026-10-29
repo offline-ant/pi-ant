@@ -124,7 +124,9 @@ test("before_agent_start rescans inherited files and cwd without replacing unrel
   } as ExtensionAPI);
   assert.ok(handler);
   const notifications: string[] = [];
-  const ctx = { cwd, ui: { notify: (message: string) => notifications.push(message) } } as unknown as ExtensionContext;
+  const ctx = {
+    cwd, ui: { notify: (message: string) => notifications.push(message) }, sessionManager: { getBranch: () => [] },
+  } as unknown as ExtensionContext;
   const run = async () => {
     const event = { systemPromptOptions: { sections: { other: "preserved" } } } as unknown as BeforeAgentStartEvent;
     await handler!(event, ctx);
