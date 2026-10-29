@@ -149,8 +149,8 @@ Keys: :id, :kind, :name, :placement, :buffer and :parent.
             (let ((buffer
                    (pilish-start-session
                     directory name
-                    :args (append (list "--session" (plist-get spec :sessionFile))
-                                  (append (plist-get spec :args) nil))
+                    :session-file (plist-get spec :sessionFile)
+                    :args (append (plist-get spec :args) nil)
                     :environment environment
                     :on-ready
                     (lambda (response)
@@ -388,8 +388,7 @@ Without a client frame the session stays open in the background."
   (let ((file (pi-orchestration--canonical-file file)))
     (cl-find-if (lambda (buffer)
                   (and (eq (buffer-local-value 'major-mode buffer) 'pilish-chat-mode)
-                       (when-let* ((open (plist-get (buffer-local-value 'pilish--state buffer)
-                                                    :session-file)))
+                       (when-let* ((open (pilish-session-file buffer)))
                          (and (not (file-remote-p open))
                               (equal (pi-orchestration--canonical-file open) file)))))
                 (buffer-list))))
@@ -397,9 +396,7 @@ Without a client frame the session stays open in the background."
 (defun pi-orchestration--free-session-name (directory)
   "Return nil when DIRECTORY's default session is free, else a free number."
   (let ((name nil) (n 1))
-    (while (or (pilish--find-session directory name)
-               (get-buffer (pilish--buffer-name :chat directory name))
-               (get-buffer (pilish--buffer-name :input directory name)))
+    (while (pilish-session-exists-p directory name)
       (setq name (number-to-string (cl-incf n))))
     name))
 
@@ -422,8 +419,7 @@ Readiness is reported later by `pi-orchestration--switch-state'."
       (error "Switch already exists: %s" id))
     (if existing
         (with-current-buffer existing
-          (when (or (not (eq pilish--status 'idle))
-                    pilish--followup-queue
+          (when (or (pilish-session-busy-p existing)
                     (pilish-session-pending-dialogs existing))
             (error "The Emacs view of this session is busy or has queued input; finish it first"))
           (setf (plist-get record :buffer) existing (plist-get record :refreshed) t)
@@ -432,7 +428,8 @@ Readiness is reported later by `pi-orchestration--switch-state'."
       ;; The session environment hook supplies this Emacs host's identity.
       (let ((buffer (pilish-start-session
                      directory (pi-orchestration--free-session-name directory)
-                     :args (cons "--session" (cons file (append (plist-get data :args) nil)))
+                     :session-file file
+                     :args (append (plist-get data :args) nil)
                      :environment (pi-orchestration--environment (plist-get data :env))
                      :on-ready
                      (lambda (response)

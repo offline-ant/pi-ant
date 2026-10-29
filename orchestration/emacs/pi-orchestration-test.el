@@ -69,7 +69,8 @@
                   ;; the launch contract, then use its fresh-session startup.
                   ((symbol-function 'pilish-start-session)
                    (lambda (directory name &rest options)
-                     (should (equal (plist-get options :args) (list "--session" session)))
+                     (should (equal (plist-get options :session-file) session))
+                     (should-not (plist-get options :args))
                      (funcall start-session directory name
                               :environment (plist-get options :environment)
                               :on-ready (plist-get options :on-ready)))))
@@ -249,8 +250,8 @@
                    (lambda (directory name &rest options)
                      (should (equal directory dir))
                      (should-not name)
-                     (should (equal (plist-get options :args)
-                                    (list "--session" (file-truename file) "--model" "one")))
+                     (should (equal (plist-get options :session-file) (file-truename file)))
+                     (should (equal (plist-get options :args) '("--model" "one")))
                      ;; Explicit environment never carries host identity;
                      ;; the session environment hook supplies it.
                      (should (equal (plist-get options :environment)
