@@ -32,7 +32,7 @@
  *   keeps its redirections, so `cmd | tail -5 > log` suggests `cmd > log`.
  *
  * Sleep lint:
- * - a local `sleep` of 2 seconds or more, or any `sleep` inside a shell loop
+ * - a local `sleep` of 6 seconds or more, or any `sleep` inside a shell loop
  *   (polling), in bash or panel-send: always blocked. Agents should react when
  *   something is ready with the `wait` tool instead of guessing a duration.
  * - Scripts of local `bash|sh|dash|zsh|fish -c '…'`, also behind wrappers such as
@@ -62,7 +62,7 @@ const SLEEP_NOTE =
   "something is ready: wait({panel, match?, timeoutSeconds}) for panel output, its shell prompt, or exit; " +
   "wait({file, match, timeoutSeconds}) for a log line; wait({pid, timeoutSeconds}) for a process. " +
   "Start long-running commands with panel-start, or run them in bash with output to a log file.";
-const SLEEP_LIMIT_SECONDS = 2;
+const SLEEP_LIMIT_SECONDS = 6;
 const SLEEP_UNITS: Record<string, number> = { "": 1, s: 1, m: 60, h: 3600, d: 86400 };
 
 const RESTORE_NOTE =

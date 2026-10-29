@@ -92,7 +92,8 @@ test("sleeping to wait is blocked in favor of the wait tool, short pauses and re
   for (const command of [
     "sleep 600; awk '/^(pass|FAIL)/' /tmp/mac-baseline.log; tail -2 /tmp/mac-baseline.log",
     "sleep 5m",
-    "cd x && /bin/sleep 2 && cat log",
+    "cd x && /bin/sleep 6 && cat log",
+    "sleep 3 3",
     "sleep $DELAY",
     "while ! curl -s localhost:8080; do sleep 1; done",
     "until test -f done; do sleep 0.5; done",
@@ -111,6 +112,8 @@ test("sleeping to wait is blocked in favor of the wait tool, short pauses and re
   for (const command of [
     "sleep 1; echo ok",
     "sleep 0.2",
+    "sleep 5",
+    "sleep 5.9s",
     "ssh host 'sleep 30; uptime'",
     "for f in *.ts; do echo $f; done; sleep 1",
     "echo sleep 600",
