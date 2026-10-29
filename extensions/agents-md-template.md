@@ -40,6 +40,7 @@ own its design, commands and layout instead of restating them.>
 - Keep source files under 1000 lines; split before 1500.
 - Run the smallest meaningful checks, including changed tests. Prefer
   boundary-crossing tests in test files; skip tests for obvious behavior.
+- Tests assert what exists, never only that something was removed.
 - Each test finishes within 20 seconds; test commands time out within 60.
   Explicitly marked long tests stay out of the default run. Inject tiny limits
   or a paused clock instead of waiting out deadlines.
