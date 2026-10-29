@@ -43,8 +43,7 @@
       "./extensions/agents-d.ts",
       "./extensions/self-compact.ts",
       "./extensions/tools.ts",
-      "./extensions/parent-machine.ts",
-      "./extensions/rec-setting.ts"
+      "./extensions/parent-machine.ts"
     ]
   }
 }
