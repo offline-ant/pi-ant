@@ -322,6 +322,133 @@ finishes cleanup when graceful shutdown exceeds the caller's deadline."
         (pi-orchestration--run-target-functions id 'close))
       (list :success t))))
 
+
+;;;; Ordinary sessions opened by `/switch emacs'
+
+(defvar pi-orchestration-show-session-function #'pi-orchestration-show-session
+  "Function called with the chat buffer of a session opened by `/switch emacs'.
+It shows the session; pi-deck replaces it to use the space for the
+session's directory.")
+
+(defvar pi-orchestration--switches (make-hash-table :test 'equal)
+  "`/switch emacs' openings by request ID: plists with :buffer, :ready, :failure.")
+
+(defun pi-orchestration--client-frame ()
+  "Return the most recently used client frame, or nil when none exists."
+  (let (best best-time)
+    (dolist (frame (frame-list))
+      (unless (or (equal (terminal-name (frame-terminal frame)) "initial_terminal")
+                  (frame-parent frame))
+        (let ((time (window-use-time (get-mru-window frame t))))
+          (when (or (null best) (> time best-time))
+            (setq best frame best-time time)))))
+    best))
+
+(defun pi-orchestration-show-session (chat)
+  "Show CHAT with its input in the most recently used client frame.
+Without a client frame the session stays open in the background."
+  (when-let* ((frame (pi-orchestration--client-frame)))
+    (select-frame-set-input-focus frame)
+    (pop-to-buffer chat)
+    (let ((input (pilish-session-input-buffer chat)))
+      (unless (get-buffer-window input frame)
+        (pilish-split-input-window (get-buffer-window chat frame) input))
+      (when-let* ((window (get-buffer-window input frame)))
+        (select-window window)))))
+
+(defun pi-orchestration--canonical-file (file)
+  "Return FILE's true name, or its absolute name when it does not exist."
+  (if (file-exists-p file) (file-truename file) (expand-file-name file)))
+
+(defun pi-orchestration--session-view (file)
+  "Return a live Pilish chat buffer that has session FILE open, or nil."
+  (let ((file (pi-orchestration--canonical-file file)))
+    (cl-find-if (lambda (buffer)
+                  (and (eq (buffer-local-value 'major-mode buffer) 'pilish-chat-mode)
+                       (when-let* ((open (plist-get (buffer-local-value 'pilish--state buffer)
+                                                    :session-file)))
+                         (and (not (file-remote-p open))
+                              (equal (pi-orchestration--canonical-file open) file)))))
+                (buffer-list))))
+
+(defun pi-orchestration--free-session-name (directory)
+  "Return nil when DIRECTORY's default session is free, else a free number."
+  (let ((name nil) (n 1))
+    (while (or (pilish--find-session directory name)
+               (get-buffer (pilish--buffer-name :chat directory name))
+               (get-buffer (pilish--buffer-name :input directory name)))
+      (setq name (number-to-string (cl-incf n))))
+    name))
+
+(defun pi-orchestration--switch (data)
+  "Open the session file in DATA as an ordinary root session and show it.
+An idle Pilish view that already has the file open reloads it instead.
+Readiness is reported later by `pi-orchestration--switch-state'."
+  (let* ((id (plist-get data :id))
+         (file (pi-orchestration--canonical-file (plist-get data :sessionFile)))
+         (directory (file-name-as-directory (plist-get data :cwd)))
+         (record (list :buffer nil :ready nil :failure nil :refreshed nil))
+         (settle (lambda (failure)
+                   (if failure
+                       (setf (plist-get record :failure) failure)
+                     (setf (plist-get record :ready) t))))
+         (existing (pi-orchestration--session-view file)))
+    (when (file-remote-p directory)
+      (error "/switch emacs requires a local directory"))
+    (when (gethash id pi-orchestration--switches)
+      (error "Switch already exists: %s" id))
+    (if existing
+        (with-current-buffer existing
+          (when (or (not (eq pilish--status 'idle))
+                    pilish--followup-queue
+                    (pilish-session-pending-dialogs existing))
+            (error "The Emacs view of this session is busy or has queued input; finish it first"))
+          (setf (plist-get record :buffer) existing (plist-get record :refreshed) t)
+          (puthash id record pi-orchestration--switches)
+          (pilish-reload settle))
+      ;; The session environment hook supplies this Emacs host's identity.
+      (let ((buffer (pilish-start-session
+                     directory (pi-orchestration--free-session-name directory)
+                     :args (cons "--session" (cons file (append (plist-get data :args) nil)))
+                     :environment (pi-orchestration--environment (plist-get data :env))
+                     :on-ready
+                     (lambda (response)
+                       (let ((opened (plist-get (plist-get response :data) :sessionFile)))
+                         (funcall settle
+                                  (cond
+                                   ((not (eq (plist-get response :success) t))
+                                    (or (plist-get response :error) "Pi startup failed"))
+                                   ((not (and (stringp opened)
+                                              (equal (pi-orchestration--canonical-file opened) file)))
+                                    "Pi opened a different session file"))))))))
+        (setf (plist-get record :buffer) buffer)
+        (puthash id record pi-orchestration--switches)))
+    (with-demoted-errors "pi-orchestration show session: %S"
+      (funcall pi-orchestration-show-session-function (plist-get record :buffer)))
+    (list :buffer (buffer-name (plist-get record :buffer))
+          :refreshed (if (plist-get record :refreshed) t :json-false))))
+
+(defun pi-orchestration--switch-state (data)
+  "Report the `/switch emacs' opening in DATA; settled records are forgotten.
+With :close, stop a newly started session after a failed opening."
+  (let* ((id (plist-get data :id))
+         (record (or (gethash id pi-orchestration--switches)
+                     (error "Missing switch: %s" id)))
+         (buffer (plist-get record :buffer))
+         (process (pilish-session-process buffer))
+         (state (cond ((not (buffer-live-p buffer)) "missing")
+                      ((and process (process-live-p process)) "running")
+                      (t "exited"))))
+    (when (or (plist-get record :ready) (plist-get record :failure)
+              (eq (plist-get data :close) t))
+      (remhash id pi-orchestration--switches))
+    (when (and (eq (plist-get data :close) t) (not (plist-get record :refreshed)))
+      (pilish-close-session buffer))
+    (list :state state
+          :ready (if (plist-get record :ready) t :json-false)
+          ;; Not :error, which reports a failed operation.
+          :failure (plist-get record :failure))))
+
 (defun pi-orchestration-dispatch (encoded)
   "Execute one fixed operation from base64 JSON ENCODED and encode its result."
   (let ((result
@@ -337,6 +464,8 @@ finishes cleanup when graceful shutdown exceeds the caller's deadline."
                  ("read" (pi-orchestration--read data))
                  ("state" (pi-orchestration--state id))
                  ("close" (pi-orchestration--close id (eq (plist-get data :force) t)))
+                 ("switch" (pi-orchestration--switch data))
+                 ("switch-state" (pi-orchestration--switch-state data))
                  (_ (error "Unknown orchestration operation"))))
            (error (list :error (error-message-string err))))))
     (base64-encode-string (encode-coding-string (json-encode result) 'utf-8) t)))

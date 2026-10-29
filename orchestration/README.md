@@ -347,13 +347,13 @@ with a complete brief, or `fresh_look` when project guidance is also unwanted.
 
 ## Interactive commands
 
-`/switch [herdr|tau]` opens an ordinary idle conversation in another frontend;
+`/switch [herdr|tau|emacs]` opens an ordinary idle conversation in another frontend;
 no argument opens a picker. It opens the **same session file**, not a fork and
 not a live-process migration. The session must already be saved, have no queued
 input, and not belong to a registered worker/fork, active worker request
-(including supervision), or active Ugo workflow. Emacs/tmux destinations are not
-implemented yet. An ordinary session in Emacs may move to a reachable Herdr or
-Tau; its root identity alone does not make it a managed worker.
+(including supervision), or active Ugo workflow. tmux is not a destination. An
+ordinary Pilish session in Emacs may move to Herdr or Tau; its root identity
+alone does not make it a managed worker.
 
 The destination is checked first. Pi then saves the actual tools on the current
 branch and reloads the same file with `switchSession(file, {withSession})`,
@@ -413,6 +413,24 @@ other view idle. Typing in a stale view appends to its stale branch.
   input socket's ping. No existing pane is reused or destroyed. A Herdr socket is
   carried into Tau for the return trip, but old pane/tab/workspace identities,
   nesting, and private control/target identity are not.
+- **Emacs:** an explicitly selected Emacs host endpoint must already run.
+  Otherwise `pi-emacs -e '(expand-file-name server-name server-socket-dir)'`
+  from PATH (the Emacs configuration's launcher; `PI_EMACS_SERVER` selects
+  another daemon) resolves the daemon's socket with the configuration's own rule
+  and starts the daemon when absent; that daemon is detached and inherits no
+  frontend, worker or nesting identity. Failures are reported; there is no
+  fallback. The companion operation `switch` (`emacs/pi-orchestration.el`)
+  then opens the file as an ordinary root Pilish session (the directory's
+  default session, or the next free number), with the Emacs host identity from
+  `pilish-session-environment-functions`, and calls
+  `pi-orchestration-show-session-function`: by default the chat and input in the
+  most recently used client frame; with `pi-deck-mode`, `pi-deck-show-session`
+  (a tab in the space containing the cwd, created when missing; without a
+  client frame the next frame shows it). An idle Pilish view that already has
+  the file open is reloaded in place (`pilish-reload` with a callback); a busy
+  view, queued follow-ups or pending dialogs are rejected. Readiness is the
+  new process's `get_state` reporting the same file, or the reload's settled
+  history. A failed new session is closed; a reloaded view is never closed.
 
 Conversation/tree, current branch, model/thinking, tool selection, cwd and agent
 directory are retained. Unsent drafts/attachments, queued prompts, running tools,
@@ -424,8 +442,8 @@ Tau itself has no shell panels.
 Run `/reload` in Pi to load the command. Tau's updated server and browser assets
 must be compiled; an existing server still needs a user-approved restart when
 safe. `/switch tau` starts an absent server but never restarts an existing one.
-Herdr must already be running. Verification uses disposable sessions, not existing
-user conversations.
+Herdr must already be running. `/switch emacs` starts an absent `pi-emacs`
+daemon. Verification uses disposable sessions, not existing user conversations.
 
 ### Take an idle conversation into the current frontend
 
@@ -639,8 +657,9 @@ From `pi-ant/`:
 
 ```sh
 npm run check
-node scripts/test.mjs orchestration/extensions/switch.test.ts orchestration/switch-destinations.test.ts orchestration/tau-server.test.ts orchestration/switch-session.test.ts orchestration/switch-rpc.test.ts orchestration/session-take.test.ts
+node scripts/test.mjs orchestration/extensions/switch.test.ts orchestration/switch-destinations.test.ts orchestration/tau-server.test.ts orchestration/switch-session.test.ts orchestration/switch-rpc.test.ts orchestration/session-take.test.ts orchestration/switch-emacs.test.ts
 PI_SWITCH_NATIVE=1 node scripts/test.mjs orchestration/switch-native.test.ts
+PI_SWITCH_EMACS_NATIVE=1 node scripts/test.mjs orchestration/switch-emacs-native.test.ts  # disposable -Q daemon with pi-deck, local Tau fork on PATH; adds a Herdr leg inside Herdr
 PI_TAKE_NATIVE=1 node scripts/test.mjs orchestration/take-native.test.ts
 node scripts/test.mjs extensions/self-compact.test.ts orchestration/worker-frame.test.ts orchestration/workers.test.ts
 node scripts/test.mjs orchestration/codemode-delegate.test.ts orchestration/delegate-alt.test.ts orchestration/extensions/delegate.test.ts orchestration/context.test.ts orchestration/worker-call.test.ts orchestration/worker-result.test.ts orchestration/worker-resume.test.ts

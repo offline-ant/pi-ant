@@ -17,26 +17,34 @@ interface EmacsReply {
   success?: boolean;
 }
 
+/** Runs a command like `pi.exec`, resolving with its exit code instead of throwing. */
+export type EmacsExec = (command: string, args: string[], options: { signal?: AbortSignal; timeout: number; env?: NodeJS.ProcessEnv })
+  => Promise<{ code: number; stdout: string; stderr: string }>;
+
+/** One base64-JSON companion operation through emacsclient; never Lisp built from data. */
+export async function emacsOperation(
+  exec: EmacsExec, endpoint: string, data: Record<string, unknown>, signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  signal?.throwIfAborted();
+  const encoded = Buffer.from(JSON.stringify(data), "utf8").toString("base64");
+  const expression = `(progn (require 'pi-orchestration ${JSON.stringify(COMPANION)}) (pi-orchestration-dispatch "${encoded}"))`;
+  const result = await exec("emacsclient", ["--socket-name", endpoint, "--eval", expression], { signal, timeout: 10_000 });
+  if (result.code !== 0) {
+    throw new Error(`Emacs ${endpoint}: ${result.stderr.trim() || result.stdout.trim()}`);
+  }
+  // The only Lisp return value is an ASCII base64 string, so its printed form
+  // is also a JSON string. Task text is never interpreted as Lisp source.
+  const encodedReply: unknown = JSON.parse(result.stdout.trim());
+  if (typeof encodedReply !== "string") throw new Error("Invalid Emacs operation response");
+  const reply = JSON.parse(Buffer.from(encodedReply, "base64").toString("utf8")) as Record<string, unknown>;
+  if (typeof reply.error === "string" && reply.error) throw new Error(`Emacs ${endpoint}: ${reply.error}`);
+  return reply;
+}
+
 /** Emacs owns native buffers/processes; all waits stay outside its command loop. */
 export function createEmacsHost(pi: ExtensionAPI, endpoint: string): Host {
   async function call(data: Record<string, unknown>, signal?: AbortSignal): Promise<EmacsReply> {
-    signal?.throwIfAborted();
-    const encoded = Buffer.from(JSON.stringify(data), "utf8").toString("base64");
-    const expression = `(progn (require 'pi-orchestration ${JSON.stringify(COMPANION)}) (pi-orchestration-dispatch "${encoded}"))`;
-    const result = await pi.exec("emacsclient", ["--socket-name", endpoint, "--eval", expression], {
-      signal,
-      timeout: 10_000,
-    });
-    if (result.code !== 0) {
-      throw new Error(`Emacs ${endpoint}: ${result.stderr.trim() || result.stdout.trim()}`);
-    }
-    // The only Lisp return value is an ASCII base64 string, so its printed form
-    // is also a JSON string. Task text is never interpreted as Lisp source.
-    const encodedReply: unknown = JSON.parse(result.stdout.trim());
-    if (typeof encodedReply !== "string") throw new Error("Invalid Emacs operation response");
-    const reply = JSON.parse(Buffer.from(encodedReply, "base64").toString("utf8")) as EmacsReply;
-    if (reply.error) throw new Error(`Emacs ${endpoint}: ${reply.error}`);
-    return reply;
+    return await emacsOperation((command, args, { signal, timeout }) => pi.exec(command, args, { signal, timeout }), endpoint, data, signal) as EmacsReply;
   }
 
   async function waitForAcceptance(target: HostTarget, request: string, signal?: AbortSignal): Promise<void> {

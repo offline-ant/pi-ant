@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { TOOL_SELECTION_ENTRY } from "../extensions/tool-selection.ts";
 import { registerSwitch } from "./extensions/switch.ts";
-import type { SwitchSource } from "./switch-destinations.ts";
+import type { SwitchDestination, SwitchSource } from "./switch-destinations.ts";
 import type { HostTarget } from "./host-types.ts";
 
 initTheme("dark");
@@ -76,7 +76,7 @@ async function fixture(t: TestContext, options: FixtureOptions = {}) {
         HERDR_PANE_ID: "source:p1", HERDR_WORKSPACE_ID: "source", PI_NESTED: "0",
       }),
       targets: () => options.targets ?? [],
-      prepare: async (_kind: "herdr" | "tau", source: SwitchSource) => {
+      prepare: async (_kind: SwitchDestination, source: SwitchSource) => {
         prepared.push(source);
         trace.push({ event: "prepare", file: runtime.session.sessionFile });
         return { start: async () => {

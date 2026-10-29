@@ -6,10 +6,11 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { availableHosts } from "./host.ts";
+import { emacsDaemon, prepareEmacsSwitch } from "./switch-emacs.ts";
 import { ensureTauServer, localTauConnection, type TauServer } from "./tau-server.ts";
 import { TERMINAL_INPUT_EXTENSION, terminalRequest } from "./terminal-input.ts";
 
-export type SwitchDestination = "herdr" | "tau";
+export type SwitchDestination = "herdr" | "tau" | "emacs";
 export interface SwitchSource {
   sessionFile: string;
   cwd: string;
@@ -43,6 +44,7 @@ export async function prepareSwitch(kind: SwitchDestination, source: SwitchSourc
     const endpoint = availableHosts(process.env).find((host) => host.kind === "herdr")?.endpoint || source.env.HERDR_SOCKET_PATH;
     return prepareHerdrSwitch(source, endpoint || undefined);
   }
+  if (kind === "emacs") return prepareEmacsSwitch(source, await emacsDaemon(process.env));
   const server = await ensureTauServer({ ...process.env, ...source.env });
   return prepareTauSwitch(source, server.endpoint, openTauBrowser, server);
 }

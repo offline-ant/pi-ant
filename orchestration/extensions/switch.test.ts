@@ -67,7 +67,7 @@ for (const mode of ["busy", "queued", "unpersisted", "invalid", "ugo"] as const)
     if (mode === "queued") f.queued();
     if (mode === "ugo") f.session.appendCustomEntry("pi-ant:ugo-state", { active: true });
     if (mode === "unpersisted") fs.unlinkSync(f.session.getSessionFile()!);
-    await f.command(mode === "invalid" ? "emacs" : "tau");
+    await f.command(mode === "invalid" ? "tmux" : "tau");
     assert.deepEqual(f.counts(), { prepares: 0, replacements: 0 });
     assert.ok(f.messages.length > 0);
   });
@@ -77,6 +77,19 @@ test("ordinary Emacs root identity is not mistaken for a managed worker; no-argu
   const f = fixture(t);
   await f.command("");
   assert.deepEqual(f.counts(), { prepares: 1, replacements: 1 });
+});
+
+test("the picker offers Emacs, and a Pilish source is already in Emacs", async (t) => {
+  const f = fixture(t);
+  let offered: string[] = [];
+  f.ctx.ui.select = (async (_title: string, options: string[]) => { offered = options; return "emacs"; }) as typeof f.ctx.ui.select;
+  await f.command("");
+  assert.deepEqual(offered, ["herdr", "tau", "emacs"]);
+  assert.deepEqual(f.counts(), { prepares: 0, replacements: 0 });
+  assert.match(f.messages.at(-1)!, /already in emacs/);
+  const tui = fixture(t, { host: "herdr", mode: "tui" });
+  await tui.command("emacs");
+  assert.deepEqual(tui.counts(), { prepares: 1, replacements: 1 });
 });
 
 test("a TUI configured to orchestrate on web still transfers, while a Tau RPC source is already there", async (t) => {

@@ -10,6 +10,7 @@ export default function switchNativeFixture(pi: ExtensionAPI): void {
       event, pid: process.pid, file: ctx.sessionManager.getSessionFile(), sessionId: ctx.sessionManager.getSessionId(),
       mode: ctx.mode, host: process.env.PI_ORCHESTRATION_HOST, pane: process.env.HERDR_PANE_ID,
       workspace: process.env.HERDR_WORKSPACE_ID, control: process.env.PI_ORCHESTRATION_CONTROL,
+      target: process.env.PI_ORCHESTRATION_TARGET, endpoint: process.env.PI_ORCHESTRATION_ENDPOINT,
       cwd: ctx.cwd, model: ctx.model?.id, provider: ctx.model?.provider, thinking: pi.getThinkingLevel(),
       tools: pi.getActiveTools(), branch: ctx.sessionManager.getBranch().map((entry) => entry.id),
     })}\n`);

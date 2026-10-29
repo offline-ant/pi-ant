@@ -18,16 +18,18 @@ export function registerSwitch(pi: ExtensionAPI, dependencies: SwitchDependencie
   prepare: prepareSwitch, targets: listTargets, environment: () => process.env,
 }): void {
   pi.registerCommand("switch", {
-    description: "Open this idle session in Herdr or Tau, keeping this view open. Usage: /switch [herdr|tau]",
+    description: "Open this idle session in Herdr, Tau or Emacs, keeping this view open. Usage: /switch [herdr|tau|emacs]",
     handler: async (args, ctx) => {
       if (transferOperation().active) { ctx.ui.notify("A session transfer is already in progress.", "warning"); return; }
       transferOperation().active = true;
       let replacing = false;
       try {
         let destination = args.trim();
-        if (!destination) destination = await ctx.ui.select("Open this session in", ["herdr", "tau"]) ?? "";
+        if (!destination) destination = await ctx.ui.select("Open this session in", ["herdr", "tau", "emacs"]) ?? "";
         if (!destination) return;
-        if (destination !== "herdr" && destination !== "tau") throw new Error("Usage: /switch [herdr|tau]. Emacs and tmux transfers are not implemented.");
+        if (destination !== "herdr" && destination !== "tau" && destination !== "emacs") {
+          throw new Error("Usage: /switch [herdr|tau|emacs]. tmux transfers are not implemented.");
+        }
         assertTransferIdle(pi, ctx, dependencies.targets());
         const environment = dependencies.environment();
         // In a TUI, an explicit web orchestration host selects future workers,
