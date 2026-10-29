@@ -75,12 +75,15 @@ Workers name their parent by target ID; root sessions by chat buffer name."
         (get-buffer parent)))))
 
 (defun pi-orchestration-targets ()
-  "Return native targets as plists with :id, :kind, :name, :buffer and :parent.
-:parent is the parent's live native buffer, or nil when unknown or gone."
+  "Return native targets as plists.
+Keys: :id, :kind, :name, :placement, :buffer and :parent.
+:placement is the start spec's placement (\"worker\" or \"interactive-fork\"),
+:parent the parent's live native buffer, or nil when unknown or gone."
   (let (targets)
     (maphash (lambda (id target)
                (push (list :id id :kind (plist-get target :kind)
                            :name (plist-get target :name)
+                           :placement (plist-get target :placement)
                            :buffer (plist-get target :buffer)
                            :parent (pi-orchestration-parent-buffer
                                     (plist-get target :parent)))
@@ -132,6 +135,7 @@ Workers name their parent by target ID; root sessions by chat buffer name."
                         (cons "PI_ORCHESTRATION_TARGET" id))
                   (pi-orchestration--environment (plist-get spec :env))))
          (target (list :kind kind :name name
+                       :placement (plist-get spec :placement)
                        :parent (plist-get (plist-get spec :parent) :id)
                        :responses (make-hash-table :test 'equal)
                        :ready nil :error nil :buffer nil :process nil :pid nil)))
@@ -321,6 +325,25 @@ finishes cleanup when graceful shutdown exceeds the caller's deadline."
         (remhash id pi-orchestration--targets)
         (pi-orchestration--run-target-functions id 'close))
       (list :success t))))
+
+
+;;;###autoload
+(defun pi-orchestration-stop-target (id)
+  "Stop target ID on the user's behalf and close its buffers.
+A shell target is killed at once.  A Pi target gets SIGTERM, so it can stop
+its own tool processes, and is killed if it still runs after five seconds.
+Pi notices the missing target at its next read."
+  (when (eq (plist-get (pi-orchestration--close id) :pending) t)
+    (let ((deadline (+ (float-time) 5))
+          (timer nil))
+      (setq timer
+            (run-with-timer
+             0.2 0.2
+             (lambda ()
+               (unless (eq (plist-get (pi-orchestration--close id (> (float-time) deadline))
+                                      :pending)
+                           t)
+                 (cancel-timer timer))))))))
 
 
 ;;;; Ordinary sessions opened by `/switch emacs'

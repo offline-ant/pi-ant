@@ -105,7 +105,7 @@
         (progn
           (pi-orchestration--start
            (list :id "panel-a" :endpoint "test"
-                 :spec (list :kind "shell" :name "a" :cwd "/tmp/"
+                 :spec (list :kind "shell" :name "a" :cwd "/tmp/" :placement "worker"
                              :parent (list :id (buffer-name root))
                              :argv ["/bin/sh" "-c" "read line"])))
           (pi-orchestration--start
@@ -118,8 +118,10 @@
                         root))
             (should (eq (plist-get (cl-find "panel-b" targets :key (lambda (target) (plist-get target :id)) :test #'equal) :parent)
                         (plist-get (pi-orchestration--target "panel-a") :buffer)))
-            (should (equal (plist-get (car targets) :kind) "shell")))
-          (pi-orchestration--close "panel-b")
+            (should (equal (plist-get (car targets) :kind) "shell"))
+            (should (equal (plist-get (cl-find "panel-a" targets :key (lambda (target) (plist-get target :id)) :test #'equal) :placement)
+                           "worker")))
+          (pi-orchestration-stop-target "panel-b")
           (should (equal (car events) '("panel-b" close)))
           (should (= (length (pi-orchestration-targets)) 1)))
       (pi-orchestration--close "panel-a")
