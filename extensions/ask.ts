@@ -804,10 +804,11 @@ export default function askExtension(pi: ExtensionAPI) {
 				const id = question.id ?? `question_${index + 1}`;
 				const normalizedQuestion: AskQuestion = { ...question, id };
 				const heading = `(${index + 1}/${params.questions.length}) ${question.question}`;
-				// Standard dialogs show one question at a time; list the answers given so far.
+				// Standard dialogs show one question at a time; list the answers given so far above
+				// the question, which stays the last title line, directly above its options.
 				const title = ctx.mode === "tui" || index === 0
 					? heading
-					: [heading, ...results.slice(0, index).map((result) => `✓ ${previewText(result.question)} → ${answerPreview(result)}`)].join("\n");
+					: [...results.slice(0, index).map((result) => `✓ ${previewText(result.question)} → ${answerPreview(result)}`), heading].join("\n");
 				const action = normalizedQuestion.multi
 					? await askMultiChoice(normalizedQuestion, title, ctx, results[index], index > 0, launchFork)
 					: await askSingleChoice(normalizedQuestion, title, ctx, results[index], index > 0, launchFork);

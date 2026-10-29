@@ -162,6 +162,6 @@ test("RPC ask lists earlier answers, returns from an edit picker, and keeps dupl
     assert.deepEqual(result.details.results.map((entry) => entry.selectedOptions), [["Same"], ["Y"]]);
     // Cancelling the edit picker returns to the same question.
     assert.deepEqual(titles.slice(0, 3), ["(1/2) First?", "Edit which option?", "(1/2) First?"]);
-    assert.equal(titles[3], "(2/2) Second?\n✓ First? → Same");
+    assert.equal(titles[3], "✓ First? → Same\n(2/2) Second?");
   } finally { await fixture.cleanup(); }
 });
