@@ -9,8 +9,7 @@ Pi's settings. No extension-local npm installation is needed.
 
 - **tmux:** direct machine-oriented CLI; Pi TUI in owned panes.
 - **Herdr:** tested with 0.8.2; named Pi agents in owned panes.
-- **Emacs:** local Pilish with the named-session API in this workspace's
-  `/home/user/Projects/pi/pilish` checkout. The required generic APIs are
+- **Emacs:** local Pilish with the named-session API. The required generic APIs are
   on [offline-ant/pilish's pi-orchestration branch](https://github.com/offline-ant/pilish/tree/pi-orchestration)
   (the local branch is rebased onto upstream v3.4.0+; the published one still
   carries the older v3.1.0 history); stock Pilish does not include them.

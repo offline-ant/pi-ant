@@ -2,13 +2,16 @@
   "name": "pi-ant",
   "version": "1.0.0",
   "type": "module",
-  "description": "Ant's local pi extension package",
+  "description": "Pi extensions: safety lints, session tools, workflows and skills",
   "keywords": [
     "pi-package",
-    "pi-extension",
-    "personal"
+    "pi-extension"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/offline-ant/pi-ant.git"
+  },
   "scripts": {
     "check": "node scripts/check.mjs"
   },
@@ -42,8 +45,7 @@
       "./extensions/vim.ts",
       "./extensions/agents-d.ts",
       "./extensions/self-compact.ts",
-      "./extensions/tools.ts",
-      "./extensions/parent-machine.ts"
+      "./extensions/tools.ts"
     ]
   }
 }

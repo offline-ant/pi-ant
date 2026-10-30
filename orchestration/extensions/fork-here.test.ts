@@ -68,7 +68,7 @@ test("idle and prompted forks use explicit parent, actual branch and exact tools
 
 test("automatic fork names follow the session name, else the folder", () => {
   assert.equal(forkNameBase("Fix Mode Line!", "/x/pi"), "fix-mode-line");
-  assert.equal(forkNameBase(undefined, "/home/user/Projects/pi"), "pi");
+  assert.equal(forkNameBase(undefined, "/home/user/projects/pi"), "pi");
   assert.equal(forkNameBase("  ", "/tmp/2026 Notes"), "notes");
   assert.equal(forkNameBase(undefined, "/"), "session");
   assert.ok(`${forkNameBase("a".repeat(60), "/")}-fork-99`.length <= 32);

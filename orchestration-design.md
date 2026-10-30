@@ -283,25 +283,3 @@ There are three native adapters, not three packages or old-name aliases.
 
 Use fake Pi/provider fixtures for lifecycle tests, then a small real interactive
 smoke test on each host. Do not use paid model calls for retry/failure tests.
-
-## Verification and local facts
-
-- Pi CLI/reference: 0.85.1. The reference checkout was not edited.
-- Pilish 3.0.1 checkout: `/home/user/.local/share/pilish`, now contains the
-  required named-session, input/queue, native shortcut, and editor APIs.
-- Emacs 30.2 and EAT 0.9.4 were exercised using disposable servers. The previously
-  supplied `/home/user/.emacs.d/server/pilish` socket was absent during final
-  implementation checks; no existing session was restarted or reconfigured.
-- Focused fake-backed tests cover registry claims, cancellation, context/tool
-  inheritance, mismatch rejection, retry/compaction settlement, supervision,
-  immutable main results, and TUI/RPC ask discussion forks.
-- Real Pi with its in-process faux provider passed worker lifecycle and public
-  idle/prompted `/fork-here` tests on tmux, Herdr 0.8.2, and Emacs. These include
-  actual retry and overflow-compaction recovery, per-request model/tool changes,
-  draft preservation, and explicit native placement. Shell smoke tests exercise
-  literal input, control keys, process exit, and output capture.
-- `npm run check` checks all active TypeScript using installed Pi declarations.
-  Focused commands and native test requirements are in `orchestration/README.md`.
-
-Implementation references: `orchestration/`, Pilish's session/input/render/dialog
-modules and fake RPC fixture, plus Pi 0.85.1 `docs/rpc.md` and `AgentSession`.

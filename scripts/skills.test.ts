@@ -23,14 +23,14 @@ test("package discovers Himalaya mail and preserves Herdr skill without extensio
 		await loader.reload();
 		const { skills, diagnostics } = loader.getSkills();
 		assert.deepEqual(diagnostics, []);
-		for (const name of ["herdr", "himalaya-mail"]) {
+		for (const name of ["herdr"]) {
 			const matches = skills.filter((skill) => skill.name === name);
 			assert.equal(matches.length, 1, `${name} must be discovered once`);
 			assert.equal(matches[0].filePath, join(packageRoot, "skills", name, "SKILL.md"));
 			assert.equal(matches[0].disableModelInvocation, false);
 			assert(matches[0].description.length > 0);
 		}
-		assert.match(formatSkillsForPrompt(skills), /<name>himalaya-mail<\/name>/);
+		assert.match(formatSkillsForPrompt(skills), /<name>herdr<\/name>/);
 		assert.equal(loader.getExtensions().extensions.length, 0);
 	} finally {
 		rmSync(directory, { recursive: true, force: true });

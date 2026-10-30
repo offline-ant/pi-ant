@@ -1,10 +1,27 @@
 # pi-ant
 
-Personal Pi extensions for development tools. Unified orchestration lives in
-[`orchestration/`](orchestration/README.md), loaded alongside this root package.
-One worker protocol supports tmux, Herdr, and Emacs/Pilish with EAT terminals.
-`/fork-here` opens independent interactive conversations; `do`, `delegate`,
-`fresh_look`, neutral `panel-*` tools, and `wait` provide orchestration.
+Pi extensions for development work, in two packages that install separately:
+
+- The root package: safety lints, `ask`, `/tools`, session tools, workflows and
+  skills.
+- [`orchestration/`](orchestration/README.md): `do`, `delegate`, `fresh_look`,
+  shell panels and `wait` on tmux, Herdr, Emacs/Pilish or the Tau web server.
+
+## Install
+
+Needs [Pi](https://pi.dev) and Node. Pi resolves its own imports from the installed CLI, so
+do not run `npm install` in either package.
+
+```sh
+git clone https://github.com/offline-ant/pi-ant
+(cd pi-ant/extensions/copy-quote && npm ci --ignore-scripts)
+pi install ./pi-ant/orchestration
+pi install ./pi-ant
+```
+
+The `npm ci` line is required: `/copy-quote` has its own small dependency package,
+and Pi reports a load error without it. Restart Pi or run `/reload` afterwards.
+
 The replaced backend packages and legacy semaphore/Claude bridge tools are removed.
 Emacs startup must load `orchestration/emacs/pi-orchestration.el` in Pilish's
 `use-package :config` before the first Pi spawn. The companion owns host/server
@@ -100,11 +117,10 @@ with faux inference; it never makes paid model calls or changes existing panes.
 ## Skills
 
 The package exports `skills/`. After `/reload` or in a new session, invoke
-`/skill:himalaya-mail` or ask the agent to use the skill. Other agents can read
-[`skills/himalaya-mail/SKILL.md`](skills/himalaya-mail/SKILL.md) directly.
+`/skill:herdr` or ask the agent to use the skill. Other agents can read
+[`skills/herdr/SKILL.md`](skills/herdr/SKILL.md) directly.
 
 - `herdr` — local guidance for Herdr 0.9.0 CLI operations, with ownership safeguards and a separate managed Pi orchestration workflow.
-- `himalaya-mail` — send, list, search, read without marking Seen, and reply through the ordinary Himalaya CLI using the separate `llm` mailbox with public From `user@example.com` and IMAP/SMTP login `user@example.com`. Mox's native public-address alias also delivers new incoming mail to postmaster; existing messages and outgoing Sent copies are not replicated. A separate `trash` mailbox (`user@example.com`, no alias or copy) keeps disposable-address mail such as signups apart. Himalaya 1.1.0 is configured locally with private files under `~/.config/himalaya/`; no credentials are included in this package. The skill covers authorization, MML attachment safety, and uncertain-send handling.
 
 Verify package skill discovery without model calls:
 

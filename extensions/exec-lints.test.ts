@@ -77,7 +77,7 @@ test("a trailing pipe tail on build output is blocked once and never rewritten, 
   for (const command of [
     // Only the pipeline feeding tail counts, not paths or earlier commands.
     "cd build && ls | tail -3",
-    "cat /home/user/sn-build/build.log | tail -20",
+    "cat /home/user/project/build.log | tail -20",
     "cargo check; git log --oneline | tail -5",
     "ssh host 'cargo build' | tail -5",
     "cargo build | tail -5; echo done",

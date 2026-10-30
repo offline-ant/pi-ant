@@ -5,6 +5,11 @@
   "description": "Shared Pi workers and panels for tmux, Herdr, and Emacs/Pilish",
   "keywords": ["pi-package", "pi-extension", "workers"],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/offline-ant/pi-ant.git",
+    "directory": "orchestration"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
