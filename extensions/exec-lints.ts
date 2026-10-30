@@ -4,7 +4,7 @@
  * Length limit:
  * - The grep, sleep, pipe-tail, and (disabled) Rust formatter lints apply only to
  *   commands shorter than 120 characters; longer commands pass unchanged.
- *   The git guards apply regardless of length.
+ *   The git guards and file rewrite reminder apply regardless of length.
  *
  * Grep:
  * - standalone local `grep` in bash: blocked on first attempt, allowed on retry
@@ -40,6 +40,12 @@
  * - `sleep` after `ssh` and in panel-start commands (servers and watchers may
  *   legitimately pace themselves) is ignored.
  *
+ * File rewrite reminder:
+ * - The first local bash command per chat that rewrites a file with inline Python,
+ *   `sed -i`, `perl -i`, or a `cat`/`tee` heredoc is blocked; every later one passes.
+ *   Only `edit` and `write` report lint results. The state is in memory: a new
+ *   session runtime starts a new chat.
+ *
  * Covers bash, panel-start, and panel-send tool calls.
  */
 
@@ -73,6 +79,17 @@ const CHECKOUT_NOTE =
 const STASH_NOTE =
   "Other agents or the user may have uncommitted work. " +
   "Ask the user for permission, then retry the exact same command.";
+
+const FILE_REWRITE_NOTE =
+  "Use `edit` for existing files and `write` for new ones so lint results reach you. " +
+  "This reminder appears once per chat: retry if bash is really needed; later commands pass.";
+const PYTHON_RE = /^python[\d.]*$/;
+const PYTHON_WRITE_RE = /\.write_text\(|\.write\(|\bopen\([^)\n]*["'][wa]b?\+?["']/;
+const PYTHON_REWRITE_RE = /\.replace\(|\bre\.sub\(|\.index\(/;
+const IN_PLACE_OPTION_RE = /^(?:-[A-Za-z]*i|--in-place)/;
+const HEREDOC_RE = /^\d*<<(?!<)/;
+/** Output to stdout's target; `>&2` and `2>log` do not capture the heredoc. */
+const OUTPUT_REDIRECTION_RE = /^(?:1|&)?>(?!&)/;
 
 /** Commands and arguments whose output a trailing `| tail` would hide. */
 const BUILD_COMMAND_RE = /^(?:build|check|test)/;
@@ -317,6 +334,20 @@ function hasBlockedLocalGrep(command: string): boolean {
   );
 }
 
+function hasLocalFileRewrite(command: string): boolean {
+  return getLocalShellInvocations(command).some((invocation) => {
+    const name = commandBasename(invocation.name);
+    if (name === "ssh" || invocation.hasSshEarlierInPipeline) return false;
+    if (name === "sed" || name === "perl") return invocation.args.some((arg) => IN_PLACE_OPTION_RE.test(arg));
+    const heredoc = invocation.redirections.some((token) => HEREDOC_RE.test(token.text));
+    if (name === "tee") return heredoc;
+    if (name === "cat") return heredoc && invocation.redirections.some((token) => OUTPUT_REDIRECTION_RE.test(token.text));
+    const python = [invocation.name, ...invocation.args].some((word) => PYTHON_RE.test(commandBasename(word)));
+    return python && (heredoc || invocation.args.includes("-c")) &&
+      PYTHON_WRITE_RE.test(command) && PYTHON_REWRITE_RE.test(command);
+  });
+}
+
 /** Total duration of `sleep` arguments, or undefined when it cannot be determined statically. */
 function sleepSeconds(args: string[]): number | undefined {
   let total = 0;
@@ -416,11 +447,13 @@ export default function (pi: ExtensionAPI) {
   const warnedStashes = new Set<string>();
   const warnedGreps = new Set<string>();
   let warnedPipeTail = false;
+  // Not cleared by turns: the reminder appears once per chat.
+  let warnedFileRewrite = false;
   let enabled = true;
 
   // ── Toggle command ──────────────────────────────────────────────────
   pi.registerCommand("exec-lints", {
-    description: "Toggle exec-lints on/off (git restore/checkout/stash guards, grep, pipe-tail and sleep lints)",
+    description: "Toggle exec-lints on/off (git restore/checkout/stash guards, grep, pipe-tail, sleep and file rewrite lints)",
     handler: async (_args, ctx) => {
       enabled = !enabled;
       if (ctx.hasUI) {
@@ -501,6 +534,12 @@ export default function (pi: ExtensionAPI) {
       }
       warnedStashes.add(command);
       return warnStash(event.toolName, command);
+    }
+
+    // file rewrite — remind once per chat, then allow every command
+    if (!warnedFileRewrite && event.toolName === "bash" && hasLocalFileRewrite(command)) {
+      warnedFileRewrite = true;
+      return { block: true, reason: `Blocked (once per chat): file rewrite in bash. ${FILE_REWRITE_NOTE}` };
     }
 
     // pipe tail lint — block the first attempt, allow a retry

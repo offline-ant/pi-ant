@@ -21,7 +21,7 @@ test("execution lints inspect neutral panel commands and text, not keys", async 
   assert.equal(await handle({ toolName: "panel-send", input: { name: "test", keys: ["ctrl+c"] } }), undefined);
 });
 
-test("commands of 120 characters or more skip every lint except the git guards", async () => {
+test("commands of 120 characters or more skip every lint except the git guards and file rewrite reminder", async () => {
   const { handle } = lints();
   const long = (command: string) => command.padEnd(120);
   for (const command of ["grep -rn foo src", "sleep 600", "npm run check | tail -10"]) {
@@ -84,6 +84,47 @@ test("a trailing pipe tail on build output is blocked once and never rewritten, 
   ]) {
     assert.equal(await suggestion("bash", command), undefined, command);
   }
+});
+
+test("the first file rewrite in bash gets one reminder per chat, at any length, and all later commands pass", async () => {
+  const { handle, newTurn } = lints();
+  const bash = (command: string) => handle({ toolName: "bash", input: { command } });
+  const first = `python3 - <<'EOF'\ns=open('a.py').read()\nopen('a.py','w').write(s.replace('a','b'))\n# ${"x".repeat(120)}\nEOF`;
+  const blocked = await bash(first);
+  assert.equal(blocked?.block, true);
+  assert.match(blocked!.reason!, /`edit` for existing files and `write` for new ones/);
+  assert.equal(await bash(first), undefined);
+  await newTurn();
+  assert.equal(await bash("sed -i s/a/b/ other.py"), undefined);
+
+  for (const command of [
+    "cd src && python3 -c \"import pathlib; p=pathlib.Path('a.py'); p.write_text(p.read_text().replace('a','b'))\"",
+    "uv run --no-project python -I - <<'EOF'\nimport re\ns=open('a').read()\nopen('a','w').write(re.sub('a','b',s))\nEOF",
+    "sed -i s/a/b/ a.py",
+    "sed -Ei.bak s/a/b/ a.py",
+    "sed --in-place s/a/b/ a.py",
+    "perl -pi -e s/a/b/ a.py",
+    "cat > a.py <<'EOF'\nprint(1)\nEOF",
+    "cat <<EOF >> notes.md\nline\nEOF",
+    "tee a.py <<EOF\nprint(1)\nEOF",
+  ]) {
+    assert.equal((await lints().handle({ toolName: "bash", input: { command } }))?.block, true, command);
+  }
+  for (const command of [
+    "python3 script.py",
+    "python3 - <<'EOF'\nprint('a b'.replace(' ', ''))\nEOF",
+    "python3 - <<'EOF'\nimport json\njson.dump({}, open('out.json', 'w'))\nEOF",
+    "sed -n 1,5p a.py",
+    "cat a.py",
+    "cat <<EOF\ntext\nEOF",
+    "cat <<EOF >&2\ntext\nEOF",
+    "ssh host sed -i s/a/b/ a.py",
+    "cat a | ssh host tee log",
+  ]) {
+    assert.equal(await lints().handle({ toolName: "bash", input: { command } }), undefined, command);
+  }
+  const panel = await lints().handle({ toolName: "panel-send", input: { name: "p", text: "sed -i s/a/b/ a.py" } });
+  assert.equal(panel, undefined);
 });
 
 test("sleeping to wait is blocked in favor of the wait tool, short pauses and remote or panel commands are not", async () => {

@@ -2,7 +2,8 @@
  * Unified linting extension for pi
  * Combines python-ty, shellcheck, and rust-style-checker.
  *
- * - Python: runs ty (https://github.com/astral-sh/ty) on .py files
+ * - Python: runs ty (https://github.com/astral-sh/ty) on .py files, in a PEP 723
+ *   script's uv environment when it has one
  * - Shell:  runs shellcheck on scripts with bash/sh shebangs
  * - Rust:   warns about String::from_utf8_lossy without explicit justification in .rs files
  *
@@ -48,6 +49,9 @@ interface WarningTheme {
   fg(color: string, text: string): string;
   bold(text: string): string;
 }
+
+const PEP723_RE = /^# \/\/\/ script$/m;
+const EDIT_GUIDELINE = "Edit files with edit/write, not bash; only those are linted.";
 
 const SHEBANG_PATTERNS = [
   /^#!.*\/bash\s*$/,
@@ -133,12 +137,28 @@ function formatToolWarningDisplay(warnings: LintWarning[], theme: WarningTheme):
 // Python (ty)
 // ---------------------------------------------------------------------------
 
+/** The interpreter `uv` selects for a PEP 723 script: its synced environment when one exists. */
+function scriptPython(absolutePath: string): string | undefined {
+  if (!PEP723_RE.test(readFileText(absolutePath) ?? "")) return undefined;
+  const result = spawnSync("uv", ["python", "find", "--script", absolutePath], { encoding: "utf-8" });
+  return result.status === 0 ? result.stdout.trim() : undefined;
+}
+
+function unresolvedImportHint(filePath: string): string {
+  return (
+    `Fix unresolved imports by making them visible to ty. Standalone script: \`uv add --script ${filePath} <package>\`, ` +
+    `then \`uv sync --script ${filePath}\`. Project without pyproject.toml: add ty.toml at its root with [environment], ` +
+    'python = ".venv", and extra-paths = ["."] when local modules are unresolved.'
+  );
+}
+
 function collectPythonTyWarning(hasTy: boolean, absolutePath: string, filePath: string): LintWarning | undefined {
   if (!hasTy || !filePath.endsWith(".py")) return undefined;
 
+  const python = scriptPython(absolutePath);
   const result = spawnSync(
     "ty",
-    ["check", "--output-format", "concise", "--color", "never", absolutePath],
+    ["check", ...(python ? ["--python", python] : []), "--output-format", "concise", "--color", "never", absolutePath],
     {
       encoding: "utf-8",
       cwd: path.dirname(absolutePath),
@@ -160,7 +180,7 @@ function collectPythonTyWarning(hasTy: boolean, absolutePath: string, filePath: 
     source: "python-ty",
     filePath,
     summary: `ty found Python type errors in ${filePath}.`,
-    diagnostics,
+    diagnostics: output.includes("[unresolved-import]") ? [...diagnostics, unresolvedImportHint(filePath)] : diagnostics,
   };
 }
 
@@ -293,6 +313,7 @@ export default function (pi: ExtensionAPI) {
   const editTool = createEditToolDefinition(cwd);
   pi.registerTool({
     ...editTool,
+    promptGuidelines: [...(editTool.promptGuidelines ?? []), EDIT_GUIDELINE],
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       return createEditToolDefinition(ctx.cwd).execute(toolCallId, params, signal, onUpdate, ctx);
     },
