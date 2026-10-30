@@ -35,6 +35,13 @@ Pi's settings. No extension-local npm installation is needed.
   `pi-orchestration-targets` (ID, kind, name, buffer and the parent's buffer,
   taken from the start spec's `parent`) and observe starts and closes through
   `pi-orchestration-target-functions`.
+  Emacs can stall for a long time, so `emacsclient` calls have deadlines: 10 s
+  for queries (`state`, `response`, `read`, `switch-state`), 60 s for mutations
+  (`start`, `send`, `close`, `switch`), because killing a client mid-mutation can
+  orphan its work. A killed client is a typed "did not answer" error, never read
+  as output. Startup and `/switch` readiness keep polling through it until their
+  own deadline, and prompt acceptance keeps polling; running workers do not depend
+  on Emacs answering at all (see [Completion and waiting](#completion-and-waiting)).
 - **Web:** a [tau](https://github.com/milanglacier/pi-tau-web-server) server (this
   workspace's `../../tau` fork) owning `pi --mode rpc` children, each one a live
   browser tab. Prompts are RPC commands, so submission is draft-safe without a
@@ -80,7 +87,9 @@ another Pi child. Shell panels do not consume worker nesting depth.
 
 - `do({task})`: the preferred worker tool. The ephemeral worker continues from
   the conversation as it stood before the calling assistant message, in the
-  current directory, so `task` is a brief goal.
+  current directory, so `task` is a brief goal. `do({resume: "<name>", task})`
+  instead continues a stopped worker from this conversation; see
+  [Files and recovery](#files-and-recovery).
 - `delegate({task, folder?})`: the occasional exception for a large standalone
   assignment. The worker starts blank with normal project/global resources;
   `task` must contain every necessary requirement.
@@ -131,8 +140,8 @@ another Pi child. Shell panels do not consume worker nesting depth.
   command) and how to fix it; the user
   also gets a one-time TUI notification per panel and program. Keys never warn.
   Pilish Pi targets are RPC conversations,
-  not terminals; supervise them in their input buffers. Web targets are RPC
-  sessions with no terminal at all; supervise them in the browser tab.
+  not terminals; type into them in their input buffers. Web targets are RPC
+  sessions with no terminal at all; use the browser tab.
 - `panel-close({name})`: stop the owned target and release its name and capture
   log. Cancel an active worker request rather than closing it through this tool.
 - `wait({panel?|file?|pid?, match?, timeoutSeconds})`: the replacement for
@@ -358,7 +367,7 @@ with a complete brief, or `fresh_look` when project guidance is also unwanted.
 no argument opens a picker. It opens the **same session file**, not a fork and
 not a live-process migration. The session must already be saved, have no queued
 input, and not belong to a registered worker/fork, active worker request
-(including supervision), or active Ugo workflow. tmux is not a destination. An
+(including one waiting for you), or active Ugo workflow. tmux is not a destination. An
 ordinary Pilish session in Emacs may move to Herdr or Tau; its root identity
 alone does not make it a managed worker.
 
@@ -519,15 +528,14 @@ shared selection policy with native presentation. Pilish's multiline
 editor dialogs use separate buffers, never the parent prompt draft.
 
 - `/panels`: list registered shell panels, workers, and interactive forks.
-- `/worker-submit [text]`: submit the latest supervised reply or explicit text.
-  A main-result submission starts the automatic retrospective; a retrospective
-  submission completes the request without replacing the main result.
-- `/worker-continue <prompt>`: send guidance immediately and restore automatic
-  capture in the current phase.
-- `/finish-worker-now <text>`: abort and settle active work, then finish without
-  automatic retrospective. A main result already saved remains immutable.
+- `/worker-return [text]`: hand back to the parent now, in a worker. The result
+  is the saved main result if there is one, else `text`, else the latest assistant
+  text of this worker run (never the inherited conversation). With nothing to
+  return it warns and changes nothing. Otherwise it stops any current work and
+  completes without a model retrospective; during the retrospective the main
+  result stays immutable and `text`, if given, becomes the retrospective.
 
-## Completion and supervision
+## Completion and waiting
 
 The shared `worker-frame.ts` owns one current request/result schema. The parent
 writes `request.json`; `/worker-run` reads it and applies model/tool policy. The
@@ -537,54 +545,83 @@ and atomically publishes a matching `result.json`. Only that matching final
 artifact means completion—not an input acknowledgement, idle screen, spinner,
 or process exit. Failure resolution waits for Pi's `agent_settled`, including
 retries and overflow compaction. Any unresolved main-task assistant error or
-abort enters `worker:supervised`, including provider quota, authentication, and
-context errors. Provider failover and Pi recovery run first; successful recovery
-continues automatically. The worker stays open with its history and actual error
-reason, and the parent tool remains pending until completion or cancellation.
-Entering supervision does not itself resume an already-failed request. Resolve
-the blocker and submit an ordinary message to continue under supervision, or use
-`/worker-continue <prompt>` to restore automatic completion. Supervised main-task
-requests retain the provider's normal quota recovery; replies stay local until
-`/worker-submit`. `/finish-worker-now <text>` returns
-without another model request. Parent cancellation still stops the worker.
-Startup, process, and protocol failures remain terminal. A failed retrospective
-returns the successful main result with an unavailable-retrospective note.
+abort, including a human interrupt and provider quota, authentication, and
+context errors, leaves the worker **waiting for you**. Provider failover and Pi
+recovery run first; successful recovery continues automatically.
+
+A waiting worker stays open with its history and actual reason, and the parent
+tool remains pending until completion or cancellation. `status.json` has
+`state: "waiting"` and `waitingReason`; `ctx.ui.setStatus("worker-frame", ...)`
+starts with `worker:waiting`, which frontends may match on that key; a warning
+notification and a widget say what to do; parent progress reports
+`details.status: "waiting"`. Entering it does not itself resume an already-failed
+request. To go on, do either:
+
+- **Type a message.** Any new agent run leaves waiting, at `agent_start`, so a
+  rejected prompt keeps it. The next final reply follows the normal path:
+  retrospective, then the result reaches the parent. That path is the same
+  whether or not a human took part, so a side question's answer can become the
+  result; the parent can tell from the user guidance below.
+- **`/worker-return [text]`** hands back now, without a model request.
+
+Messages typed while a worker runs are ordinary Pi steering and change nothing
+about completion. Every message a human sends a worker, whenever they send it,
+reaches the parent ahead of the result as positioned user guidance, so it can
+judge whether the result finishes the task or the worker needs `do({resume})`:
+
+```text
+> User guidance: what a human did in this worker. [n] counts the model messages it had sent by then, of 301. If the result below does not finish the task, continue the worker with do resume.
+[32] Use the staging database instead.
+[300] What are you doing?
+```
+
+Positions count this request's model messages; an early `/worker-return` is
+listed too. `result.json` holds the same data as `guidance` and `modelMessages`.
+A run without human input has no such section. A worker stopped by parent
+cancellation returns no result, so its guidance stays in its transcript.
+Parent cancellation still stops the worker. Startup, process,
+and protocol failures remain terminal. A failed retrospective returns the
+successful main result with an unavailable-retrospective note.
+
+Liveness does not depend on the host. Every status write carries the worker's
+`pid`; once a status with the matching request ID has one, the parent's wait uses
+only that process's existence, with no host calls, on every host. So a stalled
+Emacs or a host that cannot answer cannot end a healthy worker, and a destroyed
+pane, closed buffer or dead server is noticed because the process ended. Until
+the first status, startup alone uses `host.state` with a five-second grace. The
+parent and worker must share a PID namespace, like the files they already share.
 
 Claude Agent five-hour recovery stays inside the provider's original request.
-After immediate account failover, eligible main work, automatic or supervised,
+After immediate account failover, eligible main work
 waits until the reported reset plus 20 seconds, then retries inference from the exact native
 input/tool-result checkpoint. A repeated confirmed five-hour rejection retries
 20 seconds later unless Claude supplies a new future reset. Completed tools are
-not replayed and no `/worker-continue` or extra user message is injected. The
-worker keeps its capture mode and the parent remains pending; local UI and parent
-progress show the scheduled retry time in the process's local timezone with its
-UTC offset. A supervised reply still needs explicit submission. Parent cancellation
-or Escape cancels the current provider request, not recovery for later prompts.
-Submitting a result during a quota wait explicitly aborts that pending request
-before starting the optional retrospective; explicit finish also aborts active work.
+not replayed and no extra user message is injected. The parent remains pending;
+local UI and parent progress show the scheduled retry time in the process's local
+timezone with its UTC offset. Parent cancellation or Escape cancels the current
+provider request, not recovery for later prompts; the worker then waits for you,
+and a typed message starts a request with the same recovery. `/worker-return`
+during a quota wait aborts that pending request. A quota wait happens inside a
+run and waiting for you between runs, so the two never coincide.
 
 The private extension event contract is:
 
 - Worker → provider: `pi-claude-agent:recovery-policy` with `{allowed:boolean}`.
   Main start publishes `true` before its prompt; only the optional retrospective
-  phase publishes `false`. Capture changes, human input, self-compaction and
-  `/worker-continue` do not disable recovery. Completion and shutdown restore the
-  default `true`; actual request cancellation belongs to abort/shutdown, not this
+  phase publishes `false`. Human input, waiting and self-compaction do not disable
+  recovery. Completion and shutdown restore the default `true`; actual request cancellation belongs to abort/shutdown, not this
   policy. Retrospective failure therefore returns the saved main result without
   waiting for quota.
 - Provider → worker: `pi-claude-agent:recovery-status` with
   `{sessionId:string,retryAt?:number}`. `retryAt` is absolute epoch milliseconds;
-  omission clears it. Only the current session's main work accepts it, regardless
-  of capture mode. Supervised waits retain `state: "supervised"` in `status.json`
-  and show supervision alongside the quota deadline locally and to the parent.
-  `status.json` and parent progress details carry `retryAt` while waiting;
+  omission clears it. Only the current session's main work accepts it.
+  `status.json` and parent progress details carry `retryAt` during the wait;
   progress details use `status: "quota-wait"`. The worker owns no retry timer.
 
-Unsent draft edits do not change policy. Ordinary submitted human input takes
-supervision before it is queued, without interrupting quota recovery; normal Pi
-steering semantics still apply. Other errors, unsafe checkpoints, and partial
-responses retain normal failure/supervision handling. Loading this integration
-does not revive failed requests or change their supervised capture mode.
+Unsent draft edits and submitted human input do not change policy; normal Pi
+steering semantics apply. Other errors, unsafe checkpoints, and partial
+responses retain normal failure handling. Loading this integration does not
+revive failed requests.
 
 When `self_compact` is enabled, its private `pi-ant:self-compact-handoff` events
 identify the terminating tool call and its resumed or failed handoff. Only a
@@ -592,15 +629,13 @@ matching successful tool result preserves automatic capture while native compact
 runs and the note restarts work. The eventual final answer follows the normal
 result/retrospective path. Failed, cancelled, or skipped handoffs use the existing
 failure handling even when they happen after `agent_settled`. No timers, polling,
-or Pi-core changes are needed; human supervision is never overridden. Worker
+or Pi-core changes are needed. Worker
 prompts discourage compaction near completion only when the tool is enabled.
 
-Ordinary submitted human input takes supervision before it is queued. Merely
-editing a draft does not. Pilish submits ordinary input through RPC `prompt` with
-`streamingBehavior`; every RPC submission runs extension `input` handlers, so
-supervision is taken however the human sends it. Backend queue snapshots,
-`clear_queue`, and `agent_settled` replace local follow-up queues/timers. Rejected
-ordinary prompts, including compaction rejection, keep the input draft.
+Pilish submits ordinary input through RPC `prompt` with `streamingBehavior`.
+Backend queue snapshots, `clear_queue`, and `agent_settled` replace local
+follow-up queues/timers. Rejected ordinary prompts, including compaction
+rejection, keep the input draft.
 
 Both tmux paste and Herdr 0.8.2 `agent prompt` append to human drafts. Therefore
 both terminal adapters explicitly load the same internal `terminal-input`
@@ -613,9 +648,12 @@ the worker's conversation and instructions, not its runtime: extension discovery
 providers are registered by extensions and a worker cannot reach an
 extension-registered model without them.
 
-The parent polls structured status and bounded native output through the same
-`onUpdate` contract on every host. The complete transcript remains in the child
-pane/buffer and session file. Every worker closes itself after writing its
+The parent polls structured status through the same `onUpdate` contract on every
+host, with a preview of what the worker appended to its session file since the
+wait began: recent user and assistant text and tool calls, at most 12 lines and
+8 KiB, read from a bounded tail so entries of any size cost nothing. It shows
+completed messages, not streaming text. The complete transcript remains in the
+child pane/buffer and session file. Every worker closes itself after writing its
 final result. Cancellation stops owned work instead of abandoning the wait. Session files and diagnostics remain
 available for recovery. Workers receive available parent tools plus `do`. First-action re-delegation
 gets a one-time warning. Above 90% parent context (using Pi's reported model
@@ -624,22 +662,40 @@ explicitly retrying `do` proceeds. `delegate` and `fresh_look` never warn.
 
 ## Files and recovery
 
-Every direct `do`, `delegate`, and `fresh_look` call publishes a copyable resume command as
-soon as its session is prepared, before host startup or output capture. Progress
+A stopped worker continues with `do({resume: "<name>", task: "..."})`, on every
+host. Each worker start persists a `pi-orchestration:worker` branch entry (name
+`<tool>-<id>`, tool, session file and ID, cwd, launch arguments and environment,
+remote target, model, thinking level) before the host starts anything. `resume`
+takes the latest entry with that name on the current branch, so it survives
+reloading the parent and belongs to its conversation branch; an unknown name is
+an error. It reuses that stored launch and session file, never forks, skips the
+context warning, and goes through the normal worker path with new artifacts and
+a new request ID, so the parent gets a result again. The name's claim and registry
+entry refuse a worker that still runs. It works for any stored worker, including
+`delegate`, `fresh_look` and finished ones, and cannot be combined with `alt` or
+`remote`. Results and progress name the worker in their first line.
+
+Thrown errors, including parent Escape and startup/process/protocol failures,
+state the worker's name, that its conversation is saved, and the exact
+`do({resume: ...})` call, in model-visible content because Pi discards error
+details. After a parent interrupt you can therefore just tell the parent to
+continue. On Emacs that is all, since pi-deck has a Resume action.
+
+On tmux, Herdr and web hosts each direct call also publishes a copyable shell
+resume command as soon as its session is prepared, before host startup. Progress
 and successful results retain it in `details.sessionCommand`, not model-facing
 `content`. The shared TUI result renderer displays the hint as **User-only recovery
 command (not sent to model)** in both collapsed and expanded views. Rendering does
 not add it to the prompt. Non-TUI clients may display that metadata themselves.
-Progress and successful results also carry `details.savedConversations` (version 1:
+Errors repeat it in model-visible content, not labeled user-only. Progress and
+successful results on every host also carry `details.savedConversations` (version 1:
 absolute session directory `root`, relative `file`, header `sessionId`, label
 `<tool>-<id>`), which Pilish renders as a read-only link to the worker transcript.
-Thrown errors, including parent Escape and startup/process/protocol failures, keep
-the hint in model-visible content because Pi discards error details; these are not
-labeled user-only. Finished tool results persist in the parent transcript,
-including successful recovery metadata and cancellation content.
-Live progress alone is not durable if the parent process is forcibly killed.
+Finished tool results persist in the parent transcript, including successful
+recovery metadata and cancellation content. Live progress alone is not durable if
+the parent process is forcibly killed.
 
-Run the offered command **after the original worker has stopped**. If cleanup
+Run the offered shell command **after the original worker has stopped**. If cleanup
 failed, resolve that failure first to avoid two processes writing one session.
 It uses shell-quoted `pi --session <file>`, clears inherited nesting/private input
 socket/target identity, and retains an explicit agent-directory override as an
@@ -680,7 +736,7 @@ node scripts/test.mjs orchestration/extensions/switch.test.ts orchestration/swit
 PI_SWITCH_NATIVE=1 node scripts/test.mjs orchestration/switch-native.test.ts
 PI_SWITCH_EMACS_NATIVE=1 node scripts/test.mjs orchestration/switch-emacs-native.test.ts  # disposable -Q daemon with pi-deck, local Tau fork on PATH; adds a Herdr leg inside Herdr
 PI_TAKE_NATIVE=1 node scripts/test.mjs orchestration/take-native.test.ts
-node scripts/test.mjs extensions/self-compact.test.ts orchestration/worker-frame.test.ts orchestration/workers.test.ts
+node scripts/test.mjs extensions/self-compact.test.ts orchestration/worker-frame.test.ts orchestration/workers.test.ts orchestration/worker-preview.test.ts orchestration/hosts/emacs.test.ts
 node scripts/test.mjs orchestration/codemode-delegate.test.ts orchestration/delegate-alt.test.ts orchestration/extensions/delegate.test.ts orchestration/context.test.ts orchestration/worker-call.test.ts orchestration/worker-result.test.ts orchestration/worker-resume.test.ts
 node scripts/test.mjs orchestration/panel-output.test.ts orchestration/extensions/panels.test.ts orchestration/extensions/wait.test.ts extensions/exec-lints.test.ts
 node scripts/test.mjs orchestration/remote.test.ts orchestration/extensions/remote.test.ts orchestration/extensions/delegate.test.ts orchestration/host.test.ts
@@ -707,7 +763,8 @@ user's server.
 
 The last two commands use the installed real Pi with its in-process faux provider and
 owned tmux/Herdr/Emacs targets. They exercise result/retrospective separation,
-self-closing workers, per-request model/tool selection, draft protection, supervision/recovery, retry and
+self-closing workers, per-request model/tool selection, draft protection, interrupted workers
+continuing and returning, steering, an Emacs stall during a healthy worker, retry and
 overflow compaction settlement, and public idle/prompted forks. Unit tests cover
 claims, cancellation cleanup, mismatched results, context preparation, sibling
 startup ordering, and TUI/RPC ask selection preservation. No paid provider calls

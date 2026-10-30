@@ -17,7 +17,7 @@ no reason to build a separate Emacs-owned worker scheduler.
 
 `orchestration/workers.ts` owns the common registry, exclusive name claims,
 waiting, cancellation, and progress. `context.ts` prepares worker sessions;
-`worker-frame.ts` owns the child result/retrospective and supervision lifecycle.
+`worker-frame.ts` owns the child result/retrospective and waiting lifecycle.
 The former Herdr settled-retry behavior was the extraction baseline. The
 duplicated backend packages have been deleted, not wrapped.
 
@@ -35,7 +35,7 @@ The host-specific work is:
 orchestration/
   extensions/              # do/delegate/fresh_look, panel tools, fork command
   workers.ts               # common execution and target registry
-  worker-frame.ts          # common child task/supervision/retrospective policy
+  worker-frame.ts          # common child task/waiting/retrospective policy
   context.ts               # conversation/project/instruction-free session preparation
   host.ts                  # small interface and host selection
   hosts/
@@ -94,9 +94,8 @@ as distinct from a background worker. This is a concrete existing requirement,
 not a general window-layout abstraction. Identify the parent target explicitly;
 placement must not depend on whichever pane/window happens to have focus.
 
-Also retain host-neutral `/worker-submit`, `/worker-continue`, and
-`/finish-worker-now` commands, and replace backend-specific panel listings with
-`/panels`. During extraction, inventory the remaining commands and shortcuts:
+Also retain the host-neutral `/worker-return` command, and replace backend-specific
+panel listings with `/panels`. During extraction, inventory the remaining commands and shortcuts:
 keep current functionality that is still required, share its implementation,
 and agree explicitly on intentional legacy features before removing them.
 Do not invent additional commands merely for symmetry across hosts.
@@ -171,7 +170,7 @@ do / delegate / fresh_look task
   -> worker closes itself; parent removes the target
 ```
 
-The child extension is responsible for task phase and human supervision on
+The child extension is responsible for task phase and waiting for a human on
 all hosts. Pi APIs handle model/tool policy and provider retry/compaction.
 The parent runner handles context preparation, name claims, waiting, result
 formatting, and cancellation. The adapter only implements native operations.
@@ -187,7 +186,7 @@ child conversation remains available in its own pane/buffer and session file.
 No second child-transcript renderer is needed for this initial preview.
 
 Keep result and retrospective separate, with the main result immutable once
-retrospective starts. Human takeover, submit, continue, sibling parallelism, and tool inheritance must behave identically.
+retrospective starts. Waiting, typed continuation, `/worker-return`, sibling parallelism, and tool inheritance must behave identically.
 Cancellation must stop/cancel owned work, not just abandon the parent's wait.
 
 ## Emacs adapter
@@ -214,16 +213,12 @@ a 50 ms timer after `agent_end` to drain it. A worker could finish before seeing
 a human intervention. That local queue and timer have been removed.
 
 Submit ordinary busy human input through RPC `prompt` with
-`streamingBehavior: "followUp"` or `"steer"`. That invokes Pi's `input` hook
-at submission time, allowing the common child extension to take supervision.
-The dedicated RPC `steer` and `follow_up` commands bypass that hook in Pi
-0.85.1; substituting those alone does not fix takeover.
+`streamingBehavior: "followUp"` or `"steer"`.
 
 Use backend queue state, `clear_queue`, and `agent_settled` instead of the
 local queue/settlement timer. When compaction rejects ordinary prompts, retain
 the draft rather than pretending to accept work. Extension commands such as
-worker continue/submit must dispatch immediately even while the worker is busy.
-Merely editing an unsent draft is not supervision.
+`/worker-return` must dispatch immediately even while the worker is busy.
 
 Terminal prompt submission preserves human drafts. Native tmux submission and
 Herdr 0.8.2 `agent prompt` were both observed appending to existing drafts.

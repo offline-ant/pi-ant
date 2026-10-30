@@ -74,6 +74,51 @@ test("matching result is completion even when the process exits during native st
   } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
 });
 
+test("a published worker PID alone decides liveness, so a stalled host cannot end healthy work", { timeout: 10_000 }, async () => {
+  const paths = createWorkerArtifacts();
+  const abort = new AbortController();
+  let hostCalls = 0;
+  const pi = { exec: async () => {
+    hostCalls++;
+    return { code: 1, stdout: "", stderr: "host is stalled", killed: false };
+  } } as unknown as ExtensionAPI;
+  try {
+    writeWorkerStatus(paths.statusPath, { id: "current", state: "running" });
+    const waited = waitForWorkerResult(pi, { id: "current", target: target("current"), paths, task: "Task", sessionFile: "/tmp/test.jsonl", signal: abort.signal });
+    await new Promise((resolve) => setTimeout(resolve, 6500));
+    assert.equal(hostCalls, 0);
+    fs.writeFileSync(paths.resultPath, JSON.stringify({ id: "current", result: "Survived", timestamp: new Date().toISOString() }));
+    assert.equal((await waited).result.result, "Survived");
+  } finally { abort.abort(); fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
+});
+
+test("a dead worker PID without a result fails like any exit; another request's PID does not count", async () => {
+  const paths = createWorkerArtifacts();
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid!;
+  const pi = { exec: async () => ({ code: 0, stdout: "1", stderr: "", killed: false }) } as unknown as ExtensionAPI;
+  try {
+    fs.writeFileSync(paths.statusPath, JSON.stringify({ id: "current", state: "running", pid: dead, updatedAt: new Date().toISOString() }));
+    const options = { id: "current", target: target("current"), paths, task: "Task", sessionFile: "/tmp/test.jsonl" };
+    await assert.rejects(waitForWorkerResult(pi, options), /exited before writing a final result/);
+    // The stale PID is ignored, so the host's answer (pane dead) decides.
+    fs.writeFileSync(paths.statusPath, JSON.stringify({ id: "another", state: "running", pid: process.pid, updatedAt: new Date().toISOString() }));
+    await assert.rejects(waitForWorkerResult(pi, options), /exited before writing a final result/);
+  } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
+});
+
+test("before a PID is published, host state failures get a bounded grace period", { timeout: 10_000 }, async () => {
+  const paths = createWorkerArtifacts();
+  let hostCalls = 0;
+  const pi = { exec: async () => {
+    hostCalls++;
+    return { code: 0, stdout: "", stderr: "", killed: true };
+  } } as unknown as ExtensionAPI;
+  try {
+    await assert.rejects(waitForWorkerResult(pi, { id: "current", target: target("current"), paths, task: "Task", sessionFile: "/tmp/test.jsonl" }), /Could not inspect worker/);
+    assert.ok(hostCalls >= 2);
+  } finally { fs.rmSync(paths.artifactDir, { recursive: true, force: true }); }
+});
+
 test("process death without a result and mismatched late artifacts are failures", async () => {
   const paths = createWorkerArtifacts();
   const pi = { exec: async () => ({ code: 0, stdout: "1", stderr: "", killed: false }) } as unknown as ExtensionAPI;
@@ -125,8 +170,6 @@ function fakeTmux(onRequest: (request: WorkerRequestFile) => void) {
         closes.push(id);
         const pane = panes.get(id);
         if (pane) { pane.dead = true; await new Promise<void>((resolve) => pane.server.close(() => resolve())); }
-      } else if (command === "capture-pane") {
-        stdout = "Bounded worker preview\n".repeat(1000);
       }
       return { code: 0, stdout, stderr: "", killed: false };
     },
@@ -176,7 +219,6 @@ test("ephemeral siblings overlap their task lifetimes, inherit launch arguments,
     assert.equal(results[0].result.retrospective, "everything was ok");
     assert.equal(readTarget(`parallel-${process.pid}-1`), undefined);
     assert.ok(updates.length > 0);
-    assert.ok(JSON.stringify(updates).length < 12000);
   } finally {
     await fake.cleanup(); restore();
     fs.rmSync(first.artifactDir, { recursive: true, force: true });
@@ -200,46 +242,41 @@ test("cancellation closes ephemeral work instead of abandoning its wait", async 
 });
 
 for (const outcome of ["completion", "cancellation"] as const) {
-  test(`supervised work remains pending and owned until ${outcome}`, { timeout: 10_000 }, async () => {
+  test(`a waiting worker remains pending and owned until ${outcome}`, { timeout: 10_000 }, async () => {
     const restore = selectFakeTmux();
     const abort = new AbortController();
     const paths = createWorkerArtifacts();
-    const name = `supervised-${process.pid}-${outcome}`;
+    const name = `waiting-${process.pid}-${outcome}`;
     let request: WorkerRequestFile | undefined;
-    let stateChecks = 0;
-    let supervisionObserved = false;
+    let updates = 0;
     let settled = false;
     const fake = fakeTmux((received) => {
       request = received;
       writeWorkerStatus(received.statusPath, {
         id: received.id,
-        state: "supervised",
-        supervisionReason: "Automatic worker run ended without a result: 429 quota exceeded",
+        state: "waiting",
+        waitingReason: "Worker run ended without a result: 429 quota exceeded",
       });
     });
-    const exec = fake.pi.exec;
-    fake.pi.exec = async (command, args, options) => {
-      if (request && args[2] === "display-message" && args.at(-1) === "#{pane_dead}" && ++stateChecks === 2) {
-        assert.equal(settled, false);
-        assert.equal(supervisionObserved, true);
-        assert.equal(fake.closes.length, 0);
-        assert.ok(readTarget(name));
-        assert.throws(() => claimName(name), /already being used/);
-        assert.equal(fs.existsSync(paths.resultPath), false);
-        if (outcome === "completion") complete(request);
-        else abort.abort();
-      }
-      return exec(command, args, options);
-    };
     writeWorkerRequest(paths, { id: name, task: "Recover manually", tools: ["read"], model: { provider: "fake", id: "fake" }, thinkingLevel: "high", resultPath: paths.resultPath, statusPath: paths.statusPath });
     const running = runEphemeralWorker(fake.pi, {
       id: name, name, cwd: "/tmp", sessionFile: "/tmp/fake-session.jsonl", args: [], paths, task: "Recover manually", signal: abort.signal,
       onUpdate: (update) => {
+        assert.ok(request);
         const text = update.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
-        assert.match(text, /is supervised/);
+        assert.ok(text.includes(`Worker ${name} is waiting for you.`));
         assert.match(text, /429 quota exceeded/);
-        assert.match(text, /worker-continue/);
-        supervisionObserved = true;
+        assert.match(text, /\/worker-return \[text\]/);
+        assert.equal((update.details as { status: string }).status, "waiting");
+        assert.equal(settled, false);
+        assert.equal(fake.closes.length, 0);
+        assert.ok(readTarget(name));
+        assert.throws(() => claimName(name), /already being used/);
+        assert.equal(fs.existsSync(paths.resultPath), false);
+        // The second update proves the parent keeps following the live worker.
+        if (++updates < 2) return;
+        if (outcome === "completion") complete(request);
+        else abort.abort();
       },
     });
     const settlement = running.then(
@@ -258,8 +295,7 @@ for (const outcome of ["completion", "cancellation"] as const) {
         assert.match(result.error.message, /abort/i);
         assert.equal(fs.existsSync(paths.resultPath), false);
       }
-      assert.equal(supervisionObserved, true);
-      assert.ok(stateChecks >= 2, "the parent must keep polling the live supervised worker");
+      assert.ok(updates >= 2);
       assert.equal(fake.closes.length, 1);
       assert.equal(readTarget(name), undefined);
       claimName(name)();
@@ -273,19 +309,18 @@ for (const outcome of ["completion", "cancellation"] as const) {
   });
 }
 
-for (const state of ["running", "supervised"] as const) {
 for (const outcome of ["completion", "cancellation"] as const) {
-  test(`${state} quota recovery remains owned and publishes its deadline until ${outcome}`, async () => {
+  test(`quota recovery remains owned and publishes its deadline until ${outcome}`, async () => {
     const restore = selectFakeTmux();
     const paths = createWorkerArtifacts();
-    const name = `quota-${state[0]}-${process.pid}-${outcome}`;
+    const name = `quota-${process.pid}-${outcome}`;
     const abort = new AbortController();
     const retryAt = Date.now() + 60_000;
     let request: WorkerRequestFile | undefined;
     let observed = false;
     const fake = fakeTmux((received) => {
       request = received;
-      writeWorkerStatus(received.statusPath, { id: received.id, state, retryAt });
+      writeWorkerStatus(received.statusPath, { id: received.id, state: "running", retryAt });
     });
     try {
       writeWorkerRequest(paths, { id: name, task: "Recover after reset", tools: ["read"], model: { provider: "fake", id: "fake" }, thinkingLevel: "high", resultPath: paths.resultPath, statusPath: paths.statusPath });
@@ -296,8 +331,6 @@ for (const outcome of ["completion", "cancellation"] as const) {
           const text = update.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
           assert.match(text, /waiting for Claude five-hour quota/);
           assert.ok(text.includes(formatWorkerRetryTime(retryAt)));
-          assert.doesNotMatch(text, /worker-continue/);
-          if (state === "supervised") assert.match(text, /remains supervised; its reply stays local/);
           assert.equal((update.details as { status: string; retryAt: number }).status, "quota-wait");
           assert.equal((update.details as { retryAt: number }).retryAt, retryAt);
           assert.equal(fake.closes.length, 0);
@@ -325,8 +358,6 @@ for (const outcome of ["completion", "cancellation"] as const) {
       fs.rmSync(paths.artifactDir, { recursive: true, force: true });
     }
   });
-}
-
 }
 
 for (const state of ["running", "retrospective"] as const) {

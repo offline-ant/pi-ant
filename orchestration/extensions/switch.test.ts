@@ -5,7 +5,7 @@ import * as path from "node:path";
 import test, { type TestContext } from "node:test";
 import { createEventBus, SessionManager, type ExtensionAPI, type ExtensionCommandContext, type RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import { flushSessionFile } from "../context.ts";
-import workerFrame, { createWorkerArtifacts, writeWorkerRequest } from "../worker-frame.ts";
+import workerFrame, { createWorkerArtifacts, readWorkerStatus, writeWorkerRequest } from "../worker-frame.ts";
 import { registerSwitch } from "./switch.ts";
 
 function fixture(t: TestContext, options: { host?: string; mode?: "tui" | "rpc" } = {}) {
@@ -144,7 +144,7 @@ test("a second command is rejected during preflight and new work cancels release
   assert.match(f.messages.at(-1)!, /current turn and queued messages/);
 });
 
-test("active worker, including idle supervision, blocks switching without a registry entry", async (t) => {
+test("active worker, including one waiting idle, blocks switching without a registry entry", async (t) => {
   const f = fixture(t);
   workerFrame(f.pi);
   const artifacts = createWorkerArtifacts();
@@ -157,7 +157,9 @@ test("active worker, including idle supervision, blocks switching without a regi
   await f.command();
   assert.deepEqual(f.counts(), { prepares: 0, replacements: 0 });
   assert.match(f.messages.at(-1)!, /managed worker/);
-  await f.handlers.get("input")!({ source: "interactive", text: "supervise" }, f.ctx);
+  await f.handlers.get("agent_end")!({ messages: [{ role: "assistant", content: [], stopReason: "aborted" }] }, f.ctx);
+  await f.handlers.get("agent_settled")!({}, f.ctx);
+  assert.equal(readWorkerStatus(artifacts.statusPath)?.state, "waiting");
   await f.command();
   assert.deepEqual(f.counts(), { prepares: 0, replacements: 0 });
   await f.handlers.get("session_shutdown")!({}, f.ctx);

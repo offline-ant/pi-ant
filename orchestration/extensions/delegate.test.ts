@@ -9,7 +9,8 @@ import { createAgentSession, createCodemodeExtension, DefaultResourceLoader, Mod
 import { Type } from "typebox";
 import type { EphemeralWorkerTool } from "../delegate-policy.ts";
 import type { WorkerRequestFile } from "../worker-frame.ts";
-import { workerResumeCommand } from "../worker-resume.ts";
+import { workerResumeCommand, workerStoppedNotice } from "../worker-resume.ts";
+import { claimName } from "../workers.ts";
 import delegateExtension, { type DelegateParams } from "./delegate.ts";
 import { installSshStub, setSessionRemote } from "../test/ssh-stub.ts";
 
@@ -366,6 +367,7 @@ test("split schemas have no context flag, fresh_look is opt-in, and alternate re
       assert.equal(Object.hasOwn(schema.properties, "alt"), enabled);
       assert.equal(Object.hasOwn(schema.properties, "context"), false);
       assert.equal(Object.hasOwn(schema.properties, "folder"), name !== "do");
+      assert.equal(Object.hasOwn(schema.properties, "resume"), name === "do");
       assert.deepEqual(schema.required, ["task"]);
       assert.doesNotMatch(tool.description, /retrospective/);
       if (enabled) {
@@ -591,6 +593,8 @@ for (const name of toolNames) {
     f.release();
     assert.equal(result.isError, true);
     assert.ok(JSON.stringify(result.content).includes(command));
+    const notice = workerStoppedNotice(`${name}-${f.requests.at(-1)!.id}`);
+    assert.ok(JSON.stringify(result.content).includes(JSON.stringify(notice).slice(1, -1)));
     assert.equal(fs.readFileSync(file, "utf8"), saved, "closing a worker must not delete or rewrite its session");
     assert.equal(f.closed.length, 1);
     const parent = SessionManager.open(f.current.sessionManager.getSessionFile()!);
@@ -599,6 +603,126 @@ for (const name of toolNames) {
     "recovery must survive reloading the parent, not just the live progress row");
   });
 }
+
+/** The worker's name as the parent knows it, from its first tool result line. */
+function workerName(result: { content: unknown }): string {
+  const name = /Worker ((?:do|delegate|fresh_look)-[a-z0-9-]+)\./.exec(JSON.stringify(result.content))?.[1];
+  assert.ok(name, JSON.stringify(result.content));
+  return name;
+}
+
+for (const name of toolNames) {
+  test(`do resumes a stopped ${name} in place with its stored launch, under a new request`, { timeout: 30_000 }, async (t) => {
+    const f = await fixture(t);
+    f.current.setActiveToolsByName(["read", ...toolNames]);
+    const arrived = f.holdNext();
+    const pending = f.call(name, { task: "Interrupted work" });
+    await arrived;
+    await f.current.abort();
+    const stopped = await pending;
+    f.release();
+    assert.equal(stopped.isError, true);
+    const worker = workerName(stopped);
+    assert.ok(worker.startsWith(`${name}-`));
+    const first = f.launches.at(-1)!;
+    const firstRequest = f.requests.at(-1)!;
+    const saved = fs.readFileSync(first.sessionFile, "utf8");
+
+    // Above the warning threshold: resuming continues a session, and warns about nothing.
+    f.setPercent(95);
+    const count = f.launches.length;
+    const resumed = await f.call("do", { resume: worker, task: "Finish it" });
+    assert.equal(resumed.isError, false, JSON.stringify(resumed));
+    assert.equal(f.launches.length, count + 1);
+    const second = f.launches.at(-1)!;
+    assert.equal(second.sessionFile, first.sessionFile, "the same conversation continues");
+    assert.deepEqual(second.args, first.args);
+    assert.equal(fs.readFileSync(first.sessionFile, "utf8"), saved, "nothing is forked or rewritten");
+    assert.equal(workerName(resumed), worker);
+    const request = f.requests.at(-1)!;
+    assert.notEqual(request.id, firstRequest.id);
+    assert.notEqual(request.resultPath, firstRequest.resultPath);
+    assert.deepEqual(request.model, firstRequest.model);
+    assert.equal(request.thinkingLevel, firstRequest.thinkingLevel);
+    assert.match(request.task, /Continue your existing work/);
+    assert.match(request.task, /Finish it/);
+    assert.match(JSON.stringify(resumed.content), /fixture result/);
+
+    // A finished worker continues too, and the latest record still names it.
+    const again = await f.call("do", { resume: worker, task: "One more thing" });
+    assert.equal(again.isError, false, JSON.stringify(again));
+    assert.equal(f.launches.at(-1)!.sessionFile, first.sessionFile);
+    assert.equal(f.launches.length, count + 2);
+  });
+}
+
+test("resume survives reloading the parent but belongs to its conversation branch", { timeout: 30_000 }, async (t) => {
+  const f = await fixture(t);
+  f.current.setActiveToolsByName(["read", ...toolNames]);
+  const beforeWorker = f.current.sessionManager.getLeafId()!;
+  const finished = await f.call("delegate", { task: "Finished work" });
+  const worker = workerName(finished);
+  const count = f.launches.length;
+  await f.current.reload();
+  assert.equal((await f.call("do", { resume: worker, task: "After reload" })).isError, false);
+  assert.equal(f.launches.length, count + 1);
+  await f.current.navigateTree(beforeWorker, { summarize: false });
+  const unknown = await f.call("do", { resume: worker, task: "Other branch" });
+  assert.equal(unknown.isError, true);
+  assert.match(JSON.stringify(unknown.content), new RegExp(`Unknown worker '${worker}'`));
+  assert.equal(f.launches.length, count + 1, "an unknown name starts nothing");
+});
+
+test("resume is only for do, without a model or target, and refuses a worker that still runs", { timeout: 30_000 }, async (t) => {
+  const f = await fixture(t);
+  f.current.setActiveToolsByName(["read", ...toolNames]);
+  const worker = workerName(await f.call("do", { task: "Finished work" }));
+  const count = f.launches.length;
+  for (const [name, params] of [
+    ["delegate", { resume: worker, task: "Wrong tool" }],
+    ["fresh_look", { resume: worker, task: "Wrong tool" }],
+    ["do", { resume: worker, task: "With target", remote: "box" }],
+  ] as const) {
+    assert.equal((await f.call(name, params)).isError, true);
+  }
+  await f.enable();
+  const withAlt = await f.call("do", { resume: worker, task: "With model", alt: false });
+  assert.equal(withAlt.isError, true);
+  assert.match(JSON.stringify(withAlt.content), /cannot be combined with alt or remote/);
+  assert.equal(f.launches.length, count);
+
+  // A running worker holds its name's claim for its whole request.
+  const release = claimName(worker);
+  t.after(release);
+  const live = await f.call("do", { resume: worker, task: "Too early" });
+  assert.equal(live.isError, true);
+  assert.match(JSON.stringify(live.content), /already being used/);
+  assert.equal(f.launches.length, count);
+});
+
+test("on the Emacs host recovery is do({resume}) alone, without a shell command", { timeout: 30_000 }, async (t) => {
+  const f = await fixture(t);
+  f.current.setActiveToolsByName(["read", ...toolNames]);
+  const bin = path.join(f.directory, "bin");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "emacsclient"), "#!/bin/sh\necho 'emacs refused' >&2\nexit 1\n", { mode: 0o755 });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${bin}:${previousPath}`;
+  t.after(() => { process.env.PATH = previousPath; });
+  // Selection is frozen at first use, which is this worker call.
+  process.env.PI_ORCHESTRATION_HOST = "emacs";
+  process.env.PI_ORCHESTRATION_ENDPOINT = path.join(f.directory, "emacs.sock");
+  const result = await f.call("do", { task: "Fails to start on Emacs" });
+  assert.equal(result.isError, true);
+  const content = JSON.stringify(result.content);
+  assert.match(content, /emacs refused/);
+  assert.match(content, /Its conversation is saved; continue it with do\(\{resume: \\"do-/);
+  assert.doesNotMatch(content, /pi --session|To resume\/continue/);
+  const starting = f.updates.at(-1)!.result.details as { sessionCommand?: string; savedConversations?: unknown; status: string };
+  assert.equal(starting.status, "starting");
+  assert.equal(starting.sessionCommand, undefined);
+  assert.ok(starting.savedConversations);
+});
 
 test("provider/budget/token failures and failed startup retain model-visible recovery", { timeout: 30_000 }, async (t) => {
   const f = await fixture(t);

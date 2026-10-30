@@ -7,6 +7,10 @@ import { serverGone } from "./server-socket.ts";
 
 const COMPANION = fileURLToPath(new URL("../emacs/pi-orchestration.el", import.meta.url));
 const STARTUP_TIMEOUT_MS = 120_000;
+const QUERY_TIMEOUT_MS = 10_000;
+/** Killing a client mid-mutation can leave its work orphaned, so mutations may wait out a stall. */
+const MUTATION_TIMEOUT_MS = 60_000;
+const QUERY_OPERATIONS = new Set(["state", "response", "read", "switch-state"]);
 
 interface EmacsReply {
   error?: string;
@@ -18,9 +22,26 @@ interface EmacsReply {
   success?: boolean;
 }
 
-/** Runs a command like `pi.exec`, resolving with its exit code instead of throwing. */
+/** Runs a command like `pi.exec`, resolving with its exit code instead of throwing; `killed` marks a timed-out or aborted command. */
 export type EmacsExec = (command: string, args: string[], options: { signal?: AbortSignal; timeout: number; env?: NodeJS.ProcessEnv })
-  => Promise<{ code: number; stdout: string; stderr: string }>;
+  => Promise<{ code: number; stdout: string; stderr: string; killed: boolean }>;
+
+/** Emacs did not answer in time: it may be stalled, and says nothing about its targets. */
+export class EmacsUnresponsiveError extends Error {
+  constructor(endpoint: string, operation: unknown, timeout: number) {
+    super(`Emacs ${endpoint} did not answer '${String(operation)}' within ${timeout / 1000} s; it may be busy.`);
+    this.name = "EmacsUnresponsiveError";
+  }
+}
+
+/** A poll's reply, or undefined while Emacs is too busy to answer; pollers keep their own deadline. */
+export async function emacsPoll<T>(query: () => Promise<T>): Promise<T | undefined> {
+  try { return await query(); }
+  catch (error) {
+    if (error instanceof EmacsUnresponsiveError) return undefined;
+    throw error;
+  }
+}
 
 /** One base64-JSON companion operation through emacsclient; never Lisp built from data. */
 export async function emacsOperation(
@@ -29,7 +50,10 @@ export async function emacsOperation(
   signal?.throwIfAborted();
   const encoded = Buffer.from(JSON.stringify(data), "utf8").toString("base64");
   const expression = `(progn (require 'pi-orchestration ${JSON.stringify(COMPANION)}) (pi-orchestration-dispatch "${encoded}"))`;
-  const result = await exec("emacsclient", ["--socket-name", endpoint, "--eval", expression], { signal, timeout: 10_000 });
+  const timeout = QUERY_OPERATIONS.has(String(data.operation)) ? QUERY_TIMEOUT_MS : MUTATION_TIMEOUT_MS;
+  const result = await exec("emacsclient", ["--socket-name", endpoint, "--eval", expression], { signal, timeout });
+  signal?.throwIfAborted();
+  if (result.killed) throw new EmacsUnresponsiveError(endpoint, data.operation, timeout);
   if (result.code !== 0) {
     throw new Error(`Emacs ${endpoint}: ${result.stderr.trim() || result.stdout.trim()}`);
   }
@@ -50,12 +74,12 @@ export function createEmacsHost(pi: ExtensionAPI, endpoint: string): Host {
 
   async function waitForAcceptance(target: HostTarget, request: string, signal?: AbortSignal): Promise<void> {
     while (true) {
-      const reply = await call({ operation: "response", id: target.id, request }, signal);
-      if (!reply.pending) {
+      const reply = await emacsPoll(() => call({ operation: "response", id: target.id, request }, signal));
+      if (reply && !reply.pending) {
         if (!reply.success) throw new Error(`Emacs target ${target.name} rejected prompt`);
         return;
       }
-      // Extension commands may await settlement (for example /worker-submit).
+      // Extension commands may await settlement (for example /worker-return).
       // A readiness deadline must not become an arbitrary task deadline.
       await delay(50, undefined, { signal });
     }
@@ -95,9 +119,9 @@ export function createEmacsHost(pi: ExtensionAPI, endpoint: string): Host {
         if (spec.kind === "pi") {
           const deadline = Date.now() + STARTUP_TIMEOUT_MS;
           while (true) {
-            const state = await call({ operation: "state", id }, signal);
-            if (state.ready) break;
-            if (state.state !== "running") throw new Error(`Emacs Pi exited during startup: ${spec.name} (${id})`);
+            const state = await emacsPoll(() => call({ operation: "state", id }, signal));
+            if (state?.ready) break;
+            if (state && state.state !== "running") throw new Error(`Emacs Pi exited during startup: ${spec.name} (${id})`);
             if (Date.now() >= deadline) throw new Error(`Emacs Pi startup timed out: ${spec.name} (${id})`);
             await delay(50, undefined, { signal });
           }

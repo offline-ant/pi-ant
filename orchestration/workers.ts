@@ -2,10 +2,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { truncateTail, type AgentToolUpdateCallback, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AgentToolUpdateCallback, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getHost, hostForTarget } from "./host.ts";
 import type { HostTarget } from "./host-types.ts";
-import { appendWorkerMoreInfo, formatWorkerRetryTime, parseWorkerResult, readWorkerStatus, type WorkerArtifactPaths, type WorkerResultFile } from "./worker-frame.ts";
+import { appendWorkerMoreInfo, formatWorkerResult, formatWorkerRetryTime, parseWorkerResult, readWorkerStatus, type WorkerArtifactPaths, type WorkerResultFile, type WorkerStatusFile } from "./worker-frame.ts";
+import { createWorkerPreview } from "./worker-preview.ts";
 
 const REGISTRY_DIR = path.join(os.tmpdir(), "pi-orchestration-targets");
 const RESULT_POLL_INTERVAL_MS = 250;
@@ -160,15 +161,6 @@ export interface WorkerToolDetails {
   retryAt?: number;
 }
 
-export async function captureWorkerOutput(pi: ExtensionAPI, target: HostTarget, lines = 12, signal?: AbortSignal): Promise<string> {
-  try {
-    return truncateTail(await hostForTarget(pi, target).read(target, lines, signal), { maxLines: lines, maxBytes: 8192 }).content || "(no output)";
-  } catch (error) {
-    signal?.throwIfAborted();
-    return `Could not capture ${target.host} output for ${target.name}: ${error instanceof Error ? error.message : String(error)}`;
-  }
-}
-
 export async function waitForWorkerResult(
   pi: ExtensionAPI,
   options: {
@@ -185,7 +177,13 @@ export async function waitForWorkerResult(
   let lastProgressAt = -PROGRESS_UPDATE_INTERVAL_MS;
   let lastStateAt = -STATE_POLL_INTERVAL_MS;
   let unavailableSince: number | undefined;
+  let workerPid: number | undefined;
   const host = hostForTarget(pi, options.target);
+  const preview = createWorkerPreview(options.sessionFile);
+  const matchingStatus = (): WorkerStatusFile | undefined => {
+    const status = readWorkerStatus(options.paths.statusPath);
+    return status?.id === options.id ? status : undefined;
+  };
   const details = (status: string, retryAt?: number): WorkerToolDetails => ({
     id: options.id, target: options.target, artifacts: options.paths,
     sessionFile: options.sessionFile, task: options.task, elapsedMs: Date.now() - startedAt, status,
@@ -202,7 +200,11 @@ export async function waitForWorkerResult(
     if (elapsedMs - lastStateAt >= STATE_POLL_INTERVAL_MS) {
       lastStateAt = elapsedMs;
       let state: "running" | "exited" | "missing" | undefined;
-      try {
+      // A worker publishing its PID no longer needs its host, which may be
+      // stalled or busy: only the process decides whether it still runs.
+      workerPid ??= matchingStatus()?.pid;
+      if (workerPid !== undefined) state = processAlive(workerPid) ? "running" : "exited";
+      else try {
         state = await host.state(options.target, options.signal);
         unavailableSince = undefined;
       } catch (error) {
@@ -221,21 +223,18 @@ export async function waitForWorkerResult(
     }
     if (options.onUpdate && elapsedMs - lastProgressAt >= PROGRESS_UPDATE_INTERVAL_MS) {
       lastProgressAt = elapsedMs;
-      const status = readWorkerStatus(options.paths.statusPath);
-      const matchingStatus = status?.id === options.id ? status : undefined;
-      const retryAt = matchingStatus?.state === "running" || matchingStatus?.state === "supervised" ? matchingStatus.retryAt : undefined;
+      const status = matchingStatus();
+      const retryAt = status?.state === "running" ? status.retryAt : undefined;
       const progress = retryAt !== undefined
         ? [`Worker ${options.target.name} is waiting for Claude five-hour quota; retry scheduled at ${formatWorkerRetryTime(retryAt)}.`,
-          "No tools are replayed; parent cancellation stops recovery.",
-          ...(matchingStatus?.state === "supervised" ? ["The worker remains supervised; its reply stays local until explicitly submitted."] : [])].join("\n")
-        : matchingStatus?.state === "supervised"
-          ? [`Worker ${options.target.name} is supervised.`, matchingStatus.supervisionReason,
-            "Open the worker and type a message to investigate; use /worker-submit to return its reply or /worker-continue <prompt> to resume automatic completion."].filter(Boolean).join("\n")
-          : `Waiting for worker ${options.target.name} (${Math.floor(elapsedMs / 1000)}s elapsed).`;
-      const output = await captureWorkerOutput(pi, options.target, 12, options.signal);
+          "No tools are replayed; parent cancellation stops recovery."].join("\n")
+        : status?.state === "waiting"
+          ? [`Worker ${options.target.name} is waiting for you.`, status.waitingReason,
+            "Open the worker and type a message to continue it, or use /worker-return [text] to hand back now."].filter(Boolean).join("\n")
+          : `Worker ${options.target.name} is running (${Math.floor(elapsedMs / 1000)}s elapsed).`;
       options.onUpdate({
-        content: [{ type: "text", text: `${progress}\nSession: ${options.sessionFile}\n\n${output}` }],
-        details: details(retryAt === undefined ? matchingStatus?.state ?? "waiting" : "quota-wait", retryAt),
+        content: [{ type: "text", text: `${progress}\nSession: ${options.sessionFile}\n\n${preview()}` }],
+        details: details(retryAt === undefined ? status?.state ?? "running" : "quota-wait", retryAt),
       });
     }
     await delay(RESULT_POLL_INTERVAL_MS, undefined, { signal: options.signal });
@@ -269,7 +268,7 @@ export async function runEphemeralWorker(
     }, options.signal);
     saveTarget(target);
     const output = await waitForWorkerResult(pi, { ...options, target });
-    if (output.result.isError) throw new Error(output.result.result);
+    if (output.result.isError) throw new Error(formatWorkerResult(output.result));
     return output;
   } catch (error) {
     failure = new Error(appendWorkerMoreInfo(error instanceof Error ? error.message : String(error), options.paths));

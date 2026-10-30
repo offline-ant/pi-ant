@@ -30,7 +30,7 @@ export default function lifecycleFixture(pi: ExtensionAPI): void {
       typeof message.content === "string" ? message.content
         : message.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n"),
     ]);
-    return messages.findLast((message) => !message.startsWith("A human is supervising this worker.")) ?? "";
+    return messages.at(-1) ?? "";
   };
   provider.setResponses(Array.from({ length: 100 }, () => async (context, options, _state, model) => {
     const prompt = text(context);
@@ -38,10 +38,7 @@ export default function lifecycleFixture(pi: ExtensionAPI): void {
     const summary = prompt.startsWith("<conversation>\n");
     trace({ event: "request", prompt, retrospective, summary, model: model.id, reasoning: options?.reasoning, recoveryAllowed,
       tools: getCurrentTools(context.messages).map((tool) => tool.name) });
-    if (prompt.startsWith("[quota-after-submit]")) {
-      while (!fs.existsSync(path.join(directory, "release-submit-quota"))) await delay(25, undefined, { signal: options?.signal });
-    }
-    if (prompt.startsWith("[quota-wait]") || prompt.startsWith("[quota-after-submit]")) {
+    if (prompt.startsWith("[quota-wait]")) {
       if (!recoveryAllowed) return fauxAssistantMessage("", { stopReason: "error", errorMessage: "fixture quota recovery disabled" });
       pi.events.emit("pi-claude-agent:recovery-status", { sessionId, retryAt: Date.now() + 60_000 });
       try {

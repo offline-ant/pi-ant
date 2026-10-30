@@ -5,10 +5,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createEmacsHost } from "./emacs.ts";
+import { createEmacsHost, emacsOperation, EmacsUnresponsiveError, type EmacsExec } from "./emacs.ts";
 import type { HostTarget } from "../host-types.ts";
 
-function fakeEmacs(handler: (data: Record<string, unknown>) => object): ExtensionAPI {
+/** What Pi's exec reports for a process it killed: code 0, no output, killed. */
+const NO_ANSWER = Symbol("no answer");
+
+function fakeEmacs(handler: (data: Record<string, unknown>) => object | typeof NO_ANSWER): ExtensionAPI {
   return {
     async exec(command: string, args: string[]) {
       assert.equal(command, "emacsclient");
@@ -17,10 +20,59 @@ function fakeEmacs(handler: (data: Record<string, unknown>) => object): Extensio
       assert.ok(encoded);
       const data = JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as Record<string, unknown>;
       const reply = handler(data);
+      if (reply === NO_ANSWER) return { code: 0, stdout: "", stderr: "", killed: true };
       return { code: 0, stdout: JSON.stringify(Buffer.from(JSON.stringify(reply)).toString("base64")), stderr: "", killed: false };
     },
   } as unknown as ExtensionAPI;
 }
+
+test("a killed emacsclient is a typed timeout, not a JSON error; queries get less time than mutations", async () => {
+  const timeouts = new Map<string, number>();
+  const exec: EmacsExec = async (_command, args, { timeout }) => {
+    const encoded = /pi-orchestration-dispatch "([A-Za-z0-9+/=]+)"/.exec(args[3])![1];
+    timeouts.set(String((JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as { operation: string }).operation), timeout);
+    return { code: 0, stdout: "", stderr: "", killed: true };
+  };
+  for (const operation of ["state", "response", "read", "switch-state", "start", "send", "close", "switch"]) {
+    await assert.rejects(emacsOperation(exec, "/test/socket", { operation }), (error: unknown) => {
+      assert.ok(error instanceof EmacsUnresponsiveError);
+      assert.ok(error.message.includes("/test/socket"));
+      assert.ok(error.message.includes(`'${operation}'`));
+      assert.match(error.message, /did not answer/);
+      return true;
+    });
+  }
+  assert.deepEqual(Object.fromEntries(timeouts), {
+    state: 10_000, response: 10_000, read: 10_000, "switch-state": 10_000,
+    start: 60_000, send: 60_000, close: 60_000, switch: 60_000,
+  });
+  // A cancelled caller reports its cancellation, not a slow Emacs.
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(emacsOperation(async () => ({ code: 0, stdout: "", stderr: "", killed: true }), "/test/socket", { operation: "state" }, controller.signal), /abort/i);
+  const during = new AbortController();
+  await assert.rejects(emacsOperation(async () => {
+    during.abort();
+    return { code: 0, stdout: "", stderr: "", killed: true };
+  }, "/test/socket", { operation: "state" }, during.signal), (error: unknown) => !(error instanceof EmacsUnresponsiveError));
+});
+
+test("startup and acceptance polling outlast an unresponsive Emacs", async () => {
+  let stateReads = 0;
+  let receiptReads = 0;
+  const pi = fakeEmacs((data) => {
+    switch (data.operation) {
+      case "start": return { target: { host: "emacs", endpoint: "/test/socket", id: data.id, kind: "pi", name: "worker" } };
+      case "state": return ++stateReads < 3 ? NO_ANSWER : { state: "running", ready: true };
+      case "send": return { pending: true };
+      case "response": return ++receiptReads < 3 ? NO_ANSWER : { success: true };
+      default: throw new Error(`Unexpected operation: ${String(data.operation)}`);
+    }
+  });
+  await createEmacsHost(pi, "/test/socket").start({ kind: "pi", name: "worker", cwd: "/tmp", sessionFile: "/tmp/test.jsonl", args: [], placement: "worker", prompt: "hello" });
+  assert.equal(stateReads, 3);
+  assert.equal(receiptReads, 3);
+});
 
 test("Emacs startup waits for readiness then matching prompt acknowledgement", async () => {
   const operations: string[] = [];

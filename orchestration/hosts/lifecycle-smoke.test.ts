@@ -27,7 +27,9 @@ const pi = {
       return { ...await exec(command, args, { timeout: options.timeout, signal: options.signal }), code: 0, killed: false };
     } catch (error) {
       const failure = error as Error & { stdout?: string; stderr?: string; code?: number; killed?: boolean };
-      return { stdout: failure.stdout ?? "", stderr: failure.stderr ?? failure.message, code: failure.code ?? 1, killed: failure.killed ?? false };
+      // Like Pi's exec: a process it killed reports code 0, however it ended.
+      const killed = failure.killed === true;
+      return { stdout: failure.stdout ?? "", stderr: failure.stderr ?? failure.message, code: killed ? 0 : failure.code ?? 1, killed };
     }
   },
 } as unknown as ExtensionAPI;
@@ -46,6 +48,7 @@ interface Trace {
   draft?: string;
   idle?: boolean;
   source?: string;
+  text?: string;
   recoveryAllowed?: boolean;
 }
 function traces(directory: string): Trace[] {
@@ -106,8 +109,8 @@ for (const kind of ["tmux", "herdr", "emacs"] as const) {
       }
       const nativeHost = host;
       const args = ["--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--provider", "orchestration-fixture", "--model", "one", "--thinking", "high", "-e", frame, "-e", fixture];
-      async function start(prompt?: string): Promise<HostTarget> {
-        target = await nativeHost.start({ kind: "pi", name: `life-${randomUUID().slice(0, 8)}`, cwd: directory, sessionFile, args,
+      async function start(prompt?: string, name = `life-${randomUUID().slice(0, 8)}`): Promise<HostTarget> {
+        target = await nativeHost.start({ kind: "pi", name, cwd: directory, sessionFile, args,
           env: { PI_CODING_AGENT_DIR: agentDirectory, PI_NESTED: "0" }, placement: "worker", parent, prompt });
         return target;
       }
@@ -154,96 +157,117 @@ for (const kind of ["tmux", "herdr", "emacs"] as const) {
       await host.close(idle);
       target = undefined;
 
-      // Takeover must happen at submission, while the slow automatic run is open.
-      const supervised = request("[hold] supervised");
-      const supervisedWorker = await run(supervised);
-      const humanGuidance = (text: string) => nativeHost.send(supervisedWorker, kind === "emacs"
+      const typed = (worker: HostTarget, text: string) => nativeHost.send(worker, kind === "emacs"
         ? { kind: "prompt", text } : { kind: "text", text, enter: true });
-      await until(() => traces(directory).some((entry) => entry.prompt?.endsWith("[hold] supervised")), "slow worker start");
-      await humanGuidance("human takeover");
-      await until(() => readWorkerStatus(supervised.paths.statusPath)?.state === "supervised", "human takeover before completion");
-      assert.equal(fs.existsSync(supervised.paths.resultPath), false);
-      fs.writeFileSync(path.join(directory, "release"), "release");
-      await until(() => traces(directory).some((entry) => entry.event === "request" && entry.prompt === "human takeover"), "human follow-up runs");
-      await delay(300);
-      assert.equal(fs.existsSync(supervised.paths.resultPath), false);
-      // Ordinary human guidance preserves supervision, not a provider-level
-      // recovery disable. Abort this request, then prove the next can wait too.
-      const quotaGuidance = "[quota-wait] supervised guidance";
-      await humanGuidance(quotaGuidance);
-      await until(() => readWorkerStatus(supervised.paths.statusPath)?.retryAt !== undefined, "supervised main request waits for quota");
-      assert.equal(readWorkerStatus(supervised.paths.statusPath)?.state, "supervised");
-      assert.equal(traces(directory).findLast((entry) => entry.prompt === quotaGuidance)?.recoveryAllowed, true);
-      await host.send(supervisedWorker, { kind: "prompt", text: "/lifecycle-abort" });
-      await until(() => readWorkerStatus(supervised.paths.statusPath)?.retryAt === undefined
-        && /abort/i.test(readWorkerStatus(supervised.paths.statusPath)?.supervisionReason ?? ""), "Escape-equivalent cancellation settles without disabling recovery");
-      await humanGuidance(quotaGuidance);
-      await until(() => readWorkerStatus(supervised.paths.statusPath)?.retryAt !== undefined, "next supervised main request still waits");
-      assert.equal(readWorkerStatus(supervised.paths.statusPath)?.state, "supervised");
-      assert.equal(fs.existsSync(supervised.paths.resultPath), false);
-      // An empty submission cannot discard the request that is waiting for quota.
-      await host.send(supervisedWorker, { kind: "prompt", text: "/worker-submit" });
+      const status = (work: ReturnType<typeof request>) => readWorkerStatus(work.paths.statusPath);
+      const holding = (label: string) => until(() => traces(directory).some((entry) => entry.prompt?.endsWith(`[hold] ${label}`)), `${label} worker start`);
+
+      // Interrupting a worker leaves it waiting; an ordinary message continues
+      // it and its final reply reaches the parent through the normal path.
+      const interrupted = request("[hold] interrupted");
+      const interruptedWorker = await run(interrupted);
+      await holding("interrupted");
+      await host.send(interruptedWorker, { kind: "prompt", text: "/lifecycle-abort" });
+      await until(() => status(interrupted)?.state === "waiting", "interrupted worker waits");
+      assert.match(status(interrupted)?.waitingReason ?? "", /abort/i);
+      assert.equal(status(interrupted)?.pid !== undefined, true);
+      assert.equal(await nativeHost.state(interruptedWorker), "running", "an interrupted worker stays open");
+      assert.equal(fs.existsSync(interrupted.paths.resultPath), false);
+      await typed(interruptedWorker, "please continue");
+      const resumedResult = (await wait(interrupted, interruptedWorker)).result;
+      assert.equal(resumedResult.result, "fixture result: please continue");
+      assert.equal(resumedResult.retrospective, "fixture retrospective");
+      assert.deepEqual(resumedResult.guidance?.map((item) => item.text), ["please continue"]);
+
+      // /worker-return ends an interrupted worker instead, without a model request.
+      const returned = request("[hold] returned");
+      const returnedWorker = await run(returned);
+      await holding("returned");
+      await host.send(returnedWorker, { kind: "prompt", text: "/lifecycle-abort" });
+      await until(() => status(returned)?.state === "waiting", "worker to return waits");
+      const beforeReturn = traces(directory).filter((entry) => entry.event === "request").length;
+      await host.send(returnedWorker, { kind: "prompt", text: "/worker-return" });
       await delay(100);
-      assert.ok(readWorkerStatus(supervised.paths.statusPath)?.retryAt);
-      assert.equal(fs.existsSync(supervised.paths.resultMarkdownPath), false);
-      await host.send(supervisedWorker, { kind: "prompt", text: "/lifecycle-abort" });
-      await until(() => readWorkerStatus(supervised.paths.statusPath)?.retryAt === undefined
-        && /abort/i.test(readWorkerStatus(supervised.paths.statusPath)?.supervisionReason ?? ""), "second quota request cancellation settles");
+      assert.equal(status(returned)?.state, "waiting", "nothing to return leaves it waiting");
+      await host.send(returnedWorker, { kind: "prompt", text: "/worker-return handed back" });
+      const handedBack = (await wait(returned, returnedWorker)).result;
+      assert.equal(handedBack.result, "handed back");
+      assert.equal(handedBack.retrospective, undefined);
+      assert.match(handedBack.guidance?.at(-1)?.text ?? "", /^Handed back early/);
+      assert.equal(traces(directory).filter((entry) => entry.event === "request").length, beforeReturn);
 
-      // Reverse ordering: submit while inference is busy, then enter quota waiting.
-      const delayedQuotaGuidance = "[quota-after-submit] supervised submission";
-      await humanGuidance(delayedQuotaGuidance);
-      await until(() => traces(directory).some((entry) => entry.prompt === delayedQuotaGuidance), "busy request before quota recovery");
-      assert.equal(readWorkerStatus(supervised.paths.statusPath)?.retryAt, undefined);
-      const beforeSubmission = readWorkerStatus(supervised.paths.statusPath)?.updatedAt;
-      const submission = host.send(supervisedWorker, { kind: "prompt", text: "/worker-submit supervised main" });
-      void submission.catch(() => undefined);
-      await until(() => readWorkerStatus(supervised.paths.statusPath)?.updatedAt !== beforeSubmission, "submission waits for busy request");
-      fs.writeFileSync(path.join(directory, "release-submit-quota"), "release");
-      await submission;
-      const submitted = (await wait(supervised, supervisedWorker)).result;
-      assert.equal(submitted.result, "supervised main");
-      assert.equal(submitted.retrospective, "fixture retrospective");
-      assert.ok(traces(directory).filter((entry) => entry.retrospective).every((entry) => entry.recoveryAllowed === false), "optional retrospectives never wait for quota");
+      // do({resume}) starts the same name and session again after the old worker closed.
+      const name = `life-${randomUUID().slice(0, 8)}`;
+      for (const label of ["original", "resumed"]) {
+        const work = request(label);
+        const worker = await start(`/worker-run ${work.paths.requestPath}`, name);
+        assert.equal((await wait(work, worker)).result.result, `fixture result: ${label}`);
+        await nativeHost.close(worker);
+      }
 
-      // Guidance dispatched during streaming keeps automatic capture and waits for guidance.
-      fs.rmSync(path.join(directory, "release"));
-      const continued = request("[hold] continued");
-      const continuedWorker = await run(continued);
-      await until(() => traces(directory).some((entry) => entry.prompt?.endsWith("[hold] continued")), "continue worker start");
-      await host.send(continuedWorker, { kind: "prompt", text: "/worker-continue continued guidance" });
+      // A message typed during a run is ordinary steering and changes no mode.
+      const steered = request("[hold] steered");
+      const steeredWorker = await run(steered);
+      await holding("steered");
+      await typed(steeredWorker, "human steering");
+      await until(() => traces(directory).some((entry) => entry.event === "input" && entry.text === "human steering"), "steering accepted");
+      assert.equal(status(steered)?.state, "running");
       fs.writeFileSync(path.join(directory, "release"), "release");
-      assert.equal((await wait(continued, continuedWorker)).result.result, "fixture result: continued guidance");
+      const steeredResult = (await wait(steered, steeredWorker)).result;
+      assert.equal(steeredResult.result, "fixture result: human steering");
+      assert.deepEqual(steeredResult.guidance?.map((item) => item.text), ["human steering"]);
+      fs.rmSync(path.join(directory, "release"));
+
+      // Quota recovery covers every main run. Escaping a wait stops only that
+      // request, and a return during a wait aborts it.
+      const quotaWaiter = request("[hold] quota");
+      const quotaWaiterWorker = await run(quotaWaiter);
+      await holding("quota");
+      await host.send(quotaWaiterWorker, { kind: "prompt", text: "/lifecycle-abort" });
+      await until(() => status(quotaWaiter)?.state === "waiting", "waiting before quota guidance");
+      const quotaGuidance = "[quota-wait] guidance";
+      await typed(quotaWaiterWorker, quotaGuidance);
+      await until(() => status(quotaWaiter)?.retryAt !== undefined, "continued request waits for quota");
+      assert.equal(status(quotaWaiter)?.state, "running");
+      assert.equal(traces(directory).findLast((entry) => entry.prompt === quotaGuidance)?.recoveryAllowed, true);
+      await host.send(quotaWaiterWorker, { kind: "prompt", text: "/lifecycle-abort" });
+      await until(() => status(quotaWaiter)?.retryAt === undefined && status(quotaWaiter)?.state === "waiting", "Escape-equivalent cancellation settles without disabling recovery");
+      await typed(quotaWaiterWorker, quotaGuidance);
+      await until(() => status(quotaWaiter)?.retryAt !== undefined, "next request still waits");
+      await host.send(quotaWaiterWorker, { kind: "prompt", text: "/worker-return returned during quota" });
+      const quotaReturn = (await wait(quotaWaiter, quotaWaiterWorker)).result;
+      assert.equal(quotaReturn.result, "returned during quota");
+      assert.equal(quotaReturn.retrospective, undefined);
+      assert.ok(traces(directory).filter((entry) => entry.retrospective).every((entry) => entry.recoveryAllowed === false), "optional retrospectives never wait for quota");
 
       const retry = request("[retry-once] retried");
       assert.equal((await wait(retry, await run(retry))).result.result, "fixture result: [retry-once] retried");
       assert.equal(traces(directory).filter((entry) => entry.event === "request" && entry.prompt?.endsWith("[retry-once] retried")).length, 2);
 
       // Terminal quota rejection must preserve the live worker for explicit recovery.
-      for (const recovery of ["continue", "finish"] as const) {
+      for (const recovery of ["continue", "return"] as const) {
         const beforeQuota = traces(directory).length;
         const quota = request(`[quota] ${recovery}`);
         const quotaWorker = await run(quota);
-        await until(() => readWorkerStatus(quota.paths.statusPath)?.state === "supervised"
-          && traces(directory).slice(beforeQuota).some((entry) => entry.event === "settled"), "quota rejection settles into supervision");
+        await until(() => status(quota)?.state === "waiting"
+          && traces(directory).slice(beforeQuota).some((entry) => entry.event === "settled"), "quota rejection settles into waiting");
         assert.equal(await nativeHost.state(quotaWorker), "running", "quota rejection must not close the worker");
         assert.equal(fs.existsSync(quota.paths.resultPath), false, "quota rejection must not publish a failed result");
         assert.equal(fs.existsSync(quota.paths.resultMarkdownPath), false);
-        assert.match(readWorkerStatus(quota.paths.statusPath)?.supervisionReason ?? "", /429 quota exceeded: fixture subscription usage limit/);
-        assert.doesNotMatch(readWorkerStatus(quota.paths.statusPath)?.supervisionReason ?? "", /fixture partial response/);
+        assert.match(status(quota)?.waitingReason ?? "", /429 quota exceeded: fixture subscription usage limit/);
+        assert.doesNotMatch(status(quota)?.waitingReason ?? "", /fixture partial response/);
         assert.equal(traces(directory).slice(beforeQuota).filter((entry) => entry.event === "request").length, 1,
           "quota exhaustion must not automatically retry or start a retrospective");
 
         const guidance = `quota ${recovery} recovery`;
-        await host.send(quotaWorker, { kind: "prompt", text: recovery === "continue"
-          ? `/worker-continue ${guidance}` : `/finish-worker-now ${guidance}` });
+        if (recovery === "continue") await typed(quotaWorker, guidance);
+        else await host.send(quotaWorker, { kind: "prompt", text: `/worker-return ${guidance}` });
         const quotaResult = (await wait(quota, quotaWorker)).result;
         assert.equal(quotaResult.isError, false);
         assert.equal(quotaResult.result, recovery === "continue" ? `fixture result: ${guidance}` : guidance);
-        assert.equal(quotaResult.retrospective, recovery === "continue"
-          ? "fixture retrospective" : "retrospective bypassed by /finish-worker-now.");
+        assert.equal(quotaResult.retrospective, recovery === "continue" ? "fixture retrospective" : undefined);
         assert.equal(traces(directory).slice(beforeQuota).filter((entry) => entry.event === "request").length,
-          recovery === "continue" ? 3 : 1, "finishing a quota-blocked worker must not require another model request");
+          recovery === "continue" ? 3 : 1, "returning a quota-blocked worker must not require another model request");
       }
 
       const beforeOverflow = traces(directory).length;
@@ -274,12 +298,30 @@ for (const kind of ["tmux", "herdr", "emacs"] as const) {
       assert.equal(preserved.isError, false);
       fs.rmSync(path.join(directory, "fail-retrospective"));
 
-      fs.rmSync(path.join(directory, "release"));
+      // /worker-return also stops work that is still running.
       const override = request("[hold] override");
       const overrideWorker = await run(override);
-      await until(() => traces(directory).some((entry) => entry.prompt?.endsWith("[hold] override")), "override worker start");
-      await host.send(overrideWorker, { kind: "prompt", text: "/finish-worker-now explicit recovery" });
+      await holding("override");
+      await host.send(overrideWorker, { kind: "prompt", text: "/worker-return explicit recovery" });
       assert.equal((await wait(override, overrideWorker)).result.result, "explicit recovery");
+
+      // A stalled Emacs says nothing about the worker: its process does.
+      if (kind === "emacs") {
+        const stalled = request("[hold] stalled");
+        const stalledWorker = await run(stalled);
+        await holding("stalled");
+        const stall = 25;
+        const output = waitForWorkerResult(pi, { ...stalled, target: stalledWorker, sessionFile, signal: AbortSignal.timeout(60_000) });
+        await until(() => status(stalled)?.pid !== undefined, "worker publishes its process");
+        const blocked = exec("emacsclient", ["--socket-name", endpoint, "--eval", `(let ((end (+ (float-time) ${stall}))) (while (< (float-time) end)) t)`]);
+        await delay((stall - 3) * 1000);
+        fs.writeFileSync(path.join(directory, "release"), "release");
+        assert.equal((await output).result.result, "fixture result: [hold] stalled");
+        await blocked;
+        await until(async () => await nativeHost.state(stalledWorker) !== "running", "stalled worker closes after its result");
+        target = undefined;
+        fs.rmSync(path.join(directory, "release"));
+      }
 
       const cancelled = request("[hold] cancelled");
       const cancelledWorker = await run(cancelled);
@@ -292,7 +334,7 @@ for (const kind of ["tmux", "herdr", "emacs"] as const) {
       target = undefined;
       assert.notEqual(await nativeHost.state(cancelledWorker), "running", "a closed native target must not remain running");
       assert.equal(fs.existsSync(cancelled.paths.resultPath), false);
-      t.diagnostic("Passed: matching result + separate retrospective, self-closing workers, per-request model/thinking/tool selection, draft-safe prompt submission, busy human takeover, submit/continue/finish recovery, quota rejection retains live supervision with explicit continue/finish recovery, real retry and default overflow-compaction settlement, retrospective failure, cancelled wait and owned close.");
+      t.diagnostic("Passed: matching result + separate retrospective, self-closing workers, per-request model/thinking/tool selection, draft-safe prompt submission, interrupted workers waiting, continued by a typed message or returned with /worker-return, steering without mode changes, quota rejection keeps the worker open, real retry and default overflow-compaction settlement, retrospective failure, an Emacs stall surviving a healthy worker, cancelled wait and owned close.");
     } catch (error) {
       t.diagnostic(`Fixture trace: ${JSON.stringify(traces(directory))}`);
       if (host && target) t.diagnostic(`Native output: ${await host.read(target, 80).catch(String)}`);
@@ -302,7 +344,8 @@ for (const kind of ["tmux", "herdr", "emacs"] as const) {
       if (ownedServer && kind === "tmux") await exec("tmux", ["-S", endpoint, "kill-server"]);
       if (ownedServer && kind === "emacs") await exec("emacsclient", ["--socket-name", endpoint, "--eval", "(kill-emacs)"]);
       for (const paths of artifacts) fs.rmSync(paths.artifactDir, { recursive: true, force: true });
-      fs.rmSync(directory, { recursive: true, force: true });
+      // A stopping Pi can still append its last trace line here.
+      fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     }
   });
 }

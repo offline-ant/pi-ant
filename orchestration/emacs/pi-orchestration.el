@@ -259,7 +259,9 @@ is exact; everything else goes through the terminal's key encoder."
       (list :success t))))
 
 (defun pi-orchestration--response (data)
-  "Return an asynchronous prompt receipt identified by DATA."
+  "Return an asynchronous prompt receipt identified by DATA.
+A settled receipt stays until its target closes: a stalled Emacs can answer a
+client that already timed out, so the next poll must get the same answer."
   (let* ((target (pi-orchestration--target (plist-get data :id)))
          (responses (plist-get target :responses))
          (request (plist-get data :request))
@@ -267,7 +269,6 @@ is exact; everything else goes through the terminal's key encoder."
     (cond
      ((eq response :pending) (list :pending t))
      (response
-      (remhash request responses)
       (list :success (plist-get response :success)
             :error (plist-get response :error)))
      (t (error "Missing prompt receipt: %s" request)))))
@@ -332,7 +333,7 @@ finishes cleanup when graceful shutdown exceeds the caller's deadline."
   "Stop target ID on the user's behalf and close its buffers.
 A shell target is killed at once.  A Pi target gets SIGTERM, so it can stop
 its own tool processes, and is killed if it still runs after five seconds.
-Pi notices the missing target at its next read."
+Pi notices its worker's process is gone at its next check."
   (when (eq (plist-get (pi-orchestration--close id) :pending) t)
     (let ((deadline (+ (float-time) 5))
           (timer nil))

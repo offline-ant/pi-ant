@@ -315,7 +315,6 @@ for (const order of ["worker-first", "compactor-first"] as const) {
       { state: "pending", toolCallId: "first" }, { state: "resumed", toolCallId: "first" },
       { state: "pending", toolCallId: "second" }, { state: "resumed", toolCallId: "second" },
     ]);
-    for (const request of f.workRequests) assert.doesNotMatch(text(request), /A human is supervising/);
   });
 }
 
@@ -345,8 +344,8 @@ for (const failure of ["empty", "error", "cancelled", "cancel-before", "moved-be
     const paths = await runWorker(t, f, [compactCall("Do the remaining work")]);
     assert.equal(fs.existsSync(paths.resultPath), false);
     const status = readWorkerStatus(paths.statusPath);
-    assert.equal(status?.state, "supervised");
-    assert.match(status?.supervisionReason ?? "", /Self-compaction/);
+    assert.equal(status?.state, "waiting");
+    assert.match(status?.waitingReason ?? "", /Self-compaction/);
     assert.equal(f.handoffs.length, 2);
     assert.equal(f.handoffs[0]?.state, "pending");
     assert.equal(f.handoffs[1]?.state, "failed");
@@ -355,9 +354,9 @@ for (const failure of ["empty", "error", "cancelled", "cancel-before", "moved-be
     assert.equal(f.workRequests.length, 2, "no unsolicited continuation");
     assert.equal(f.compactions().length, failure === "moved-after" ? 1 : 0);
 
-    // Explicit human recovery still uses the normal automatic completion path.
+    // A typed message continues through the normal automatic completion path.
     f.work.push(fauxAssistantMessage("Recovered result"), fauxAssistantMessage("everything was ok"));
-    await f.session.prompt("/worker-continue Finish without compacting");
+    await f.session.prompt("Finish without compacting");
     await f.settle();
     const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "compacting-worker");
     assert.equal(result.result, "Recovered result");
@@ -395,7 +394,7 @@ test("failed compaction during retrospective preserves the main result", { timeo
   assert.equal(readWorkerStatus(paths.statusPath)?.state, "closed");
 });
 
-test("human supervision survives a successful compaction handoff", { timeout: 20_000 }, async (t) => {
+test("human steering during a compaction handoff keeps automatic completion", { timeout: 20_000 }, async (t) => {
   const f = await fixture(t, 300, [workerFrame]);
   await f.run(`Inherited history ${PAD}`, [fauxAssistantMessage("Earlier work")]);
   const paths = await runWorker(t, f, [
@@ -405,14 +404,10 @@ test("human supervision survives a successful compaction handoff", { timeout: 20
     },
     compactCall("Continue the unfinished work"),
     fauxAssistantMessage("Discussion reply"),
+    fauxAssistantMessage("everything was ok"),
   ]);
-  assert.equal(readWorkerStatus(paths.statusPath)?.state, "supervised");
-  assert.equal(fs.existsSync(paths.resultPath), false);
   assert.equal(f.handoffs.at(-1)?.state, "resumed");
   assert.equal(f.compactions().length, 1);
-  f.work.push(fauxAssistantMessage("everything was ok"));
-  await f.session.prompt("/worker-submit");
-  await f.settle();
   const result = parseWorkerResult(fs.readFileSync(paths.resultPath, "utf8"), paths.resultPath, "compacting-worker");
   assert.equal(result.result, "Discussion reply");
 });

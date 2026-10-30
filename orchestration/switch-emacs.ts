@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { availableHosts } from "./host.ts";
-import { emacsOperation, type EmacsExec } from "./hosts/emacs.ts";
+import { emacsOperation, emacsPoll, type EmacsExec } from "./hosts/emacs.ts";
 import type { PreparedSwitch, SwitchSource } from "./switch-destinations.ts";
 
 const execute = promisify(execFile);
@@ -16,11 +16,12 @@ const SOCKET_EXPRESSION = "(expand-file-name server-name server-socket-dir)";
 export const execEmacs: EmacsExec = async (command, args, options) => {
   try {
     const { stdout, stderr } = await execute(command, args, { ...options, maxBuffer: 1024 * 1024 });
-    return { code: 0, stdout, stderr };
+    return { code: 0, stdout, stderr, killed: false };
   } catch (error) {
-    const failure = error as { code?: unknown; stdout?: string; stderr?: string };
-    if (typeof failure.code !== "number") throw error;
-    return { code: failure.code, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "" };
+    const failure = error as { code?: unknown; stdout?: string; stderr?: string; killed?: boolean };
+    const killed = failure.killed === true;
+    if (typeof failure.code !== "number" && !killed) throw error;
+    return { code: typeof failure.code === "number" ? failure.code : 1, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "", killed };
   }
 };
 
@@ -46,7 +47,7 @@ export async function emacsDaemon(environment: NodeJS.ProcessEnv, exec: EmacsExe
   const explicit = availableHosts(environment).find((host) => host.kind === "emacs")?.endpoint;
   if (explicit) {
     const result = await exec("emacsclient", ["--socket-name", explicit, "--eval", "t"], { timeout: 10_000 }).catch(() => undefined);
-    if (result?.code !== 0) throw new Error(`Cannot reach the Emacs server ${explicit}; /switch starts only pi-emacs daemons.`);
+    if (result?.code !== 0 || result.killed) throw new Error(`Cannot reach the Emacs server ${explicit}; /switch starts only pi-emacs daemons.`);
     return explicit;
   }
   let result: Awaited<ReturnType<EmacsExec>>;
@@ -78,11 +79,11 @@ export async function prepareEmacsSwitch(source: SwitchSource, endpoint: string,
         opened = await call({ operation: "switch", id, sessionFile: source.sessionFile, cwd: source.cwd, args: source.args, env });
         const deadline = Date.now() + READY_TIMEOUT_MS;
         while (true) {
-          const state = await call({ operation: "switch-state", id });
-          if (state.ready === true) break;
-          if (typeof state.failure === "string") throw new Error(state.failure);
-          if (state.state === "missing") throw new Error("The Emacs session buffer was closed during startup");
-          if (state.state !== "running" && opened.refreshed !== true) throw new Error("Pi exited during startup");
+          const state = await emacsPoll(() => call({ operation: "switch-state", id }));
+          if (state?.ready === true) break;
+          if (typeof state?.failure === "string") throw new Error(state.failure);
+          if (state?.state === "missing") throw new Error("The Emacs session buffer was closed during startup");
+          if (state && state.state !== "running" && opened.refreshed !== true) throw new Error("Pi exited during startup");
           if (Date.now() >= deadline) throw new Error("Emacs session readiness timed out");
           await delay(50);
         }

@@ -20,7 +20,7 @@ function companion(answer: (data: Record<string, unknown>) => Record<string, unk
     const data = JSON.parse(Buffer.from(encoded, "base64").toString("utf8")) as Record<string, unknown>;
     operations.push(data);
     const reply = Buffer.from(JSON.stringify(answer(data)), "utf8").toString("base64");
-    return { code: 0, stdout: `${JSON.stringify(reply)}\n`, stderr: "" };
+    return { code: 0, stdout: `${JSON.stringify(reply)}\n`, stderr: "", killed: false };
   };
   return { exec, operations };
 }
@@ -44,6 +44,15 @@ test("Emacs switch opens an ordinary root session and waits for confirmed readin
     Array(3).fill(["switch-state", opened.id, undefined]));
 });
 
+test("readiness polling outlasts an Emacs that does not answer", async () => {
+  let polls = 0;
+  const { exec } = companion((data) => data.operation === "switch" ? { buffer: "chat", refreshed: false } : { state: "running", ready: true });
+  const stalling: EmacsExec = async (command, args, options) => args[3]!.includes("dispatch") && ++polls === 2
+    ? { code: 0, stdout: "", stderr: "", killed: true } : exec(command, args, options);
+  assert.match(await (await prepareEmacsSwitch(source, "/tmp/emacs/pi", stalling)).start(), /buffer chat/);
+  assert.equal(polls, 3);
+});
+
 test("a failed new session is closed, while a failed reload of an open view is left alone", async () => {
   for (const refreshed of [false, true]) {
     const { exec, operations } = companion((data) => data.operation === "switch"
@@ -64,13 +73,13 @@ test("pi-emacs resolves and starts the daemon without leaking this frontend's id
     PI_ORCHESTRATION_HOST: "herdr", PI_ORCHESTRATION_ENDPOINT: "/tmp/herdr.sock", PI_ORCHESTRATION_CONTROL: "/tmp/c", TMUX: "x" };
   const socket = await emacsDaemon(environment, async (command, args, options) => {
     calls.push({ command, args, env: options.env });
-    return { code: 0, stdout: "\x1b[1 q\"/tmp/emacs1002/disposable\"\n", stderr: "Starting Emacs daemon.\n" };
+    return { code: 0, stdout: "\x1b[1 q\"/tmp/emacs1002/disposable\"\n", stderr: "Starting Emacs daemon.\n", killed: false };
   });
   assert.equal(socket, "/tmp/emacs1002/disposable");
   assert.deepEqual(calls.map(({ command, args }) => [command, args]), [["pi-emacs", ["-e", "(expand-file-name server-name server-socket-dir)"]]]);
   assert.deepEqual(calls[0]!.env, { HOME: "/home/x", PATH: "/bin", PI_EMACS_SERVER: "disposable" });
   assert.deepEqual(emacsLauncherEnvironment({ PI_NESTED: "1", TMUX_PANE: "%1", KEEP: "y" }), { KEEP: "y" });
-  await assert.rejects(emacsDaemon(environment, async () => ({ code: 1, stdout: "", stderr: "emacsclient: can't find socket\n" })),
+  await assert.rejects(emacsDaemon(environment, async () => ({ code: 1, stdout: "", stderr: "emacsclient: can't find socket\n", killed: false })),
     /pi-emacs did not start or reach its Emacs daemon: emacsclient: can't find socket/);
   await assert.rejects(emacsDaemon(environment, async () => { throw Object.assign(new Error("spawn pi-emacs ENOENT"), { code: "ENOENT" }); }),
     /Cannot run pi-emacs/);
@@ -81,9 +90,11 @@ test("an explicitly selected Emacs host is used only when it already runs", asyn
   const seen: string[][] = [];
   assert.equal(await emacsDaemon(environment, async (command, args) => {
     seen.push([command, ...args]);
-    return { code: 0, stdout: "t\n", stderr: "" };
+    return { code: 0, stdout: "t\n", stderr: "", killed: false };
   }), "/tmp/emacs/other");
   assert.deepEqual(seen, [["emacsclient", "--socket-name", "/tmp/emacs/other", "--eval", "t"]]);
-  await assert.rejects(emacsDaemon(environment, async () => ({ code: 1, stdout: "", stderr: "" })),
-    /Cannot reach the Emacs server \/tmp\/emacs\/other; \/switch starts only pi-emacs daemons/);
+  for (const unreachable of [{ code: 1, killed: false }, { code: 0, killed: true }]) {
+    await assert.rejects(emacsDaemon(environment, async () => ({ ...unreachable, stdout: "", stderr: "" })),
+      /Cannot reach the Emacs server \/tmp\/emacs\/other; \/switch starts only pi-emacs daemons/);
+  }
 });
